@@ -1,4 +1,7 @@
-FROM node:22-slim AS frontend-builder
+# ============================
+# Stage 1: Frontend Builder
+# ============================
+FROM --platform=$BUILDPLATFORM node:22-slim AS frontend-builder
 
 WORKDIR /app
 
@@ -8,11 +11,14 @@ COPY frontend/ ./frontend/
 
 RUN cd frontend && npm ci && npm run build
 
-FROM node:22-slim AS backend-deps
+# ============================
+# Stage 2: Backend Dependencies
+# ============================
+FROM --platform=$BUILDPLATFORM node:22-slim AS backend-deps
 
 WORKDIR /app/backend
 
-# better-sqlite3 需要在安装阶段使用 python3、make、g++
+# better-sqlite3 needs python3, make, g++ for native compilation
 RUN apt-get update \
   && apt-get install -y --no-install-recommends python3 make g++ \
   && rm -rf /var/lib/apt/lists/*
@@ -23,7 +29,10 @@ RUN npm ci --omit=dev \
   && apt-get purge -y --auto-remove python3 make g++ \
   && rm -rf /var/lib/apt/lists/*
 
-FROM node:22-slim AS production
+# ============================
+# Stage 3: Production
+# ============================
+FROM --platform=$TARGETPLATFORM node:22-slim AS production
 
 WORKDIR /app
 
