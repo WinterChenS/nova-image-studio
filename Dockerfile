@@ -12,7 +12,7 @@ COPY frontend/ ./frontend/
 RUN cd frontend && npm ci && npm run build
 
 # ============================
-# Stage 2: Backend Dependencies
+# Stage 2: Backend Dependencies (build-time deps only)
 # ============================
 FROM --platform=$BUILDPLATFORM node:22-slim AS backend-deps
 
@@ -38,8 +38,16 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 
+# Install build deps for better-sqlite3 native compilation in target arch
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends python3 make g++ \
+  && rm -rf /var/lib/apt/lists/*
+
 COPY backend/ ./backend/
-COPY --from=backend-deps /app/backend/node_modules/ ./backend/node_modules/
+
+# Reinstall backend deps in the target architecture (compiles better-sqlite3 native addon)
+RUN npm ci --omit=dev
+
 COPY --from=frontend-builder /app/frontend/out/ ./frontend/out/
 
 RUN mkdir -p /app/backend/data
