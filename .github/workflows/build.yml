@@ -36,26 +36,27 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build Docker image ($${{ matrix.arch }})
+      - name: Build Docker image (${{ matrix.arch }})
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/$${{ matrix.arch }}
+          platforms: linux/${{ matrix.arch }}
           push: false
           load: true
-          tags: $${{ env.IMAGE_NAME }}:$${{ matrix.arch }}-$${{ github.sha }}
+          tags: ${{ env.IMAGE_NAME }}:${{ matrix.arch }}-${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Save image to tar ($${{ matrix.arch }})
+      - name: Save image to tar (${{ matrix.arch }})
         run: |
-          docker save $${{ env.IMAGE_NAME }}:$${{ matrix.arch }}-$${{ github.sha }}             -o $${{ env.IMAGE_NAME }}-$${{ matrix.arch }}-$${{ github.sha }}.tar
+          docker save ${{ env.IMAGE_NAME }}:${{ matrix.arch }}-${{ github.sha }} \
+            -o ${{ env.IMAGE_NAME }}-${{ matrix.arch }}-${{ github.sha }}.tar
 
       - name: Upload image artifact
         uses: actions/upload-artifact@v4
         with:
-          name: $${{ env.IMAGE_NAME }}-$${{ matrix.arch }}-$${{ github.sha }}.tar
-          path: $${{ env.IMAGE_NAME }}-$${{ matrix.arch }}-$${{ github.sha }}.tar
+          name: ${{ env.IMAGE_NAME }}-${{ matrix.arch }}-${{ github.sha }}.tar
+          path: ${{ env.IMAGE_NAME }}-${{ matrix.arch }}-${{ github.sha }}.tar
           retention-days: 1
 
   release:
@@ -68,16 +69,16 @@ jobs:
       - name: Download all image artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: $${{ env.IMAGE_NAME }}-*-$${{ github.sha }}.tar
+          pattern: ${{ env.IMAGE_NAME }}-*-${{ github.sha }}.tar
           path: images
           merge-multiple: true
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: $${{ github.ref_name }}
-          name: "Release $${{ github.ref_name }}"
+          tag_name: ${{ github.ref_name }}
+          name: "Release ${{ github.ref_name }}"
           generate_release_notes: true
           files: |
-            images/$${{ env.IMAGE_NAME }}-amd64-$${{ github.sha }}.tar
-            images/$${{ env.IMAGE_NAME }}-arm64-$${{ github.sha }}.tar
+            images/${{ env.IMAGE_NAME }}-amd64-${{ github.sha }}.tar
+            images/${{ env.IMAGE_NAME }}-arm64-${{ github.sha }}.tar
