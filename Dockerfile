@@ -12,9 +12,9 @@ COPY frontend/ ./frontend/
 RUN cd frontend && npm ci && npm run build
 
 # ============================
-# Stage 2: Backend Dependencies (build-time deps only)
+# Stage 2: Backend Dependencies (compiles native addons for BUILDPLATFORM)
 # ============================
-FROM --platform=$BUILDPLATFORM node:22-slim AS backend-deps
+FROM --platform=$BUILDPLATFORM node:22-slim AS backend-deps-amd64
 
 WORKDIR /app/backend
 
@@ -30,7 +30,7 @@ RUN npm ci --omit=dev \
   && rm -rf /var/lib/apt/lists/*
 
 # ============================
-# Stage 3: Production
+# Stage 3: Production (multi-arch)
 # ============================
 FROM --platform=$TARGETPLATFORM node:22-slim AS production
 
@@ -43,10 +43,15 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends python3 make g++ \
   && rm -rf /var/lib/apt/lists/*
 
-COPY backend/ ./backend/
+COPY backend/package.json backend/package-lock.json ./
 
-# Reinstall backend deps in the target architecture (compiles better-sqlite3 native addon)
-RUN npm ci --omit=dev
+# Install backend deps in target architecture (compiles better-sqlite3 native addon)
+# Using --prefer-offline to speed up and avoid lockfile platform mismatch issues
+RUN npm install --omit=dev --prefer-offline
+
+# Clean up build deps
+RUN apt-get purge -y --auto-remove python3 make g++ \
+  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=frontend-builder /app/frontend/out/ ./frontend/out/
 
