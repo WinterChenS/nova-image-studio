@@ -1,0 +1,10 @@
+# Maven
+target/
+
+# Local env (never commit credentials) — root .gitignore also covers `.env`
+.env
+.env.*
+
+# IDE
+.idea/
+*.iml
