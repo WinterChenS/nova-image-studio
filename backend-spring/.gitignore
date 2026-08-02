@@ -4,6 +4,7 @@ target/
 # Local env (never commit credentials) — root .gitignore also covers `.env`
 .env
 .env.*
+!.env.example
 
 # IDE
 .idea/
