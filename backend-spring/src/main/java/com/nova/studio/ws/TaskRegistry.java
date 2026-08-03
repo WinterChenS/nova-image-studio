@@ -1,9 +1,5 @@
 package com.nova.studio.ws;
 
-import tools.jackson.core.JacksonException;
-import tools.jackson.databind.JsonNode;
-import tools.jackson.databind.ObjectMapper;
-
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -12,54 +8,67 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Minimal in-memory task registry + subscription bookkeeping for the M0 spike.
+ * WebSocket subscription bookkeeping (T1.7) — port of the Node backend's
+ * {@code taskSubscriptions} / {@code queueSubscribers} maps. Messages are
+ * opaque {@code Map}s (the serialized {@code NovaTaskResponse} shape) so the
+ * registry stays decoupled from the persistence layer: production looks tasks
+ * up via the injected {@link WsTaskLookup}, while the in-memory {@code put}
+ * path exists for tests and the spike controller.
  *
- * <p>Replicates the subset of the Node backend's WS semantics needed by the
- * frontend {@code ccode-task-socket.ts} client: subscribeTasks immediate push,
- * terminal auto-unsubscribe, per-socket subscription limits. The real persistent
- * store (PostgreSQL tasks/task_items) lands in M1; this registry only backs the
- * WS protocol spike.
+ * <p>Semantics (ARCH §E.3, 1:1 with Node): ≤ {@code maxIdsPerMessage} ids per
+ * subscribeTasks message, ≤ {@code maxSubscriptionsPerSocket} ids per socket,
+ * immediate push of the current task state, terminal tasks
+ * (completed/failed/expired) auto-unsubscribed after the push, unknown ids →
+ * expired fallback.
  */
 public class TaskRegistry {
 
-    /** Serialized task shape sent to the frontend (field-compatible subset). */
-    public record Task(String id, String status, String error, String resultJson, String createdAt) {
-        public Map<String, Object> toMessage() {
-            Map<String, Object> map = new LinkedHashMap<>();
-            map.put("id", id);
-            map.put("status", status);
-            map.put("error", error);
-            map.put("resultJson", resultJson);
-            map.put("createdAt", createdAt);
-            return map;
-        }
-    }
-
-    public static final String STATUS_QUEUED = "queued";
+    public static final String STATUS_QUEUED = "排队中";
     public static final String STATUS_PROCESSING = "processing";
     public static final String STATUS_COMPLETED = "completed";
     public static final String STATUS_FAILED = "failed";
     public static final String STATUS_EXPIRED = "expired";
 
-    private final Map<String, Task> tasks = new ConcurrentHashMap<>();
+    /** Hardcoded expired payload — Node broadcastTaskExpired/serializeTask fallback. */
+    public static final String EXPIRED_ERROR = "该任务已超出取回时间";
+
+    private final WsTaskLookup lookup;
+    private final Map<String, Map<String, Object>> inMemoryTasks = new ConcurrentHashMap<>();
     private final Map<String, Set<String>> subscriptions = new ConcurrentHashMap<>();
+    private final Set<String> queueSubscribers = ConcurrentHashMap.newKeySet();
 
-    public void put(Task task) {
-        tasks.put(task.id(), task);
+    public TaskRegistry() {
+        this(null);
     }
 
-    public Task get(String id) {
-        return tasks.get(id);
+    public TaskRegistry(WsTaskLookup lookup) {
+        this.lookup = lookup;
     }
 
-    public void update(Task task) {
-        tasks.put(task.id(), task);
+    // ===== in-memory store (tests / spike controller) =====
+
+    public void put(String id, Map<String, Object> task) {
+        inMemoryTasks.put(id, task);
     }
 
-    /** Subscribes a socket (identified by sessionId) to task ids, honoring limits. */
-    public List<Task> subscribe(String sessionId, List<String> taskIds, int maxIdsPerMessage, int maxPerSocket) {
+    public Map<String, Object> get(String id) {
+        return inMemoryTasks.get(id);
+    }
+
+    // ===== subscriptions =====
+
+    /**
+     * Subscribes a socket to task ids honoring both limits; pushes the current
+     * state of each id (lookup → in-memory → expired fallback). Terminal states
+     * are auto-unsubscribed.
+     */
+    public List<Map<String, Object>> subscribe(String sessionId, List<String> taskIds,
+                                               int maxIdsPerMessage, int maxPerSocket) {
+        if (taskIds == null) {
+            return List.of();
+        }
         Set<String> set = subscriptions.computeIfAbsent(sessionId, k -> ConcurrentHashMap.newKeySet());
-        List<Task> pushed = new ArrayList<>();
+        List<Map<String, Object>> pushed = new ArrayList<>();
         int added = 0;
         for (String id : taskIds) {
             if (added >= maxIdsPerMessage) {
@@ -74,12 +83,9 @@ public class TaskRegistry {
             if (set.add(id)) {
                 added++;
             }
-            Task task = tasks.get(id);
-            if (task == null) {
-                task = new Task(id, STATUS_EXPIRED, "该任务已超出取回时间", null, null);
-            }
+            Map<String, Object> task = resolveTask(id);
             pushed.add(task);
-            if (isTerminal(task.status())) {
+            if (isTerminal(statusOf(task))) {
                 set.remove(id);
             }
         }
@@ -96,44 +102,68 @@ public class TaskRegistry {
         }
     }
 
-    /** Broadcasts a task update to every socket subscribed to that task id. */
-    public List<String> broadcast(Task task) {
-        tasks.put(task.id(), task);
+    /**
+     * Broadcasts a task update to every socket subscribed to that id; terminal
+     * tasks auto-unsubscribe. Returns the target session ids.
+     */
+    public List<String> broadcast(Map<String, Object> task) {
+        if (task == null) {
+            return List.of();
+        }
+        String id = String.valueOf(task.get("id"));
+        inMemoryTasks.put(id, task);
         List<String> targets = new ArrayList<>();
         subscriptions.forEach((sessionId, ids) -> {
-            if (ids.contains(task.id())) {
+            if (ids.contains(id)) {
                 targets.add(sessionId);
-                if (isTerminal(task.status())) {
-                    ids.remove(task.id());
+                if (isTerminal(statusOf(task))) {
+                    ids.remove(id);
                 }
             }
         });
         return targets;
     }
 
-    public Set<String> subscribedSessions() {
-        return subscriptions.keySet();
+    // ===== queue subscriptions =====
+
+    public Set<String> queueSubscribers() {
+        return queueSubscribers;
+    }
+
+    public void subscribeQueue(String sessionId) {
+        queueSubscribers.add(sessionId);
+    }
+
+    public void unsubscribeQueue(String sessionId) {
+        queueSubscribers.remove(sessionId);
+    }
+
+    // ===== helpers =====
+
+    private Map<String, Object> resolveTask(String id) {
+        if (lookup != null) {
+            Map<String, Object> task = lookup.loadTaskMessage(id);
+            if (task != null) {
+                return task;
+            }
+        }
+        Map<String, Object> task = inMemoryTasks.get(id);
+        if (task != null) {
+            return task;
+        }
+        Map<String, Object> expired = new LinkedHashMap<>();
+        expired.put("id", id);
+        expired.put("status", STATUS_EXPIRED);
+        expired.put("error", EXPIRED_ERROR);
+        return expired;
+    }
+
+    private static String statusOf(Map<String, Object> task) {
+        Object status = task == null ? null : task.get("status");
+        return status == null ? null : String.valueOf(status);
     }
 
     public static boolean isTerminal(String status) {
         return STATUS_COMPLETED.equals(status) || STATUS_FAILED.equals(status) || STATUS_EXPIRED.equals(status);
-    }
-
-    /** Serializes a message to JSON; returns null when serialization fails. */
-    public static String toJson(ObjectMapper mapper, Object payload) {
-        try {
-            return mapper.writeValueAsString(payload);
-        } catch (JacksonException e) {
-            return null;
-        }
-    }
-
-    /** Parses a client message; returns null for invalid JSON. */
-    public static JsonNode parse(ObjectMapper mapper, String raw) {
-        try {
-            return mapper.readTree(raw);
-        } catch (Exception e) {
-            return null;
-        }
     }
 }

@@ -9,7 +9,6 @@ import org.springframework.boot.flyway.autoconfigure.FlywayAutoConfiguration;
 import org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
-import org.springframework.context.annotation.ComponentScan;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpEntity;
@@ -61,8 +60,8 @@ class NovaWebSocketE2ETest {
             DataRedisAutoConfiguration.class,
             FlywayAutoConfiguration.class
     })
-    @Import({com.nova.studio.config.WebSocketConfig.class, com.nova.studio.config.WsCoreConfig.class})
-    @ComponentScan(basePackages = "com.nova.studio.web")
+    @Import({com.nova.studio.config.WebSocketConfig.class, com.nova.studio.config.WsCoreConfig.class,
+            com.nova.studio.web.SpikeTaskController.class})
     static class WsTestApp {
     }
 

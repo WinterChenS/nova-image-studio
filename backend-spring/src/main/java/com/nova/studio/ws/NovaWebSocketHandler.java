@@ -1,7 +1,5 @@
 package com.nova.studio.ws;
 
-import tools.jackson.databind.JsonNode;
-import tools.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.web.socket.CloseStatus;
@@ -9,33 +7,38 @@ import org.springframework.web.socket.PingMessage;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Nova WebSocket handler — minimal protocol replica (M0 spike, T0.4).
- *
- * <p>Message protocol (1:1 with the Node backend, see ARCH §E.3 and
- * {@code frontend/src/lib/ccode-task-socket.ts}):
+ * Nova WebSocket handler (T1.7) — full protocol replica of the Node backend's
+ * {@code setupWebSocketServer} / {@code handleClientMessage} ({@code server.js}),
+ * driven by the frontend {@code ccode-task-socket.ts} contract (ARCH §E.3):
  * <ul>
- *   <li>C→S {@code {"type":"subscribeTasks","taskIds":[...]}} — immediate task push,
- *       ≤ {@code maxTaskIdsPerMessage} ids, ≤ {@code maxSubscriptionsPerSocket} per socket,
- *       terminal tasks auto-unsubscribed</li>
- *   <li>C→S {@code {"type":"unsubscribeTasks","taskIds":[...]}}</li>
- *   <li>C→S {@code {"type":"subscribeQueue"}} — immediate queueStatus push</li>
- *   <li>C→S {@code {"type":"unsubscribeQueue"}}</li>
- *   <li>C→S {@code {"type":"ping"}} → S→C {@code {"type":"pong"}}</li>
- *   <li>S→C {@code {"type":"error","code","message"}} — INVALID_JSON / INVALID_TYPE / UNKNOWN_TYPE</li>
- *   <li>Server heartbeat: ping every {@code heartbeatIntervalMs}; terminate after
- *       {@code maxHeartbeatMisses} missed pongs beyond grace</li>
+ *   <li>{@code subscribeTasks} — ≤200 ids/message, ≤500 ids/socket, immediate
+ *       push, terminal auto-unsubscribe, unknown id → expired fallback;</li>
+ *   <li>{@code unsubscribeTasks} / {@code subscribeQueue} (immediate push) /
+ *       {@code unsubscribeQueue} / {@code ping}→{@code pong};</li>
+ *   <li>error codes INVALID_JSON / INVALID_TYPE / UNKNOWN_TYPE;</li>
+ *   <li>server heartbeat: protocol ping every {@code heartbeatIntervalMs}, 10s
+ *       grace, terminate after {@code maxHeartbeatMisses} missed pongs;</li>
+ *   <li>queue broadcasts throttled to {@code queueBroadcastThrottleMs} (Node 200ms
+ *       debounce via setTimeout).</li>
  * </ul>
+ * Implements {@link TaskEventBroadcaster} so the task pipeline pushes task
+ * updates and queue stats without depending on WS classes.
  */
-public class NovaWebSocketHandler extends TextWebSocketHandler {
+public class NovaWebSocketHandler extends TextWebSocketHandler implements TaskEventBroadcaster {
 
     private static final Logger log = LoggerFactory.getLogger(NovaWebSocketHandler.class);
 
@@ -46,20 +49,49 @@ public class NovaWebSocketHandler extends TextWebSocketHandler {
 
     private final ObjectMapper objectMapper;
     private final TaskRegistry taskRegistry;
+    private final WsTaskLookup taskLookup;
+    private final WsQueueStatusProvider queueStatusProvider;
 
     private final int maxTaskIdsPerMessage;
     private final int maxSubscriptionsPerSocket;
     private final long heartbeatIntervalMs;
     private final long pongGraceMs;
     private final int maxHeartbeatMisses;
+    private final long queueBroadcastThrottleMs;
     private final ScheduledExecutorService scheduler;
 
     private final Map<String, HeartbeatState> heartbeats = new ConcurrentHashMap<>();
     private final Map<String, WebSocketSession> sessions = new ConcurrentHashMap<>();
+    private final AtomicBoolean queueBroadcastPending = new AtomicBoolean(false);
 
     record HeartbeatState(WebSocketSession session, long[] lastPongAt, int[] missed) {
     }
 
+    public NovaWebSocketHandler(ObjectMapper objectMapper,
+                                TaskRegistry taskRegistry,
+                                WsTaskLookup taskLookup,
+                                WsQueueStatusProvider queueStatusProvider,
+                                int maxTaskIdsPerMessage,
+                                int maxSubscriptionsPerSocket,
+                                long heartbeatIntervalMs,
+                                long pongGraceMs,
+                                int maxHeartbeatMisses,
+                                long queueBroadcastThrottleMs,
+                                ScheduledExecutorService scheduler) {
+        this.objectMapper = objectMapper;
+        this.taskRegistry = taskRegistry;
+        this.taskLookup = taskLookup;
+        this.queueStatusProvider = queueStatusProvider;
+        this.maxTaskIdsPerMessage = maxTaskIdsPerMessage;
+        this.maxSubscriptionsPerSocket = maxSubscriptionsPerSocket;
+        this.heartbeatIntervalMs = heartbeatIntervalMs;
+        this.pongGraceMs = pongGraceMs;
+        this.maxHeartbeatMisses = maxHeartbeatMisses;
+        this.queueBroadcastThrottleMs = queueBroadcastThrottleMs;
+        this.scheduler = scheduler;
+    }
+
+    /** Backwards-compatible constructor (heartbeat unit tests) with in-memory defaults. */
     public NovaWebSocketHandler(ObjectMapper objectMapper,
                                 TaskRegistry taskRegistry,
                                 int maxTaskIdsPerMessage,
@@ -68,14 +100,22 @@ public class NovaWebSocketHandler extends TextWebSocketHandler {
                                 long pongGraceMs,
                                 int maxHeartbeatMisses,
                                 ScheduledExecutorService scheduler) {
-        this.objectMapper = objectMapper;
-        this.taskRegistry = taskRegistry;
-        this.maxTaskIdsPerMessage = maxTaskIdsPerMessage;
-        this.maxSubscriptionsPerSocket = maxSubscriptionsPerSocket;
-        this.heartbeatIntervalMs = heartbeatIntervalMs;
-        this.pongGraceMs = pongGraceMs;
-        this.maxHeartbeatMisses = maxHeartbeatMisses;
-        this.scheduler = scheduler;
+        this(objectMapper, taskRegistry, taskRegistry::get, defaultQueueStatusProvider(),
+                maxTaskIdsPerMessage, maxSubscriptionsPerSocket, heartbeatIntervalMs, pongGraceMs,
+                maxHeartbeatMisses, 200, scheduler);
+    }
+
+    public static WsQueueStatusProvider defaultQueueStatusProvider() {
+        return () -> {
+            Map<String, Object> stats = new LinkedHashMap<>();
+            stats.put("concurrencyLimit", 50);
+            stats.put("configuredConcurrency", 50);
+            stats.put("processingCount", 0);
+            stats.put("queuedCount", 0);
+            stats.put("pendingCount", 0);
+            stats.put("acceptingNewTasks", true);
+            return stats;
+        };
     }
 
     @Override
@@ -114,9 +154,6 @@ public class NovaWebSocketHandler extends TextWebSocketHandler {
                 return;
             }
         }
-        // Protocol-level ping: browsers auto-respond with pong (see afterConnectionEstablished
-        // + handlePongMessage). The application-level {"type":"ping"}→{"type":"pong"} exchange
-        // is handled separately in handleTextMessage for the frontend client.
         try {
             session.sendMessage(new PingMessage());
         } catch (Exception e) {
@@ -127,7 +164,7 @@ public class NovaWebSocketHandler extends TextWebSocketHandler {
     @Override
     protected void handleTextMessage(WebSocketSession session, TextMessage message) {
         String raw = message.getPayload();
-        JsonNode msg = TaskRegistry.parse(objectMapper, raw);
+        JsonNode msg = parseJson(objectMapper, raw);
         if (msg == null) {
             send(session, error("INVALID_JSON", "消息不是合法 JSON"));
             return;
@@ -140,34 +177,10 @@ public class NovaWebSocketHandler extends TextWebSocketHandler {
         switch (type) {
             case "subscribeTasks" -> handleSubscribeTasks(session, msg.get("taskIds"));
             case "unsubscribeTasks" -> handleUnsubscribeTasks(session, msg.get("taskIds"));
-            case "subscribeQueue" -> {
-                // queueSubscribers is a no-op set in the spike; immediately push queueStatus.
-                Map<String, Object> stats = new java.util.LinkedHashMap<>();
-                stats.put("concurrencyLimit", 50);
-                stats.put("processingCount", 0);
-                stats.put("queuedCount", 0);
-                stats.put("pendingCount", 0);
-                stats.put("acceptingNewTasks", true);
-                Map<String, Object> payload = new java.util.LinkedHashMap<>();
-                payload.put("type", MSG_QUEUE_STATUS);
-                payload.put("stats", stats);
-                send(session, payload);
-            }
-            case "unsubscribeQueue" -> {
-                // no-op in spike (no persistent queue subscription state)
-            }
+            case "subscribeQueue" -> handleSubscribeQueue(session);
+            case "unsubscribeQueue" -> taskRegistry.unsubscribeQueue(session.getId());
             case "ping" -> send(session, Map.of("type", MSG_PONG));
             default -> send(session, error("UNKNOWN_TYPE", "未知的 type: " + type));
-        }
-    }
-
-    /** Records protocol-level pongs (browser auto-pong to our heartbeat ping). */
-    @Override
-    protected void handlePongMessage(WebSocketSession session, org.springframework.web.socket.PongMessage message) {
-        HeartbeatState state = heartbeats.get(session.getId());
-        if (state != null) {
-            state.lastPongAt()[0] = System.currentTimeMillis();
-            state.missed()[0] = 0;
         }
     }
 
@@ -177,13 +190,10 @@ public class NovaWebSocketHandler extends TextWebSocketHandler {
         }
         List<String> ids = new ArrayList<>();
         taskIdsNode.forEach(n -> ids.add(n.isTextual() ? n.asText() : null));
-        List<TaskRegistry.Task> pushed = taskRegistry.subscribe(session.getId(), ids, maxTaskIdsPerMessage,
-                maxSubscriptionsPerSocket);
-        for (TaskRegistry.Task task : pushed) {
-            Map<String, Object> payload = new java.util.LinkedHashMap<>();
-            payload.put("type", MSG_TASK);
-            payload.put("task", task.toMessage());
-            send(session, payload);
+        List<Map<String, Object>> pushed = taskRegistry.subscribe(session.getId(), ids,
+                maxTaskIdsPerMessage, maxSubscriptionsPerSocket);
+        for (Map<String, Object> task : pushed) {
+            sendTask(session, task);
         }
     }
 
@@ -200,6 +210,24 @@ public class NovaWebSocketHandler extends TextWebSocketHandler {
         taskRegistry.unsubscribe(session.getId(), ids);
     }
 
+    private void handleSubscribeQueue(WebSocketSession session) {
+        taskRegistry.subscribeQueue(session.getId());
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("type", MSG_QUEUE_STATUS);
+        payload.put("stats", queueStatusProvider.getQueueStatus());
+        send(session, payload);
+    }
+
+    /** Records protocol-level pongs (browser auto-pong to our heartbeat ping). */
+    @Override
+    protected void handlePongMessage(WebSocketSession session, org.springframework.web.socket.PongMessage message) {
+        HeartbeatState state = heartbeats.get(session.getId());
+        if (state != null) {
+            state.lastPongAt()[0] = System.currentTimeMillis();
+            state.missed()[0] = 0;
+        }
+    }
+
     @Override
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
         heartbeats.remove(session.getId());
@@ -212,22 +240,92 @@ public class NovaWebSocketHandler extends TextWebSocketHandler {
         log.warn("[ws] transport error session={}: {}", session.getId(), exception.getMessage());
     }
 
-    /**
-     * Registers/updates a task and broadcasts it to every subscribed socket.
-     * Used by the spike task controller to demonstrate the subscribe/broadcast path.
-     */
-    public void broadcastTask(TaskRegistry.Task task) {
+    // ===== TaskEventBroadcaster =====
+
+    /** Loads the task by id and broadcasts it to every subscribed socket. */
+    @Override
+    public void broadcastTask(String taskId) {
+        broadcastTaskMessage(resolveTask(taskId));
+    }
+
+    /** Broadcasts an already-serialized task message to its subscribers (spike/test path). */
+    public void broadcastTaskMessage(Map<String, Object> task) {
         List<String> targets = taskRegistry.broadcast(task);
         for (String sessionId : targets) {
             WebSocketSession session = sessions.get(sessionId);
             if (session != null) {
-                Map<String, Object> payload = new java.util.LinkedHashMap<>();
-                payload.put("type", MSG_TASK);
-                payload.put("task", task.toMessage());
+                sendTask(session, task);
+            }
+        }
+    }
+
+    /** Hardcoded expired push before deletion (Node broadcastTaskExpired). */
+    @Override
+    public void broadcastTaskExpired(String taskId) {
+        Map<String, Object> task = new LinkedHashMap<>();
+        task.put("id", taskId);
+        task.put("status", TaskRegistry.STATUS_EXPIRED);
+        task.put("error", TaskRegistry.EXPIRED_ERROR);
+        List<String> targets = taskRegistry.broadcast(task);
+        for (String sessionId : targets) {
+            WebSocketSession session = sessions.get(sessionId);
+            if (session != null) {
+                sendTask(session, task);
+            }
+        }
+    }
+
+    /** Debounced queue-status broadcast (Node 200ms setTimeout). */
+    @Override
+    public void broadcastQueueStatus() {
+        queueBroadcastPending.set(true);
+        scheduler.schedule(this::flushQueueBroadcast, queueBroadcastThrottleMs, TimeUnit.MILLISECONDS);
+    }
+
+    private void flushQueueBroadcast() {
+        if (!queueBroadcastPending.compareAndSet(true, false)) {
+            return;
+        }
+        Set<String> subscribers = taskRegistry.queueSubscribers();
+        if (subscribers.isEmpty()) {
+            return;
+        }
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("type", MSG_QUEUE_STATUS);
+        payload.put("stats", queueStatusProvider.getQueueStatus());
+        for (String sessionId : subscribers) {
+            WebSocketSession session = sessions.get(sessionId);
+            if (session != null) {
                 send(session, payload);
             }
         }
-        log.debug("[ws] task broadcast id={} targets={}", task.id(), targets.size());
+    }
+
+    // ===== helpers =====
+
+    private Map<String, Object> resolveTask(String taskId) {
+        if (taskLookup != null) {
+            Map<String, Object> task = taskLookup.loadTaskMessage(taskId);
+            if (task != null) {
+                return task;
+            }
+        }
+        Map<String, Object> task = taskRegistry.get(taskId);
+        if (task != null) {
+            return task;
+        }
+        Map<String, Object> expired = new LinkedHashMap<>();
+        expired.put("id", taskId);
+        expired.put("status", TaskRegistry.STATUS_EXPIRED);
+        expired.put("error", TaskRegistry.EXPIRED_ERROR);
+        return expired;
+    }
+
+    private void sendTask(WebSocketSession session, Map<String, Object> task) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("type", MSG_TASK);
+        payload.put("task", task);
+        send(session, payload);
     }
 
     private Map<String, Object> error(String code, String message) {
@@ -235,7 +333,7 @@ public class NovaWebSocketHandler extends TextWebSocketHandler {
     }
 
     private void send(WebSocketSession session, Object payload) {
-        String json = TaskRegistry.toJson(objectMapper, payload);
+        String json = toJson(objectMapper, payload);
         if (json == null) {
             return;
         }
@@ -247,6 +345,39 @@ public class NovaWebSocketHandler extends TextWebSocketHandler {
             }
         } catch (Exception e) {
             log.debug("[ws] send failed session={}: {}", session.getId(), e.getMessage());
+        }
+    }
+
+    /** Graceful WS close on shutdown (Node closeWebSocketServer). */
+    public void closeAllSessions(int code, String reason) {
+        for (WebSocketSession session : sessions.values()) {
+            try {
+                if (session.isOpen()) {
+                    session.close(new CloseStatus(code, reason));
+                }
+            } catch (Exception ignored) {
+                try {
+                    session.close();
+                } catch (Exception ignored2) {
+                    // ignore
+                }
+            }
+        }
+    }
+
+    private static String toJson(ObjectMapper mapper, Object payload) {
+        try {
+            return mapper.writeValueAsString(payload);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static JsonNode parseJson(ObjectMapper mapper, String raw) {
+        try {
+            return mapper.readTree(raw);
+        } catch (Exception e) {
+            return null;
         }
     }
 }

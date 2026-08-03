@@ -8,13 +8,13 @@ spring:
     virtual:
       enabled: true
   datasource:
-    # M0 spike uses the shared `postgres` DB with a dedicated `nova_spike` schema.
-    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:postgres}
+    # M1: user-confirmed `nova` database (see WIN-10/WIN-11), Flyway-managed public schema.
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:nova}
     username: ${DB_USERNAME:postgres}
     password: ${DB_PASSWORD:}
   flyway:
     enabled: true
-    default-schema: nova_spike
+    default-schema: public
     create-schemas: true
     locations: classpath:db/migration
   data:
@@ -27,6 +27,9 @@ spring:
 server:
   port: ${PORT:8080}
   shutdown: graceful
+  # Matches the Node backend's 10MB request body cap (readJsonBody). Oversized
+  # bodies surface as a 413 PAYLOAD_TOO_LARGE via GlobalExceptionHandler.
+  max-http-request-size: 10MB
 
 management:
   endpoints:
@@ -45,3 +48,19 @@ nova:
     max-heartbeat-misses: 2
     max-task-ids-per-message: 200
     max-subscriptions-per-socket: 500
+    queue-broadcast-throttle-ms: 200
+  task:
+    # Hard ceiling matched to the Node backend's GLOBAL_TASK_CONCURRENCY.
+    global-concurrency: 50
+    ttl-ms: ${NOVA_TASK_TTL_MS:43200000}
+    cleanup-interval-ms: ${NOVA_TASK_CLEANUP_INTERVAL_MS:300000}
+    request-timeout-ms: ${NOVA_REQUEST_TIMEOUT_MS:1800000}
+    ack-grace-ms: ${NOVA_TASK_ACK_GRACE_MS:120000}
+    image-stream-enabled: ${NOVA_IMAGE_STREAM:true}
+    image-stream-partial-images: ${NOVA_IMAGE_PARTIAL_IMAGES:1}
+  storage:
+    image-dir: ${NOVA_IMAGE_DIR:./data/nova-images}
+    static-dir: ${NOVA_STATIC_DIR:../frontend/out}
+    prompts-path: ${NOVA_PROMPTS_PATH:../backend/prompts.json}
+    blacklist-path: ${NOVA_BLACKLIST_PATH:../backend/blacklist.json}
+  env-file: ${NOVA_ENV_FILE:.env}

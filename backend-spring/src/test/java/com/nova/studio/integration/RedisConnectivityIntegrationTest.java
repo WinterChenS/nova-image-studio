@@ -13,10 +13,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>Runs only when {@code REDIS_HOST} is set; skipped in CI without the server.
  */
-@SpringBootTest(properties = {
-        "nova.ai.openai.enabled=false",
-        "nova.spike.verify=false"
-})
+@SpringBootTest
 @EnabledIfEnvironmentVariable(named = "REDIS_HOST", matches = ".+")
 class RedisConnectivityIntegrationTest {
 

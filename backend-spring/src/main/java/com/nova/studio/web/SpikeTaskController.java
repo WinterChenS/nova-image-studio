@@ -9,12 +9,14 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
  * Spike-scoped task controller: demonstrates the WS subscribe/broadcast path
- * end-to-end (REST → TaskRegistry → WS broadcast). Replaced by the real task
- * API in M1 (POST /api/nova/tasks).
+ * end-to-end (REST → TaskRegistry → WS broadcast) with an in-memory task map.
+ * Used by the WS e2e tests; the production task API lives in
+ * {@link TaskController}.
  */
 @RestController
 @RequestMapping("/api/nova/spike/tasks")
@@ -30,18 +32,27 @@ public class SpikeTaskController {
 
     /** Creates or updates a task and broadcasts the update over WS. */
     @PostMapping
-    public Map<String, Object> upsert(@RequestBody TaskRegistry.Task task) {
-        taskRegistry.put(task);
-        wsHandler.broadcastTask(task);
-        return Map.of("taskId", task.id(), "status", task.status(), "broadcast", true);
+    public Map<String, Object> upsert(@RequestBody Map<String, Object> task) {
+        String id = String.valueOf(task.getOrDefault("id", "unknown"));
+        taskRegistry.put(id, task);
+        wsHandler.broadcastTaskMessage(task);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("taskId", id);
+        result.put("status", task.get("status"));
+        result.put("broadcast", true);
+        return result;
     }
 
     @GetMapping("/{id}")
     public Map<String, Object> get(@PathVariable String id) {
-        TaskRegistry.Task task = taskRegistry.get(id);
+        Map<String, Object> task = taskRegistry.get(id);
         if (task == null) {
-            return Map.of("id", id, "status", TaskRegistry.STATUS_EXPIRED, "error", "该任务已超出取回时间");
+            Map<String, Object> expired = new LinkedHashMap<>();
+            expired.put("id", id);
+            expired.put("status", TaskRegistry.STATUS_EXPIRED);
+            expired.put("error", TaskRegistry.EXPIRED_ERROR);
+            return expired;
         }
-        return task.toMessage();
+        return task;
     }
 }
