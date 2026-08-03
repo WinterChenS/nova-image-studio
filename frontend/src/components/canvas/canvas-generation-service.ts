@@ -5,7 +5,7 @@
  * 仅使用 host 的 nova-task-client（createNovaTask / getNovaTask / ackNovaTask）。
  * 视频/音频不在范围内；图生图无 mask（队列不支持）。
  */
-import { ackNovaTask, createNovaTask, getNovaTask, resolveImageTaskProvider, type NovaTaskResponse, type NovaTaskStatus, type ImageReference } from "@/lib/ccode-task-client";
+import { ackNovaTask, createNovaTask, getNovaTask, getConfiguredImageModel, type NovaTaskResponse, type NovaTaskStatus, type ImageReference } from "@/lib/ccode-task-client";
 import { normalizeModel } from "@/lib/model-capabilities";
 import { compressReferenceDataUrl } from "./lib/image-utils";
 import { uploadImage } from "./lib/image-storage";
@@ -52,22 +52,18 @@ export async function submitNodeGeneration(args: {
   referenceImages: ReferenceImage[];
   config: CanvasGenerationConfig;
 }): Promise<string> {
-  const provider = resolveImageTaskProvider(resolveTaskModel(args.config));
-  const apiKey = provider.apiKey;
-  if (!apiKey) throw new CanvasApiKeyMissingError();
+  const configured = getConfiguredImageModel(resolveTaskModel(args.config));
+  if (!configured) throw new CanvasApiKeyMissingError();
 
   const imageRefs = (await Promise.all(args.referenceImages.map(toImageReference))).filter((ref): ref is ImageReference => ref !== null);
   const taskId = await createNovaTask({
-    apiKey,
-    baseUrl: provider.baseUrl,
-    protocol: provider.protocol,
     mode: imageRefs.length > 0 ? "image-to-image" : "text-to-image",
     prompt: args.prompt,
     outputSize: args.config.outputSize,
     customSize: args.config.customSize,
     aspectRatio: args.config.aspectRatio,
     temperature: args.config.temperature,
-    model: provider.modelId,
+    model: configured.id,
     gptImageQuality: args.config.gptImageQuality,
     gptImageStyle: args.config.gptImageStyle,
     gptImageBackground: args.config.gptImageBackground,
@@ -128,22 +124,18 @@ export async function generateCanvasImages(args: {
   onStatus?: (status: NovaTaskStatus) => void;
   signal?: AbortSignal;
 }): Promise<CanvasGeneratedImage[]> {
-  const provider = resolveImageTaskProvider(resolveTaskModel(args.config));
-  const apiKey = provider.apiKey;
-  if (!apiKey) throw new CanvasApiKeyMissingError();
+  const configured = getConfiguredImageModel(resolveTaskModel(args.config));
+  if (!configured) throw new CanvasApiKeyMissingError();
 
   const imageRefs = (await Promise.all(args.referenceImages.map(toImageReference))).filter((ref): ref is ImageReference => ref !== null);
   const taskId = await createNovaTask({
-    apiKey,
-    baseUrl: provider.baseUrl,
-    protocol: provider.protocol,
     mode: imageRefs.length > 0 ? "image-to-image" : "text-to-image",
     prompt: args.prompt,
     outputSize: args.config.outputSize,
     customSize: args.config.customSize,
     aspectRatio: args.config.aspectRatio,
     temperature: args.config.temperature,
-    model: provider.modelId,
+    model: configured.id,
     gptImageQuality: args.config.gptImageQuality,
     gptImageStyle: args.config.gptImageStyle,
     gptImageBackground: args.config.gptImageBackground,

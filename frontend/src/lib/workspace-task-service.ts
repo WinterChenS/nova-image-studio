@@ -1,7 +1,7 @@
 import {
   createNovaTask,
   ackNovaTask,
-  resolveImageTaskProvider,
+  getConfiguredImageModel,
   type NovaTaskResponse,
   type ImageReference,
 } from '@/lib/ccode-task-client';
@@ -316,10 +316,9 @@ export async function submitTextToImage(
   actions: SubmitActions,
   onError: (message: string) => void
 ): Promise<void> {
-  const provider = resolveImageTaskProvider(input.model);
-  const apiKey = provider.apiKey;
+  const model = getConfiguredImageModel(input.model);
 
-  if (!apiKey) {
+  if (!model) {
     onError('请先配置 API 密钥');
     return;
   }
@@ -342,16 +341,13 @@ export async function submitTextToImage(
 
     try {
       const serverTaskId = await createNovaTask({
-        apiKey,
-        baseUrl: provider.baseUrl,
-        protocol: provider.protocol,
         mode: 'text-to-image',
         prompt,
         outputSize: input.outputSize,
         customSize: input.customSize,
         aspectRatio: input.aspectRatio,
         temperature: input.temperature,
-        model: provider.modelId,
+        model: model.id,
         gptImageQuality: input.gptImageQuality,
         gptImageStyle: input.gptImageStyle,
         gptImageBackground: input.gptImageBackground,
@@ -375,10 +371,9 @@ export async function submitImageToImage(
   actions: SubmitActions,
   onError: (message: string) => void
 ): Promise<void> {
-  const provider = resolveImageTaskProvider(input.model);
-  const apiKey = provider.apiKey;
+  const model = getConfiguredImageModel(input.model);
 
-  if (!apiKey) {
+  if (!model) {
     onError('请先配置 API 密钥');
     return;
   }
@@ -409,16 +404,13 @@ export async function submitImageToImage(
 
   try {
     const serverTaskId = await createNovaTask({
-      apiKey,
-      baseUrl: provider.baseUrl,
-      protocol: provider.protocol,
       mode: 'image-to-image',
       prompt: input.prompt,
       outputSize: input.outputSize,
       customSize: input.customSize,
       aspectRatio: input.aspectRatio,
       temperature: input.temperature,
-      model: provider.modelId,
+      model: model.id,
       gptImageQuality: input.gptImageQuality,
       gptImageStyle: input.gptImageStyle,
       gptImageBackground: input.gptImageBackground,

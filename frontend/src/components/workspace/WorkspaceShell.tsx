@@ -11,9 +11,11 @@ import { AssetsWorkspace } from '@/components/assets/AssetsWorkspace';
 import { CanvasWorkspace } from '@/components/canvas/CanvasWorkspace';
 import { PromptGallery } from '@/components/PromptGallery';
 import { SettingsModal } from '@/components/SettingsModal';
+import { LoginDialog } from '@/components/LoginDialog';
 import { MissingApiKeyDialog } from '@/components/MissingApiKeyDialog';
 import { useQueueStatus } from '@/hooks/useQueueStatus';
 import { useWideMode } from '@/hooks/useWideMode';
+import { useAuthHydration } from '@/hooks/useAuthHydration';
 import { useServerTaskPolling } from '@/hooks/useServerTaskPolling';
 import { useWorkspaceJobs } from '@/hooks/useWorkspaceJobs';
 import { WorkspaceHeader, type WorkspaceHeaderRef } from '@/components/workspace/WorkspaceHeader';
@@ -48,6 +50,8 @@ import { BA_RANDOM_URL, BING_WALLPAPER_URL } from '@/lib/constants';
 export function WorkspaceShell() {
   const queueStatus = useQueueStatus();
   const { wideMode, toggleWideMode } = useWideMode();
+  const { user, handleLogout } = useAuthHydration();
+  const [loginOpen, setLoginOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [missingApiKeyDialogOpen, setMissingApiKeyDialogOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -234,6 +238,9 @@ export function WorkspaceShell() {
             onOpenSettings={() => setSettingsOpen(true)}
             onLogoClick={promptGallery.handlePromptGalleryEntry}
             sidebarMode={wideMode}
+            user={user}
+            onOpenLogin={() => setLoginOpen(true)}
+            onLogout={handleLogout}
           />
 
           <Tabs
@@ -446,7 +453,11 @@ export function WorkspaceShell() {
         isOpen={settingsOpen}
         onClose={() => setSettingsOpen(false)}
         onApiKeyChange={workspace.setHasApiKey}
+        isLoggedIn={Boolean(user)}
+        onRequireLogin={() => setLoginOpen(true)}
       />
+
+      <LoginDialog open={loginOpen} onOpenChange={setLoginOpen} />
 
       <MissingApiKeyDialog
         open={missingApiKeyDialogOpen}

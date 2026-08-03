@@ -41,6 +41,12 @@ function buildSocketUrl(): string | null {
   try {
     const url = new URL('/api/nova/ws', window.location.href);
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+    // M2 (T2.5): 浏览器 WS 握手无法设置请求头，token 通过 query 传递，
+    // 服务端 WsAuthHandshakeInterceptor 解析后用于任务订阅隔离。
+    const token = window.localStorage.getItem('nova-auth-token');
+    if (token) {
+      url.searchParams.set('token', token);
+    }
     return url.toString();
   } catch {
     return null;

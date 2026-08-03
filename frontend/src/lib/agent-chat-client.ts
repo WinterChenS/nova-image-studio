@@ -40,7 +40,7 @@ export interface AgentCatalogEntry {
 }
 
 export interface StreamAgentInput {
-  apiKey: string;
+  modelRef: string;
   model: string;
   protocol: TextProviderProtocol;
   history: AgentMessage[];
@@ -247,13 +247,12 @@ function parseProposalArguments(raw: string): AgentProposal | null {
 export function streamAgentChat(
   input: StreamAgentInput,
   callbacks: StreamAgentCallbacks,
-  baseUrl: string = '',
 ): StreamAgentHandle {
   const controller = new AbortController();
 
   const promise = (async () => {
     try {
-      await runAgentStreamWithRetry(baseUrl, input, callbacks, controller.signal);
+      await runAgentStreamWithRetry(input, callbacks, controller.signal);
     } catch (err) {
       if (controller.signal.aborted) return;
       callbacks.onError(normalizeStreamError(err));
@@ -267,7 +266,6 @@ export function streamAgentChat(
 }
 
 async function runAgentStreamWithRetry(
-  baseUrl: string,
   input: StreamAgentInput,
   callbacks: StreamAgentCallbacks,
   signal: AbortSignal,
@@ -277,7 +275,7 @@ async function runAgentStreamWithRetry(
     if (signal.aborted) return;
     try {
       await runAttemptWithTimeout(
-        attemptSignal => runAgentStream(baseUrl, input, callbacks, attemptSignal),
+        attemptSignal => runAgentStream(input, callbacks, attemptSignal),
         signal,
         AGENT_CHAT_ATTEMPT_TIMEOUT_MS,
       );
@@ -297,7 +295,6 @@ async function runAgentStreamWithRetry(
 }
 
 async function runAgentStream(
-  baseUrl: string,
   input: StreamAgentInput,
   callbacks: StreamAgentCallbacks,
   signal: AbortSignal,
@@ -310,8 +307,7 @@ async function runAgentStream(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       protocol: input.protocol,
-      baseUrl,
-      apiKey: input.apiKey,
+      modelId: input.modelRef,
       model: input.model,
       stream: true,
       requestBody: body,
@@ -365,23 +361,21 @@ async function runAgentStream(
 }
 
 export async function describeImage(
-  apiKey: string,
+  modelRef: string,
   model: string,
   protocol: TextProviderProtocol,
   imageDataUrl: string,
   signal?: AbortSignal,
-  baseUrl: string = '',
 ): Promise<string> {
   return runAgentRequestWithRetry(
-    attemptSignal => requestImageDescription(baseUrl, apiKey, model, protocol, imageDataUrl, attemptSignal),
+    attemptSignal => requestImageDescription(modelRef, model, protocol, imageDataUrl, attemptSignal),
     signal,
     AGENT_IMAGE_DESCRIBE_ATTEMPT_TIMEOUT_MS,
   );
 }
 
 async function requestImageDescription(
-  baseUrl: string,
-  apiKey: string,
+  modelRef: string,
   model: string,
   protocol: TextProviderProtocol,
   imageDataUrl: string,
@@ -402,8 +396,7 @@ async function requestImageDescription(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       protocol,
-      baseUrl,
-      apiKey,
+      modelId: modelRef,
       model,
       stream: false,
       requestBody: body,

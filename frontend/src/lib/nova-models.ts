@@ -69,6 +69,25 @@ export interface NovaModelRegistry {
 
 const REGISTRY_KEY = 'nova-model-registry';
 
+/**
+ * 内存注册表缓存（M2 T2.3）：应用登录后由 API 灌入（hydrateRegistry），
+ * 所有同步读取方（表单/客户端）经 loadRegistry() 拿到最新数据，
+ * 无需逐处改造成 async。未灌入时回退 localStorage（迁移期/匿名只读）。
+ */
+let registryCache: NovaModelRegistry | null = null;
+
+export function setRegistryCache(registry: NovaModelRegistry): void {
+  registryCache = registry;
+}
+
+export function clearRegistryCache(): void {
+  registryCache = null;
+}
+
+export function getRegistryCache(): NovaModelRegistry | null {
+  return registryCache;
+}
+
 export const BUILTIN_IMAGE_PRESETS: Record<BuiltinImagePresetId, BuiltinImagePreset> = {
   'gemini-2.5-flash-image': {
     id: 'gemini-2.5-flash-image',
@@ -301,7 +320,7 @@ function ensureTextModels(raw?: unknown): TextModelConfig[] {
     .filter((item, index, list) => list.findIndex((candidate) => candidate.id === item.id) === index);
 }
 
-function ensureDefaults(raw: Partial<DefaultModels> | undefined, imageModels: ImageModelConfig[], textModels: TextModelConfig[]): DefaultModels {
+export function ensureDefaults(raw: Partial<DefaultModels> | undefined, imageModels: ImageModelConfig[], textModels: TextModelConfig[]): DefaultModels {
   const completeImageModels = imageModels.filter(isCompleteImageModel);
   const completeTextModels = textModels.filter(isCompleteTextModel);
   const firstImageModelId = completeImageModels[0]?.id || '';
@@ -327,6 +346,14 @@ function getInitialRegistry(): NovaModelRegistry {
 }
 
 export function loadRegistry(): NovaModelRegistry {
+  if (registryCache) {
+    return registryCache;
+  }
+  return loadRegistryFromLocalStorage();
+}
+
+/** 直接从 localStorage 读取（迁移向导/导出用，绕过缓存）。 */
+export function loadRegistryFromLocalStorage(): NovaModelRegistry {
   if (typeof window === 'undefined') {
     return getInitialRegistry();
   }
@@ -355,6 +382,7 @@ export function saveRegistry(registry: NovaModelRegistry): void {
   };
 
   localStorage.setItem(REGISTRY_KEY, JSON.stringify(normalized));
+  registryCache = normalized;
 }
 
 export function getImageModelById(registry: NovaModelRegistry, id: string): ImageModelConfig | undefined {

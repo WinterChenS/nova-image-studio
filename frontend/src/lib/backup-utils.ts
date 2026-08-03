@@ -2,6 +2,8 @@
 
 import { zipSync, unzipSync, strToU8 } from 'fflate';
 import localforage from 'localforage';
+import { isLoggedIn } from '@/lib/auth';
+import { fetchModels, fetchSettings, importSettings, restoreServerSettings, type ServerModel } from '@/lib/settings-api';
 
 export interface BackupProgress {
     percent: number;
@@ -24,6 +26,18 @@ function isBlobRef(value: unknown): value is BlobRef {
         && typeof value['_blobRef'] === 'string'
         && typeof value['_blobMimeType'] === 'string';
 }
+
+// M2：迁移到服务端后应清除的设置类 localStorage key（UI 偏好保留）
+export const LEGACY_SETTING_KEYS_TO_CLEAR = [
+    'nova-model-registry',
+    'nova-t2i-settings',
+    'nova-i2i-settings',
+    'nova-reverse-prompt-settings',
+    'nova-agent-params',
+    'nova-agent-web-search',
+    'nova-agent-intent-recognition',
+    'nova-gif-settings',
+];
 
 // localStorage keys to backup
 const LOCAL_STORAGE_KEYS = [
@@ -313,6 +327,9 @@ async function exportIndexedDB(files: Record<string, Uint8Array>, onProgress?: P
 /**
  * 导出所有数据为 ZIP 文件
  * 使用 fflate 替代 JSZip，显著降低内存占用和处理时间
+ *
+ * M2 (T2.7)：已登录时额外把服务端设置（models + settings，Key 脱敏）打包为
+ * serverSettings.json；未登录保持纯浏览器内容（匿名只读边界）。
  */
 export async function exportAllData(onProgress?: ProgressCallback): Promise<Blob> {
     if (onProgress) {
@@ -331,6 +348,21 @@ export async function exportAllData(onProgress?: ProgressCallback): Promise<Blob
 
     // 导出 localforage 数据
     const localForageData = await exportLocalForage(files);
+
+    // M2：导出服务端设置（已登录时）
+    if (isLoggedIn()) {
+        try {
+            const [models, settings] = await Promise.all([fetchModels(), fetchSettings()]);
+            files['serverSettings.json'] = jsonToU8({
+                appName: 'Nova Image',
+                version: process.env.NEXT_PUBLIC_APP_VERSION || '0.0.0',
+                models,
+                settings,
+            });
+        } catch {
+            // 服务端设置导出失败不阻断浏览器内容导出
+        }
+    }
 
     // 打包元数据和 localStorage JSON
     if (onProgress) {
@@ -579,7 +611,40 @@ export async function importAllData(file: File, onProgress?: ProgressCallback): 
         onProgress({ percent: 10, message: '正在清空 localStorage...' });
     }
 
-    // 清空现有 localStorage
+    // M2 (T2.7)：优先恢复服务端设置包（新备份）；旧备份里的 localStorage
+    // 设置类 key（nova-model-registry 等）改经 /api/nova/settings/import 导入。
+    const serverSettingsText = readText('serverSettings.json');
+    const localStorageText = readText('localStorage.json');
+    const legacySettings = localStorageText ? JSON.parse(localStorageText) : null;
+
+    const hasLegacyRegistry = legacySettings
+        && typeof legacySettings === 'object'
+        && typeof (legacySettings as Record<string, unknown>)['nova-model-registry'] === 'string';
+
+    if (serverSettingsText) {
+        if (!isLoggedIn()) {
+            throw new Error('备份包含服务器设置，请先登录后再导入');
+        }
+        const serverSettings = JSON.parse(serverSettingsText) as { models?: ServerModel[]; settings?: Record<string, unknown> };
+        await restoreServerSettings(serverSettings.models || [], serverSettings.settings || {});
+        onProgress?.({ percent: 18, message: '正在恢复服务器设置...' });
+    } else if (hasLegacyRegistry) {
+        if (!isLoggedIn()) {
+            throw new Error('备份包含本地模型配置，请先登录后再导入（或登录后从“设置-迁移”导入）');
+        }
+        await importSettings(legacySettings as Record<string, unknown>);
+        onProgress?.({ percent: 18, message: '正在导入本地配置到服务器...' });
+        // 服务端导入成功后清除已迁移的设置类 key（保留 UI 偏好）
+        for (const key of LEGACY_SETTING_KEYS_TO_CLEAR) {
+            try {
+                localStorage.removeItem(key);
+            } catch {
+                // ignore
+            }
+        }
+    }
+
+    // 清空现有 localStorage（UI 偏好与浏览器内容按旧逻辑恢复）
     for (const key of LOCAL_STORAGE_KEYS) {
         try {
             localStorage.removeItem(key);
@@ -592,7 +657,6 @@ export async function importAllData(file: File, onProgress?: ProgressCallback): 
         onProgress({ percent: 15, message: '正在导入 localStorage...' });
     }
 
-    const localStorageText = readText('localStorage.json');
     if (localStorageText) {
         const localStorageData = JSON.parse(localStorageText);
         importLocalStorage(localStorageData);

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { ackNovaTask, createNovaTask, resolveImageTaskProvider, type NovaTaskResponse } from '@/lib/ccode-task-client';
+import { ackNovaTask, createNovaTask, getConfiguredImageModel, type NovaTaskResponse } from '@/lib/ccode-task-client';
 import { downloadAndStoreImages } from '@/lib/image-downloader';
 import { syncDynamicModelExports } from '@/lib/gemini-config';
 import type { StoredJob } from '@/lib/job-store';
@@ -15,7 +15,7 @@ vi.mock('@/lib/ccode-task-client', async importOriginal => {
     ...actual,
     ackNovaTask: vi.fn(),
     createNovaTask: vi.fn(),
-    resolveImageTaskProvider: vi.fn(),
+    getConfiguredImageModel: vi.fn(),
   };
 });
 
@@ -30,7 +30,7 @@ vi.mock('@/lib/image-downloader', async importOriginal => {
 const mockedAckNovaTask = vi.mocked(ackNovaTask);
 const mockedCreateNovaTask = vi.mocked(createNovaTask);
 const mockedDownloadAndStoreImages = vi.mocked(downloadAndStoreImages);
-const mockedResolveImageTaskProvider = vi.mocked(resolveImageTaskProvider);
+const mockedGetConfiguredImageModel = vi.mocked(getConfiguredImageModel);
 
 function makeJob(overrides: Partial<StoredJob> = {}): StoredJob {
   return {
@@ -108,12 +108,18 @@ beforeEach(() => {
   mockedCreateNovaTask.mockReset();
   mockedCreateNovaTask.mockResolvedValue('task-advanced-1');
   mockedDownloadAndStoreImages.mockReset();
-  mockedResolveImageTaskProvider.mockReset();
-  mockedResolveImageTaskProvider.mockReturnValue({
-    apiKey: 'test-api-key',
-    baseUrl: 'https://api.openai.com',
+  mockedGetConfiguredImageModel.mockReset();
+  mockedGetConfiguredImageModel.mockReturnValue({
+    id: 'gpt-image-2',
     protocol: 'openai',
+    name: 'GPT Image 2',
     modelId: 'gpt-image-2',
+    apiKey: 'sk-***abcd',
+    baseUrl: 'https://api.openai.com',
+    builtinPreset: 'gpt-image-2',
+    maxRefImages: 4,
+    maxOutputSize: '1K',
+    supportsAdvancedParams: true,
   });
 });
 
@@ -135,7 +141,6 @@ describe('submitTextToImage', () => {
     }, actions, vi.fn());
 
     expect(mockedCreateNovaTask).toHaveBeenCalledWith(expect.objectContaining({
-      apiKey: 'test-api-key',
       mode: 'text-to-image',
       model: 'gpt-image-2',
       gptImageQuality: 'high',

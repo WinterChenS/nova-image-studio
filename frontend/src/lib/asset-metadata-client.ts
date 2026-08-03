@@ -16,9 +16,8 @@ export interface AssetMetadataSuggestion {
 }
 
 export interface GenerateAssetMetadataInput {
-  apiKey: string;
+  modelRef: string;
   model?: string;
-  baseUrl?: string;
   imageDataUrl: string;
   currentName: string;
   currentTags: string[];
@@ -45,7 +44,6 @@ export async function generateAssetMetadata(input: GenerateAssetMetadataInput): 
   const configured = getConfiguredTextModel(input.model || ASSET_METADATA_MODEL);
   const protocol = (configured?.protocol || 'openai-responses') as TextProviderProtocol;
   const actualModel = configured?.modelId || input.model || ASSET_METADATA_MODEL;
-  const baseUrl = configured?.baseUrl || input.baseUrl || 'https://api.openai.com';
 
   const prompt = [
     '请观察这张图片，为个人素材库生成一组中文元数据。',
@@ -73,8 +71,7 @@ export async function generateAssetMetadata(input: GenerateAssetMetadataInput): 
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       protocol,
-      baseUrl,
-      apiKey: input.apiKey,
+      modelId: input.modelRef,
       model: actualModel,
       stream: false,
       requestBody: body,

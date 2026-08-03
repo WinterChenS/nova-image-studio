@@ -21,7 +21,7 @@ export interface OptimizeImageInput {
 }
 
 export interface StreamPromptOptimizeInput {
-  apiKey: string;
+  modelRef: string;
   model?: string;
   mode: PromptOptimizeMode;
   prompt: string;
@@ -116,13 +116,12 @@ const SYSTEM_PROMPTS: Record<PromptOptimizeMode, string> = {
 export function streamPromptOptimize(
   input: StreamPromptOptimizeInput,
   callbacks: StreamPromptOptimizeCallbacks,
-  baseUrl: string = '',
 ): StreamPromptOptimizeHandle {
   const controller = new AbortController();
 
   const promise = (async () => {
     try {
-      await runWithRetry(baseUrl, input, callbacks, controller);
+      await runWithRetry(input, callbacks, controller);
     } catch (err) {
       if (controller.signal.aborted) return;
       callbacks.onError(normalizeError(err));
@@ -136,7 +135,6 @@ export function streamPromptOptimize(
 }
 
 async function runWithRetry(
-  baseUrl: string,
   input: StreamPromptOptimizeInput,
   callbacks: StreamPromptOptimizeCallbacks,
   controller: AbortController,
@@ -146,7 +144,7 @@ async function runWithRetry(
   for (let attempt = 1; attempt <= OPTIMIZE_MAX_ATTEMPTS; attempt++) {
     if (signal.aborted) return;
     try {
-      await runAttempt(baseUrl, input, callbacks, controller);
+      await runAttempt(input, callbacks, controller);
       return;
     } catch (err) {
       if (signal.aborted) return;
@@ -161,7 +159,6 @@ async function runWithRetry(
 }
 
 async function runAttempt(
-  baseUrl: string,
   input: StreamPromptOptimizeInput,
   callbacks: StreamPromptOptimizeCallbacks,
   controller: AbortController,
@@ -169,7 +166,6 @@ async function runAttempt(
   const configured = getConfiguredTextModel(input.model || '');
   const protocol = (configured?.protocol || 'openai-responses') as TextProviderProtocol;
   const actualModel = configured?.modelId || input.model || OPTIMIZE_MODEL;
-  const actualBaseUrl = configured?.baseUrl || baseUrl;
   const signal = controller.signal;
 
   let userText = `${SYSTEM_PROMPTS[input.mode]}\n\n---\n\n`;
@@ -202,8 +198,7 @@ async function runAttempt(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         protocol,
-        baseUrl: actualBaseUrl,
-        apiKey: input.apiKey,
+        modelId: input.modelRef,
         model: actualModel,
         stream: true,
         requestBody: body,

@@ -81,9 +81,33 @@ async function req(base, method, path, body, headers = {}) {
   return { status: resp.status, headers: resp.headers, text };
 }
 
+// M2 (WIN-12): task creation requires login (Q1). Register a throwaway user
+// against the Spring backend and attach its JWT on Spring requests; the Node
+// backend ignores the header, keeping the A/B comparison 1:1.
+const springAuth = { token: null };
+let springAuthReady = null;
+async function ensureSpringAuth() {
+  if (springAuthReady) return springAuthReady;
+  springAuthReady = (async () => {
+    const username = 'abdiff_' + runId;
+    try {
+      await req(springBase, 'POST', '/api/auth/register', { username, password: 'ab-diff-secret' });
+    } catch {
+      // username may already exist from an earlier run
+    }
+    const login = await req(springBase, 'POST', '/api/auth/login', { username, password: 'ab-diff-secret' });
+    if (login.status !== 200) {
+      throw new Error('A/B 前置：Spring 登录失败 status=' + login.status);
+    }
+    springAuth.token = JSON.parse(login.text).token;
+  })();
+  return springAuthReady;
+}
+
 function clientIpFor(base, ip) {
   return (headers) => ({
     'X-Forwarded-For': ip,
+    ...(base === springBase && springAuth.token ? { Authorization: 'Bearer ' + springAuth.token } : {}),
     ...headers,
   });
 }
@@ -343,6 +367,10 @@ function isMonotonic(statuses) {
 await mock.listen(mockPort);
 console.log(`mock upstream on :${mockPort}`);
 console.log(`node=${nodeBase} spring=${springBase}`);
+
+// 0. M2 auth precondition (task creation requires login)
+await ensureSpringAuth();
+console.log('spring auth ready (ab-diff user)');
 
 // 1. queue-status
 {

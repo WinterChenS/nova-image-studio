@@ -213,7 +213,7 @@ async function optimizeImportedPromptContent(prompt: PromptWithKey, referenceIma
   let failed = false;
   const handle = streamPromptOptimize(
     {
-      apiKey: textModel.apiKey,
+      modelRef: textModel.id,
       model: textModel.id,
       mode: "canvas-prompt-gallery-import",
       prompt: original,
@@ -224,7 +224,6 @@ async function optimizeImportedPromptContent(prompt: PromptWithKey, referenceIma
       onDone(fullText) { if (fullText.trim()) output = fullText; },
       onError() { failed = true; },
     },
-    textModel.baseUrl,
   );
   await handle.promise;
 
@@ -1560,8 +1559,7 @@ export function CanvasEditor({ projectId, onBack, onRequireApiKey, showToast, sh
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           protocol: textModel.protocol,
-          baseUrl: textModel.baseUrl,
-          apiKey: textModel.apiKey,
+          modelId: textModel.id,
           model: textModel.modelId,
           stream: true,
           requestBody: body,
@@ -1781,13 +1779,12 @@ export function CanvasEditor({ projectId, onBack, onRequireApiKey, showToast, sh
         ].filter(Boolean).join("\n\n") || undefined;
 
         optimizeHandleRef.current = streamPromptOptimize(
-          { apiKey: textModel.apiKey, model: textModel.id, mode, prompt: promptText, images, context },
+          { modelRef: textModel.id, model: textModel.id, mode, prompt: promptText, images, context },
           {
             onDelta(token) { setOptimizedText((prev) => prev + token); },
             onDone() { setOptimizing(false); },
             onError(err) { setOptimizeError(err.message); setOptimizing(false); },
           },
-          textModel.baseUrl,
         );
       } catch (err) {
         setOptimizeError(err instanceof Error ? err.message : String(err));

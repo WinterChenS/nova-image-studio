@@ -43,7 +43,7 @@ import {
 } from '@/lib/reverse-prompt-store';
 
 import { MAX_UPLOAD_SIZE_BYTES } from '@/lib/constants';
-import { loadJsonFromStorage, saveJsonToStorage } from '@/lib/settings-storage';
+import { loadApiJsonSetting, saveApiJsonSetting, workbenchSettingKey } from '@/lib/settings-storage';
 
 const REVERSE_SETTINGS_KEY = 'nova-reverse-prompt-settings';
 
@@ -106,14 +106,23 @@ export function ReversePromptForm({ wideMode = false, disabled = false, onConfig
   const streamHandleRef = useRef<StreamReverseHandle | null>(null);
   const formRef = useRef<HTMLDivElement>(null);
 
-  // 挂载后恢复缓存设置 + 从 IndexedDB 恢复反推结果
+  // 挂载后恢复设置（M2 T2.3：从设置 API 读取 workbench.reverse）+ 从 IndexedDB 恢复反推结果
+  const [savedSettings, setSavedSettings] = useState<Partial<ReverseSettings>>({});
+  useEffect(() => {
+    let cancelled = false;
+    void loadApiJsonSetting<Partial<ReverseSettings>>(workbenchSettingKey(REVERSE_SETTINGS_KEY), {}).then((s) => {
+      if (!cancelled) setSavedSettings(s);
+    });
+    return () => { cancelled = true; };
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
 
     queueMicrotask(() => {
       if (cancelled) return;
 
-      const saved = loadJsonFromStorage<ReverseSettings>(REVERSE_SETTINGS_KEY);
+      const saved = savedSettings;
       const fallbackModel = getDefaultReversePromptModelId();
       if (saved.model && isReversePromptModel(saved.model) && getConfiguredTextModel(saved.model)) {
         setModel(saved.model);
@@ -156,10 +165,10 @@ export function ReversePromptForm({ wideMode = false, disabled = false, onConfig
     };
   }, []);
 
-  // 设置变化时持久化
+  // 设置变化时持久化到服务器（M2 T2.3）
   useEffect(() => {
     if (!settingsReady) return;
-    saveJsonToStorage(REVERSE_SETTINGS_KEY, { model, mode });
+    saveApiJsonSetting(workbenchSettingKey(REVERSE_SETTINGS_KEY), { model, mode });
   }, [model, mode, settingsReady]);
 
   // 卸载时取消正在进行的流
@@ -287,7 +296,7 @@ export function ReversePromptForm({ wideMode = false, disabled = false, onConfig
 
     const handle = streamReversePrompt(
       {
-        apiKey: configuredModel.apiKey,
+        modelRef: configuredModel.id,
         model: configuredModel.id,
         mode,
         imageDataUrl: pendingFile.dataUrl,
@@ -337,7 +346,6 @@ export function ReversePromptForm({ wideMode = false, disabled = false, onConfig
           streamHandleRef.current = null;
         },
       },
-      configuredModel.baseUrl
     );
     streamHandleRef.current = handle;
   };
