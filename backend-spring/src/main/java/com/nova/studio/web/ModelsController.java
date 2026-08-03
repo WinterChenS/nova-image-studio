@@ -1,11 +1,11 @@
 package com.nova.studio.web;
 
-import com.nova.studio.auth.AuthFilter;
+import com.nova.studio.auth.AuthSupport;
 import com.nova.studio.auth.AuthUser;
 import com.nova.studio.settings.ModelService;
-import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -36,27 +36,27 @@ public class ModelsController {
     }
 
     @GetMapping
-    public List<Map<String, Object>> list(HttpServletRequest request) {
-        AuthUser user = AuthFilter.require(request);
+    public List<Map<String, Object>> list(@AuthenticationPrincipal AuthUser authUser) {
+        AuthUser user = AuthSupport.requireAuth(authUser);
         return modelService.list(user.id());
     }
 
     @PostMapping
-    public ResponseEntity<Map<String, Object>> create(@RequestBody JsonNode body, HttpServletRequest request) {
-        AuthUser user = AuthFilter.require(request);
+    public ResponseEntity<Map<String, Object>> create(@RequestBody JsonNode body, @AuthenticationPrincipal AuthUser authUser) {
+        AuthUser user = AuthSupport.requireAuth(authUser);
         Map<String, Object> model = modelService.create(user.id(), body);
         return ResponseEntity.status(HttpStatus.CREATED).body(model);
     }
 
     @PutMapping("/{modelId}")
-    public Map<String, Object> update(@PathVariable String modelId, @RequestBody JsonNode body, HttpServletRequest request) {
-        AuthUser user = AuthFilter.require(request);
+    public Map<String, Object> update(@PathVariable String modelId, @RequestBody JsonNode body, @AuthenticationPrincipal AuthUser authUser) {
+        AuthUser user = AuthSupport.requireAuth(authUser);
         return modelService.update(user.id(), parseId(modelId), body);
     }
 
     @DeleteMapping("/{modelId}")
-    public Map<String, Object> delete(@PathVariable String modelId, HttpServletRequest request) {
-        AuthUser user = AuthFilter.require(request);
+    public Map<String, Object> delete(@PathVariable String modelId, @AuthenticationPrincipal AuthUser authUser) {
+        AuthUser user = AuthSupport.requireAuth(authUser);
         modelService.delete(user.id(), parseId(modelId));
         return Map.of("ok", true);
     }

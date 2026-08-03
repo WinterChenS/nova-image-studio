@@ -1,9 +1,8 @@
 package com.nova.studio.settings;
 
-import org.springframework.jdbc.core.JdbcTemplate;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import org.springframework.stereotype.Repository;
 
-import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -11,41 +10,40 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * settings table access (T2.1) — per-user JSONB key/value rows.
+ * settings table access (T2.1) — per-user JSONB key/value rows. WIN-16
+ * (ADR-11): migrated from JdbcTemplate to MyBatis-Plus ({@link SettingsMapper}
+ * + {@link SettingsEntity}); public signatures unchanged (strategy A, ARCH
+ * C.3.2.5). The composite primary key ({@code user_id + key}) is not modeled
+ * by MyBatis-Plus, so the upsert keeps the original {@code INSERT ... ON
+ * CONFLICT} SQL.
  */
 @Repository
 public class SettingsRepository {
 
-    private final JdbcTemplate jdbc;
+    private final SettingsMapper mapper;
 
-    public SettingsRepository(JdbcTemplate jdbc) {
-        this.jdbc = jdbc;
+    public SettingsRepository(SettingsMapper mapper) {
+        this.mapper = mapper;
     }
 
     /** All settings for a user: key → raw JSON value string. */
     public Map<String, String> findAllByUser(UUID userId) {
+        List<SettingsEntity> rows = mapper.selectList(new LambdaQueryWrapper<SettingsEntity>()
+                .eq(SettingsEntity::getUserId, userId));
         Map<String, String> result = new LinkedHashMap<>();
-        jdbc.query(
-                "SELECT key, value FROM settings WHERE user_id = ?",
-                (rs, i) -> {
-                    result.put(rs.getString("key"), rs.getString("value"));
-                    return null;
-                },
-                userId);
+        for (SettingsEntity row : rows) {
+            result.put(row.getKey(), row.getValue());
+        }
         return result;
     }
 
     public void upsert(UUID userId, String key, String valueJson, String valueType) {
-        Instant now = Instant.now();
-        jdbc.update(
-                "INSERT INTO settings (user_id, key, value, value_type, description, updated_at)"
-                        + " VALUES (?, ?, ?::jsonb, ?, NULL, ?)"
-                        + " ON CONFLICT (user_id, key) DO UPDATE SET value = EXCLUDED.value,"
-                        + " value_type = EXCLUDED.value_type, updated_at = EXCLUDED.updated_at",
-                userId, key, valueJson, valueType, Timestamp.from(now));
+        mapper.upsert(userId, key, valueJson, valueType, Instant.now());
     }
 
     public void delete(UUID userId, String key) {
-        jdbc.update("DELETE FROM settings WHERE user_id = ? AND key = ?", userId, key);
+        mapper.delete(new LambdaQueryWrapper<SettingsEntity>()
+                .eq(SettingsEntity::getUserId, userId)
+                .eq(SettingsEntity::getKey, key));
     }
 }

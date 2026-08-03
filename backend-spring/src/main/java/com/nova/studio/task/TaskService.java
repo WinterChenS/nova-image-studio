@@ -1,6 +1,5 @@
 package com.nova.studio.task;
 
-import com.nova.studio.auth.AuthFilter;
 import com.nova.studio.auth.AuthUser;
 import com.nova.studio.imagegen.ImageGenService;
 import com.nova.studio.infra.HttpErrorException;

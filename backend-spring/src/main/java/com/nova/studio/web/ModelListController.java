@@ -1,13 +1,12 @@
 package com.nova.studio.web;
 
-import com.nova.studio.auth.AuthFilter;
 import com.nova.studio.auth.AuthUser;
 import com.nova.studio.imagegen.ImageGenService;
 import com.nova.studio.infra.NormalizedError;
 import com.nova.studio.settings.ModelService;
-import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -49,9 +48,8 @@ public class ModelListController {
                                     @RequestParam(required = false) String apiKey,
                                     @RequestParam(required = false) String modelId,
                                     @RequestParam(defaultValue = "openai") String protocol,
-                                    HttpServletRequest request) {
+                                    @AuthenticationPrincipal AuthUser authUser) {
         // M2 resolution path: modelId → server-side config.
-        AuthUser authUser = AuthFilter.current(request);
         if (modelId != null && authUser != null) {
             ModelService.ResolvedModel resolved = modelService.resolve(authUser.id(), modelId).orElse(null);
             if (resolved == null) {

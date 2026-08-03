@@ -1,9 +1,8 @@
 package com.nova.studio.settings;
 
-import org.springframework.jdbc.core.JdbcTemplate;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import org.springframework.stereotype.Repository;
 
-import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -11,62 +10,53 @@ import java.util.UUID;
 
 /**
  * models table access (T2.1). All queries are scoped by user_id (isolation).
+ * WIN-16 (ADR-11): migrated from JdbcTemplate to MyBatis-Plus
+ * ({@link ModelMapper} + {@link ModelEntity}); public signatures and the
+ * {@link ModelRow} record are unchanged (strategy A, ARCH C.3.2.5). The
+ * {@code capabilities} JSONB column stays a String + service-layer
+ * serialization (minimal change).
  */
 @Repository
 public class ModelRepository {
 
-    private final JdbcTemplate jdbc;
-
-    public ModelRepository(JdbcTemplate jdbc) {
-        this.jdbc = jdbc;
-    }
-
-    /** Raw row — {@code apiKeyEnc} is the AES-GCM ciphertext (nullable). */
+    /** Public row shape (service/test contract, unchanged). */
     public record ModelRow(UUID id, UUID userId, String type, String protocol, String name,
                            String modelId, String baseUrl, String apiKeyEnc,
                            String capabilitiesJson, String builtinPresetId,
                            Instant createdAt, Instant updatedAt) {
     }
 
-    private ModelRow map(java.sql.ResultSet rs, int i) throws java.sql.SQLException {
-        return new ModelRow(
-                rs.getObject("id", UUID.class),
-                rs.getObject("user_id", UUID.class),
-                rs.getString("type"),
-                rs.getString("protocol"),
-                rs.getString("name"),
-                rs.getString("model_id"),
-                rs.getString("base_url"),
-                rs.getString("api_key_enc"),
-                rs.getString("capabilities"),
-                rs.getString("builtin_preset_id"),
-                rs.getTimestamp("created_at").toInstant(),
-                rs.getTimestamp("updated_at").toInstant());
+    private final ModelMapper mapper;
+
+    public ModelRepository(ModelMapper mapper) {
+        this.mapper = mapper;
     }
 
-    private static final String SELECT_COLUMNS =
-            "SELECT id, user_id, type, protocol, name, model_id, base_url, api_key_enc, capabilities, builtin_preset_id, created_at, updated_at FROM models";
-
     public List<ModelRow> findByUserId(UUID userId) {
-        return jdbc.query(SELECT_COLUMNS + " WHERE user_id = ? ORDER BY created_at, name", (this::map), userId);
+        return mapper.selectList(new LambdaQueryWrapper<ModelEntity>()
+                .eq(ModelEntity::getUserId, userId)
+                .orderByAsc(ModelEntity::getCreatedAt)
+                .orderByAsc(ModelEntity::getName)).stream()
+                .map(ModelRepository::toRow)
+                .toList();
     }
 
     public Optional<ModelRow> findByIdAndUser(UUID id, UUID userId) {
-        List<ModelRow> rows = jdbc.query(SELECT_COLUMNS + " WHERE id = ? AND user_id = ?", (this::map), id, userId);
-        return rows.stream().findFirst();
+        ModelEntity entity = mapper.selectOne(new LambdaQueryWrapper<ModelEntity>()
+                .eq(ModelEntity::getId, id)
+                .eq(ModelEntity::getUserId, userId));
+        return Optional.ofNullable(entity).map(ModelRepository::toRow);
     }
 
     public boolean existsName(UUID userId, String type, String name, UUID excludeId) {
-        Integer count;
-        if (excludeId == null) {
-            count = jdbc.queryForObject(
-                    "SELECT COUNT(*) FROM models WHERE user_id = ? AND type = ? AND name = ?",
-                    Integer.class, userId, type, name);
-        } else {
-            count = jdbc.queryForObject(
-                    "SELECT COUNT(*) FROM models WHERE user_id = ? AND type = ? AND name = ? AND id <> ?",
-                    Integer.class, userId, type, name, excludeId);
+        LambdaQueryWrapper<ModelEntity> wrapper = new LambdaQueryWrapper<ModelEntity>()
+                .eq(ModelEntity::getUserId, userId)
+                .eq(ModelEntity::getType, type)
+                .eq(ModelEntity::getName, name);
+        if (excludeId != null) {
+            wrapper.ne(ModelEntity::getId, excludeId);
         }
+        Long count = mapper.selectCount(wrapper);
         return count != null && count > 0;
     }
 
@@ -74,29 +64,44 @@ public class ModelRepository {
                        String baseUrl, String apiKeyEnc, String capabilitiesJson, String builtinPresetId) {
         UUID id = UUID.randomUUID();
         Instant now = Instant.now();
-        jdbc.update(
-                "INSERT INTO models (id, user_id, type, protocol, name, model_id, base_url, api_key_enc, capabilities, builtin_preset_id, created_at, updated_at)"
-                        + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?)",
-                id, userId, type, protocol, name, modelId, baseUrl, apiKeyEnc, capabilitiesJson, builtinPresetId,
-                Timestamp.from(now), Timestamp.from(now));
+        ModelEntity entity = new ModelEntity();
+        entity.setId(id);
+        entity.setUserId(userId);
+        entity.setType(type);
+        entity.setProtocol(protocol);
+        entity.setName(name);
+        entity.setModelId(modelId);
+        entity.setBaseUrl(baseUrl);
+        entity.setApiKeyEnc(apiKeyEnc);
+        entity.setCapabilitiesJson(capabilitiesJson);
+        entity.setBuiltinPresetId(builtinPresetId);
+        entity.setCreatedAt(now);
+        entity.setUpdatedAt(now);
+        mapper.insert(entity);
         return id;
     }
 
     public void update(UUID id, UUID userId, String type, String protocol, String name, String modelId,
                        String baseUrl, String apiKeyEnc, String capabilitiesJson, String builtinPresetId) {
-        jdbc.update(
-                "UPDATE models SET type = ?, protocol = ?, name = ?, model_id = ?, base_url = ?, api_key_enc = ?,"
-                        + " capabilities = ?::jsonb, builtin_preset_id = ?, updated_at = ? WHERE id = ? AND user_id = ?",
-                type, protocol, name, modelId, baseUrl, apiKeyEnc, capabilitiesJson, builtinPresetId,
-                Timestamp.from(Instant.now()), id, userId);
+        mapper.updateRow(id, userId, type, protocol, name, modelId, baseUrl, apiKeyEnc,
+                capabilitiesJson, builtinPresetId, Instant.now());
     }
 
     public boolean delete(UUID id, UUID userId) {
-        return jdbc.update("DELETE FROM models WHERE id = ? AND user_id = ?", id, userId) > 0;
+        return mapper.delete(new LambdaQueryWrapper<ModelEntity>()
+                .eq(ModelEntity::getId, id)
+                .eq(ModelEntity::getUserId, userId)) > 0;
     }
 
     public int countByUser(UUID userId) {
-        Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM models WHERE user_id = ?", Integer.class, userId);
-        return count == null ? 0 : count;
+        Long count = mapper.selectCount(new LambdaQueryWrapper<ModelEntity>()
+                .eq(ModelEntity::getUserId, userId));
+        return count == null ? 0 : count.intValue();
+    }
+
+    private static ModelRow toRow(ModelEntity e) {
+        return new ModelRow(e.getId(), e.getUserId(), e.getType(), e.getProtocol(), e.getName(),
+                e.getModelId(), e.getBaseUrl(), e.getApiKeyEnc(), e.getCapabilitiesJson(),
+                e.getBuiltinPresetId(), e.getCreatedAt(), e.getUpdatedAt());
     }
 }
