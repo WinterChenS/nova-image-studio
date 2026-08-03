@@ -80,14 +80,37 @@ export REDIS_HOST=... REDIS_PORT=... REDIS_PASSWORD='...'
 mvn test
 ```
 
-集成测试（`FlywayPostgresIntegrationTest` / `RedisConnectivityIntegrationTest` /
-`TaskApiE2EIntegrationTest`）在无 `DB_HOST`/`REDIS_HOST` 环境变量时自动跳过（CI 安全）。
+**集成测试门控（重要）**：8 个集成测试分布在 3 个类中，全部由环境变量显式门控，
+无外部服务时**自动跳过**而非失败（CI 安全）：
+
+| 集成测试类 | 数量 | 门控 | 依赖 |
+|---|---|---|---|
+| `FlywayPostgresIntegrationTest` | 3 | `DB_HOST` | 外部 PostgreSQL（Flyway 迁移 + 真实读写） |
+| `RedisConnectivityIntegrationTest` | 1 | `REDIS_HOST` | 外部 Redis（连通性探测） |
+| `TaskApiE2EIntegrationTest` | 4 | `DB_HOST` | 外部 PostgreSQL（HTTP 全链路 e2e） |
+
+未导出 `DB_HOST`/`REDIS_HOST` 时 `mvn test` 运行 **94** 个纯单元/WS/HTTP 测试
+（8 个集成测试跳过）；导出后全量 **102** 个全部执行。
+因此评估覆盖度时请以「是否加载了 `.env`」为准，`102` 与 `94` 的差额即被门控的集成测试。
 
 ### 与 Node 后端 A/B 差异测试（T1.11）
 
 见 `docs/AB-DIFF-M1-spring-vs-node.md` 与 `backend-spring/scripts/ab-diff/`：
 同一前端（`frontend/out`）分别对接 Node 后端（3000）与 Spring 后端（8080），
 对 12 条清单 P0 项做逐字段比对（mock 上游，无需真实 Key）。
+
+一键运行（需先构建 `frontend/out` 与 Spring jar）：
+
+```bash
+# 方式一：npm script（根目录，两个后端需已启动：Node:3000 / Spring:8080）
+npm run test:ab-diff
+
+# 方式二：一键脚本（自动启动双后端 + mock 上游 → 跑 37 探针 → 自动停止）
+bash backend-spring/scripts/run-ab-diff.sh
+```
+
+> 该脚本依赖双后端 + mock 上游，已作为回归基线固化（`.github/workflows/ab-diff.yml`，
+> 手动触发）；本地等价验证命令见 `scripts/run-ab-diff.sh`。
 
 ## 与 M0 的差异备忘
 

@@ -98,6 +98,31 @@ class TaskQueueServiceTest {
     }
 
     @Test
+    void awaitFinalStateKeepsPollingWhenDifferentArgumentsArriveFirst() throws Exception {
+        // Regression for the T1.2 flake: when the wanted task is not yet done but a
+        // DIFFERENT task's completeTask already landed in the mock log, Mockito
+        // reports the verify as ArgumentsAreDifferent (not WantedButNotInvoked).
+        // The poll loop must treat both as "terminal write not seen yet"; otherwise
+        // t1's completeTask arriving first makes verify("t2") throw immediately.
+        repository.completeTask("t1", "{}", null, "now", "later");
+
+        Thread completer = new Thread(() -> {
+            try {
+                Thread.sleep(300);
+                repository.completeTask("t2", "{}", null, "now", "later");
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        completer.start();
+        try {
+            awaitFinalState("t2");
+        } finally {
+            completer.join();
+        }
+    }
+
+    @Test
     void oversizedTaskRunsAloneWhenQueueIdle() throws Exception {
         // cap = 2 slots, task needs 4 → only schedulable when idle (Node oversized exception)
         when(queueStatsService.getMaxServerConcurrency()).thenReturn(2);
@@ -178,14 +203,21 @@ class TaskQueueServiceTest {
             try {
                 verify(repository).completeTask(eq(taskId), anyString(), any(), anyString(), anyString());
                 return;
-            } catch (org.mockito.exceptions.verification.WantedButNotInvoked ignored) {
-                // not completed yet
+            } catch (org.mockito.exceptions.base.MockitoAssertionError
+                     | org.opentest4j.AssertionFailedError ignored) {
+                // terminal write not seen yet — keep polling.
+                // NB: when JUnit 5 is on the classpath Mockito reports a wanted-but-
+                // different-args invocation as opentest4j.ArgumentsAreDifferent
+                // (extends AssertionFailedError), NOT as MockitoAssertionError; the
+                // multi-catch covers both worlds so t1's completeTask landing first
+                // cannot escape the poll loop (T1.2 slot-capacity flake).
             }
             try {
                 verify(repository).failTask(eq(taskId), anyString(), anyString(), anyString());
                 return;
-            } catch (org.mockito.exceptions.verification.WantedButNotInvoked ignored) {
-                // not failed yet
+            } catch (org.mockito.exceptions.base.MockitoAssertionError
+                     | org.opentest4j.AssertionFailedError ignored) {
+                // terminal write not seen yet — keep polling
             }
             Thread.sleep(50);
         }
