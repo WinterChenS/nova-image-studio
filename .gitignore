@@ -73,3 +73,8 @@ frontend/public/workbox-*.js
 
 # other
 infinite-canvas-main/
+
+*.class
+**/target/
+/node_modules/
+

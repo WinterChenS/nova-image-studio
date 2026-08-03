@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# WIN-14: run the full backend test suite (incl. DB/REDIS-gated integration tests).
+# Loads real credentials from backend-spring/.env (git-ignored) and runs `mvn test`.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+export JAVA_HOME="${JAVA_HOME:-C:/Program Files/Java/jdk-21.0.3+9}"
+export PATH="$JAVA_HOME/bin:/c/Program Files/apache-maven-3.9.6/bin:$PATH"
+# shellcheck disable=SC2046
+export $(grep -E '^[A-Z]' .env | xargs)
+echo "== DB_HOST=$DB_HOST REDIS_HOST=$REDIS_HOST =="
+mvn test "$@"

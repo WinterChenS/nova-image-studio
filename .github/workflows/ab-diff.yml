@@ -1,0 +1,94 @@
+name: A/B Diff Regression (Spring vs Node)
+
+# M1 A/B 差异回归（WIN-11 T1.11 / WIN-14 闭环）：
+# 同一 frontend/out 对接 Node(3000) 与 Spring(8080)，对 12 条清单 P0 项做逐字段比对
+# （mock 上游，无需真实 AI Key）。依赖双后端 + mock 上游，无法并入常规构建流水线。
+#
+# 触发方式：默认仅 workflow_dispatch（手动）——避免在真实 GitHub runner 上验证前
+# 阻塞 PR 门禁。本地等价命令：bash backend-spring/scripts/run-ab-diff.sh（已实测 37/37）。
+# 在 runner 上手动跑通一次后，可按需追加 pull_request 触发器固化为回归门禁。
+on:
+  workflow_dispatch:
+
+jobs:
+  ab-diff:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: nova
+          POSTGRES_USER: nova
+          POSTGRES_PASSWORD: nova
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U nova" --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DB_HOST: localhost
+      DB_PORT: "5432"
+      DB_USERNAME: nova
+      DB_PASSWORD: nova
+      DB_NAME: nova
+      REDIS_HOST: localhost
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ""
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: "Install JS deps (workspaces: frontend + backend)"
+        run: npm ci
+
+      - name: Build frontend static export (frontend/out)
+        run: npm run build
+
+      - name: Build Spring backend jar
+        working-directory: backend-spring
+        run: mvn -B -ntp -DskipTests package
+
+      - name: Start Node backend (3000)
+        working-directory: backend
+        run: |
+          PORT=3000 NODE_ENV=production node server.js > /tmp/node.log 2>&1 &
+          echo "NODE_PID=$!" >> "$GITHUB_ENV"
+
+      - name: Start Spring backend (8080)
+        working-directory: backend-spring
+        run: |
+          java -jar target/nova-studio-backend-0.1.0-SNAPSHOT.jar > /tmp/spring.log 2>&1 &
+          echo "SPRING_PID=$!" >> "$GITHUB_ENV"
+
+      - name: Wait for both backends
+        run: |
+          ok() { curl -sf -o /dev/null "$1"; }
+          for i in $(seq 1 90); do ok http://localhost:3000/api/nova/config && break; sleep 1; done
+          ok http://localhost:3000/api/nova/config || { echo "NODE NOT READY"; tail -50 /tmp/node.log; exit 1; }
+          for i in $(seq 1 90); do ok http://localhost:8080/api/nova/config && break; sleep 1; done
+          ok http://localhost:8080/api/nova/config || { echo "SPRING NOT READY"; tail -80 /tmp/spring.log; exit 1; }
+
+      - name: Run A/B diff (37 probes)
+        run: node backend-spring/scripts/ab-diff/ab-diff.mjs --node http://localhost:3000 --spring http://localhost:8080
+
+      - name: Stop backends
+        if: always()
+        run: |
+          kill "$NODE_PID" "$SPRING_PID" 2>/dev/null || true
