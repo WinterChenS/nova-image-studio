@@ -22,6 +22,7 @@ import tools.jackson.databind.ObjectMapper;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -50,11 +51,24 @@ class TaskApiE2EIntegrationTest {
     private MockWebServer upstream;
     private final RestTemplate rest = new RestTemplate();
     private final ObjectMapper mapper = new ObjectMapper();
+    private String token;
 
     @BeforeEach
     void setUp() throws Exception {
         upstream = new MockWebServer();
         upstream.start();
+        // M2 (WIN-12): task creation requires login (Q1) — register a user and
+        // keep the JWT for all task requests.
+        String username = "e2e_" + UUID.randomUUID().toString().substring(0, 8);
+        Map<String, Object> reg = new LinkedHashMap<>();
+        reg.put("username", username);
+        reg.put("password", "secret123");
+        post("http://localhost:" + port + "/api/auth/register", reg);
+        Map<String, Object> login = new LinkedHashMap<>();
+        login.put("username", username);
+        login.put("password", "secret123");
+        JsonNode loginResp = post("http://localhost:" + port + "/api/auth/login", login);
+        token = loginResp.get("token").asText();
     }
 
     @AfterEach
@@ -82,6 +96,9 @@ class TaskApiE2EIntegrationTest {
     private JsonNode post(String url, Object body) {
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
+        if (token != null) {
+            headers.setBearerAuth(token);
+        }
         ResponseEntity<String> resp = rest.postForEntity(url, new HttpEntity<>(body, headers), String.class);
         try {
             return mapper.readTree(resp.getBody());
@@ -91,7 +108,12 @@ class TaskApiE2EIntegrationTest {
     }
 
     private JsonNode get(String url) {
-        ResponseEntity<String> resp = rest.getForEntity(url, String.class);
+        HttpHeaders headers = new HttpHeaders();
+        if (token != null) {
+            headers.setBearerAuth(token);
+        }
+        ResponseEntity<String> resp = rest.exchange(url, org.springframework.http.HttpMethod.GET,
+                new HttpEntity<>(headers), String.class);
         try {
             return mapper.readTree(resp.getBody());
         } catch (Exception e) {
@@ -215,6 +237,9 @@ class TaskApiE2EIntegrationTest {
     private HttpHeaders headers() {
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
+        if (token != null) {
+            headers.setBearerAuth(token);
+        }
         return headers;
     }
 

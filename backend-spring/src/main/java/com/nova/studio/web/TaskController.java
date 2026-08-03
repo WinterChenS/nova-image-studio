@@ -1,5 +1,7 @@
 package com.nova.studio.web;
 
+import com.nova.studio.auth.AuthFilter;
+import com.nova.studio.auth.AuthUser;
 import com.nova.studio.task.TaskService;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.HttpStatus;
@@ -16,19 +18,15 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * Task API (T1.1/T1.2) — contract-compatible with the Node backend and the
+ * Task API (T1.1/T1.2 + M2 T2.2/T2.4) — contract-compatible with the Node backend and the
  * frontend {@code ccode-task-client.ts}:
  * <ul>
- *   <li>{@code POST /api/nova/tasks} → 202 {@code {taskId}} (validation/rate/queue
- *       errors per Node semantics);</li>
- *   <li>{@code GET /api/nova/tasks/:id} → task object, 404 + expired fallback
- *       for unknown ids;</li>
- *   <li>{@code POST /api/nova/tasks/:id/ack} → TTL renewal (2min grace), always
- *       {@code {ok:true}}.</li>
+ *   <li>{@code POST /api/nova/tasks} → 202 {@code {taskId}} — requires login
+ *       (Q1) and resolves the model config server-side from {@code modelId};</li>
+ *   <li>{@code GET /api/nova/tasks/:id} → task object (owner-only for
+ *       user-owned tasks, NULL-owner legacy tasks stay anonymously readable);</li>
+ *   <li>{@code POST /api/nova/tasks/:id/ack} → TTL renewal (2min grace).</li>
  * </ul>
- * Q2 (user-confirmed): M1 honors the legacy apiKey/baseUrl/protocol inputs the
- * unchanged frontend sends; server-side modelId resolution lands with the
- * settings/registry API in M2.
  */
 @RestController
 @RequestMapping("/api/nova/tasks")
@@ -42,13 +40,15 @@ public class TaskController {
 
     @PostMapping
     public ResponseEntity<Map<String, Object>> create(@RequestBody JsonNode body, HttpServletRequest request) {
-        String taskId = taskService.createTask(body, clientIp(request));
+        AuthUser authUser = AuthFilter.current(request);
+        String taskId = taskService.createTask(body, clientIp(request), authUser);
         return ResponseEntity.status(HttpStatus.ACCEPTED).body(Map.of("taskId", taskId));
     }
 
     @GetMapping("/{taskId}")
-    public ResponseEntity<Map<String, Object>> get(@PathVariable String taskId) {
-        Map<String, Object> task = taskService.getSerializedTask(taskId);
+    public ResponseEntity<Map<String, Object>> get(@PathVariable String taskId, HttpServletRequest request) {
+        AuthUser authUser = AuthFilter.current(request);
+        Map<String, Object> task = taskService.getSerializedTask(taskId, authUser);
         if (task == null) {
             Map<String, Object> expired = new LinkedHashMap<>();
             expired.put("id", taskId);

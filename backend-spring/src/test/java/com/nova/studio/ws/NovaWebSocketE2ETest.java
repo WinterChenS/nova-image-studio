@@ -45,7 +45,8 @@ import static org.assertj.core.api.Assertions.assertThat;
         properties = {
                 "nova.ws.heartbeat-interval-ms=600",
                 "nova.ws.pong-grace-ms=300",
-                "nova.ws.max-heartbeat-misses=2"
+                "nova.ws.max-heartbeat-misses=2",
+                "NOVA_JWT_SECRET=test-secret-test-secret-test-secret-test-secret"
         })
 class NovaWebSocketE2ETest {
 
@@ -61,7 +62,8 @@ class NovaWebSocketE2ETest {
             FlywayAutoConfiguration.class
     })
     @Import({com.nova.studio.config.WebSocketConfig.class, com.nova.studio.config.WsCoreConfig.class,
-            com.nova.studio.web.SpikeTaskController.class})
+            com.nova.studio.web.SpikeTaskController.class,
+            com.nova.studio.auth.JwtService.class})
     static class WsTestApp {
     }
 

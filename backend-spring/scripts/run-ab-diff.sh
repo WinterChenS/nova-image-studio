@@ -9,6 +9,13 @@ export JAVA_HOME="${JAVA_HOME:-C:/Program Files/Java/jdk-21.0.3+9}"
 export PATH="$JAVA_HOME/bin:/c/Program Files/apache-maven-3.9.6/bin:$PATH"
 
 # ---- load real DB/Redis creds for the Spring backend (git-ignored .env) ----
+# WIN-14 review #2: fail loudly when .env is missing (silent empty exports would
+# make the Spring side boot with dummy creds and fail deep inside the A/B run).
+if [ ! -f backend-spring/.env ]; then
+  echo "ERROR: backend-spring/.env 不存在 — 请先复制 .env.example 为 .env 并填入真实凭据" >&2
+  echo "       cp backend-spring/.env.example backend-spring/.env" >&2
+  exit 2
+fi
 # shellcheck disable=SC2046
 export $(grep -E '^[A-Z]' backend-spring/.env | xargs)
 

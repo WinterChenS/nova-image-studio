@@ -1,5 +1,6 @@
 package com.nova.studio.ws;
 
+import com.nova.studio.auth.AuthUser;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.web.socket.CloseStatus;
@@ -15,6 +16,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -188,8 +190,22 @@ public class NovaWebSocketHandler extends TextWebSocketHandler implements TaskEv
         if (taskIdsNode == null || !taskIdsNode.isArray()) {
             return;
         }
+        // Isolation (T2.2): user-owned tasks are only subscribable by their
+        // owner; anonymous/other-user sockets may subscribe to NULL-owner
+        // (legacy/migrated) tasks only. Non-accessible ids are skipped silently.
+        AuthUser authUser = WsAuthHandshakeInterceptor.current(session);
         List<String> ids = new ArrayList<>();
-        taskIdsNode.forEach(n -> ids.add(n.isTextual() ? n.asText() : null));
+        for (JsonNode node : taskIdsNode) {
+            String id = node.isTextual() ? node.asText() : null;
+            if (id == null || id.isBlank()) {
+                continue;
+            }
+            UUID owner = taskLookup.findOwner(id);
+            if (owner != null && (authUser == null || !owner.equals(authUser.id()))) {
+                continue;
+            }
+            ids.add(id);
+        }
         List<Map<String, Object>> pushed = taskRegistry.subscribe(session.getId(), ids,
                 maxTaskIdsPerMessage, maxSubscriptionsPerSocket);
         for (Map<String, Object> task : pushed) {
