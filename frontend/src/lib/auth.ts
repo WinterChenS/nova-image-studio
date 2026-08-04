@@ -42,12 +42,17 @@ export function isLoggedIn(): boolean {
 
 /** 带鉴权的 fetch：已登录时自动附加 Bearer token。 */
 export async function authFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
-  const token = getToken();
   const headers = new Headers(init.headers || {});
-  if (token) {
-    headers.set('Authorization', `Bearer ${token}`);
+  for (const [k, v] of Object.entries(getAuthHeaders())) {
+    headers.set(k, v);
   }
   return fetch(input, { ...init, headers });
+}
+
+/** 当前登录态的 Authorization 头（未登录返回空对象）——供裸 fetch 路径统一注入。 */
+export function getAuthHeaders(): Record<string, string> {
+  const token = getToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
 /** 解析统一错误体 {error, code}；非 JSON 退化为状态文本。 */

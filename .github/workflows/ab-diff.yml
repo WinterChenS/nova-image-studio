@@ -58,8 +58,11 @@ jobs:
           node-version: "22"
           cache: npm
 
-      - name: "Install JS deps (workspaces: frontend + backend)"
-        run: npm ci
+      - name: "Install JS deps (root + frontend + backend)"
+        run: |
+          npm ci
+          cd frontend && npm ci
+          cd ../backend && npm ci
 
       - name: Build frontend static export (frontend/out)
         run: npm run build

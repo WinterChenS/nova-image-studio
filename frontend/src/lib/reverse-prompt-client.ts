@@ -13,6 +13,7 @@ import {
 } from '@/lib/nova-proxy-text';
 import type { TextProviderProtocol } from '@/lib/nova-text-protocol';
 import { readSseStream } from '@/lib/sse-stream-parser';
+import { getAuthHeaders } from '@/lib/auth';
 
 export interface StreamReverseInput {
   modelRef: string;
@@ -75,7 +76,7 @@ async function streamTextProtocol(
 
   const response = await fetch('/api/nova/proxy/text', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
     body: JSON.stringify({
       protocol,
       modelId: input.modelRef,

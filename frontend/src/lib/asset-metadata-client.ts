@@ -6,6 +6,7 @@ import {
   extractTextOutput,
 } from '@/lib/nova-proxy-text';
 import type { TextProviderProtocol } from '@/lib/nova-text-protocol';
+import { getAuthHeaders } from '@/lib/auth';
 
 const ASSET_METADATA_MODEL = 'gpt-5.4-mini';
 
@@ -68,7 +69,7 @@ export async function generateAssetMetadata(input: GenerateAssetMetadataInput): 
 
   const response = await fetch('/api/nova/proxy/text', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
     body: JSON.stringify({
       protocol,
       modelId: input.modelRef,

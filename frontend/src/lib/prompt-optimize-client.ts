@@ -8,6 +8,7 @@ import {
 } from '@/lib/nova-proxy-text';
 import type { TextProviderProtocol } from '@/lib/nova-text-protocol';
 import { readSseStream } from '@/lib/sse-stream-parser';
+import { getAuthHeaders } from '@/lib/auth';
 
 const OPTIMIZE_MODEL = 'gpt-5.4-mini';
 const OPTIMIZE_TIMEOUT_MS = 30_000;
@@ -195,7 +196,7 @@ async function runAttempt(
   try {
     const response = await fetch('/api/nova/proxy/text', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
       body: JSON.stringify({
         protocol,
         modelId: input.modelRef,

@@ -22,6 +22,7 @@ import {
 } from '@/lib/nova-proxy-text';
 import type { TextProviderProtocol } from '@/lib/nova-text-protocol';
 import { readSseStream } from '@/lib/sse-stream-parser';
+import { getAuthHeaders } from '@/lib/auth';
 
 const AGENT_GPT_REQUEST_MAX_ATTEMPTS = 3;
 const AGENT_CHAT_ATTEMPT_TIMEOUT_MS = 45_000;
@@ -304,7 +305,7 @@ async function runAgentStream(
 
   const response = await fetch('/api/nova/proxy/text', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
     body: JSON.stringify({
       protocol: input.protocol,
       modelId: input.modelRef,
@@ -393,7 +394,7 @@ async function requestImageDescription(
 
   const response = await fetch('/api/nova/proxy/text', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
     body: JSON.stringify({
       protocol,
       modelId: modelRef,

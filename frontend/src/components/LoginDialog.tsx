@@ -1,7 +1,7 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { LogIn, UserPlus, X } from 'lucide-react';
+import { useState } from 'react';
+import { LogIn, UserPlus } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
@@ -29,15 +29,18 @@ export function LoginDialog({ open, onOpenChange }: LoginDialogProps) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  useEffect(() => {
-    if (open) {
+  // G1 (WIN-12 复审): 打开时重置表单放在 onOpenChange 事件里，避免 effect 内同步 setState
+  const handleOpenChange = (next: boolean) => {
+    if (busy) return;
+    if (next) {
       setMode('login');
       setUsername('');
       setPassword('');
       setError(null);
       setBusy(false);
     }
-  }, [open]);
+    onOpenChange(next);
+  };
 
   const handleSubmit = async () => {
     if (!username.trim() || !password) {
@@ -62,9 +65,7 @@ export function LoginDialog({ open, onOpenChange }: LoginDialogProps) {
   };
 
   return (
-    <Dialog open={open} onOpenChange={(next) => {
-      if (!busy) onOpenChange(next);
-    }}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="sm:max-w-sm">
         <DialogHeader>
           <div className="flex items-center gap-2">

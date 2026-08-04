@@ -9,6 +9,7 @@ import {
   type ProviderProtocol,
 } from '@/lib/nova-models';
 import type { TextProviderProtocol } from '@/lib/nova-text-protocol';
+import { getAuthHeaders } from '@/lib/auth';
 
 export interface ImageReference {
   data: string;
@@ -168,8 +169,14 @@ async function fetchWithTimeout(
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
+    // M2 (T2.5): 核心任务路径统一注入 JWT（任务创建/读取/ack 均需登录）
+    const headers = new Headers(init.headers || {});
+    for (const [k, v] of Object.entries(getAuthHeaders())) {
+      headers.set(k, v);
+    }
     return await fetch(input, {
       ...init,
+      headers,
       signal: controller.signal,
     });
   } catch (error) {
@@ -264,9 +271,7 @@ export async function checkModelsAvailability(
 }
 
 function authHeaders(): Record<string, string> {
-  if (typeof window === 'undefined') return {};
-  const token = window.localStorage.getItem('nova-auth-token');
-  return token ? { Authorization: `Bearer ${token}` } : {};
+  return getAuthHeaders();
 }
 
 export function resolveImageTaskProvider(modelId: string): { protocol: ProviderProtocol; modelId: string } {
@@ -313,6 +318,7 @@ export async function getNovaQueueStatus(): Promise<NovaQueueStatus> {
 export async function ackNovaTask(taskId: string): Promise<void> {
   await fetch(`/api/nova/tasks/${encodeURIComponent(taskId)}/ack`, {
     method: 'POST',
+    headers: getAuthHeaders(),
   }).catch(() => undefined);
 }
 

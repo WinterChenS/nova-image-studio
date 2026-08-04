@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { AgentAssetPickerDialog, AgentTextAssetPickerDialog } from "@/components/agent/AgentAssetPickerDialog";
 import { addImageAsset, addTextAsset, getAssetBlob, type ImageAsset, type TextAsset } from "@/lib/asset-store";
+import { getAuthHeaders } from "@/lib/auth";
 import { InfiniteCanvas } from "./components/infinite-canvas";
 import { CanvasNode, type ResizeCorner } from "./components/canvas-node";
 import { ActiveConnectionPath, ConnectionPath } from "./components/canvas-connections";
@@ -1556,7 +1557,7 @@ export function CanvasEditor({ projectId, onBack, onRequireApiKey, showToast, sh
 
       const response = await fetch("/api/nova/proxy/text", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...getAuthHeaders() },
         body: JSON.stringify({
           protocol: textModel.protocol,
           modelId: textModel.id,
@@ -1657,11 +1658,10 @@ export function CanvasEditor({ projectId, onBack, onRequireApiKey, showToast, sh
 
         const response = await fetch("/api/nova/proxy/text", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", ...getAuthHeaders() },
           body: JSON.stringify({
             protocol: textModel.protocol,
-            baseUrl: textModel.baseUrl,
-            apiKey: textModel.apiKey,
+            modelId: textModel.id,
             model: textModel.modelId,
             stream: true,
             requestBody: body,

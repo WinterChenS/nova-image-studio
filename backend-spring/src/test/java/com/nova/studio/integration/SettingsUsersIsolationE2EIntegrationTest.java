@@ -5,6 +5,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.http.HttpEntity;
@@ -37,6 +38,9 @@ class SettingsUsersIsolationE2EIntegrationTest {
 
     @LocalServerPort
     int port;
+
+    @Autowired
+    private com.nova.studio.task.TaskRepository taskRepository;
 
     private MockWebServer upstream;
     private final RestTemplate rest = new RestTemplate();
@@ -269,6 +273,26 @@ class SettingsUsersIsolationE2EIntegrationTest {
                 org.springframework.http.HttpMethod.GET, new HttpEntity<>(bearer(null)), String.class))
                 .isInstanceOf(HttpClientErrorException.class)
                 .satisfies(e -> assertThat(((HttpClientErrorException) e).getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND));
+    }
+
+    @Test
+    void anonymousCanReadLegacyNullTask() {
+        // N1 (WIN-12 复审): 匿名可读 NULL 归属（遗留/迁移）任务 — 直接插入一条
+        // user_id = NULL 的任务行，匿名 GET 应返回 200 排队中（Q1 匿名只读边界）。
+        String legacyTaskId = "legacy-null-" + UUID.randomUUID().toString().substring(0, 8);
+        taskRepository.insertTaskAndItems(legacyTaskId, null, com.nova.studio.task.TaskRepository.STATUS_QUEUED,
+                "text-to-image", "{\"mode\":\"text-to-image\",\"prompt\":\"legacy\"}",
+                java.time.Instant.now().toString(), 1);
+        try {
+            ResponseEntity<String> resp = rest.exchange(base() + "/api/nova/tasks/" + legacyTaskId,
+                    org.springframework.http.HttpMethod.GET, new HttpEntity<>(bearer(null)), String.class);
+            assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+            JsonNode task = parse(resp.getBody());
+            assertThat(task.get("id").asText()).isEqualTo(legacyTaskId);
+            assertThat(task.get("status").asText()).isIn("排队中", "queued");
+        } finally {
+            taskRepository.deleteTaskAndItems(legacyTaskId);
+        }
     }
 
     private HttpHeaders bearer(String token) {
