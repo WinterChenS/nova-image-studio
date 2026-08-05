@@ -13,9 +13,10 @@ import {
 } from '@/lib/nova-proxy-text';
 import type { TextProviderProtocol } from '@/lib/nova-text-protocol';
 import { readSseStream } from '@/lib/sse-stream-parser';
+import { getAuthHeaders } from '@/lib/auth';
 
 export interface StreamReverseInput {
-  apiKey: string;
+  modelRef: string;
   model: ReversePromptModelId;
   mode: ReversePromptMode;
   imageDataUrl: string;
@@ -36,7 +37,6 @@ export interface StreamReverseHandle {
 export function streamReversePrompt(
   input: StreamReverseInput,
   callbacks: StreamReverseCallbacks,
-  baseUrl: string = '',
 ): StreamReverseHandle {
   const controller = new AbortController();
 
@@ -44,9 +44,8 @@ export function streamReversePrompt(
     try {
       const configuredModel = getConfiguredTextModel(input.model);
       const protocol = (configuredModel?.protocol || 'openai-responses') as TextProviderProtocol;
-      const resolvedBaseUrl = configuredModel?.baseUrl || baseUrl;
       const resolvedModelId = configuredModel?.modelId || input.model;
-      await streamTextProtocol(protocol, resolvedBaseUrl, { ...input, model: resolvedModelId }, callbacks, controller.signal);
+      await streamTextProtocol(protocol, { ...input, model: resolvedModelId }, callbacks, controller.signal);
     } catch (err) {
       if (controller.signal.aborted) return;
       callbacks.onError(normalizeStreamError(err));
@@ -61,7 +60,6 @@ export function streamReversePrompt(
 
 async function streamTextProtocol(
   protocol: TextProviderProtocol,
-  baseUrl: string,
   input: StreamReverseInput,
   callbacks: StreamReverseCallbacks,
   signal: AbortSignal,
@@ -78,11 +76,10 @@ async function streamTextProtocol(
 
   const response = await fetch('/api/nova/proxy/text', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
     body: JSON.stringify({
       protocol,
-      baseUrl,
-      apiKey: input.apiKey,
+      modelId: input.modelRef,
       model: input.model,
       stream: true,
       requestBody: body,

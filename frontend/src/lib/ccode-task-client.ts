@@ -8,11 +8,8 @@ import {
   loadRegistry,
   type ProviderProtocol,
 } from '@/lib/nova-models';
-import {
-  normalizeModelBaseUrl,
-  normalizeTextModelBaseUrl,
-} from '@/lib/model-endpoints';
 import type { TextProviderProtocol } from '@/lib/nova-text-protocol';
+import { getAuthHeaders } from '@/lib/auth';
 
 export interface ImageReference {
   data: string;
@@ -34,16 +31,15 @@ export type NovaTaskMode = 'text-to-image' | 'image-to-image';
 export type NovaTaskStatus = 'queued' | '排队中' | 'processing' | 'completed' | 'failed' | 'expired';
 
 export interface CreateNovaTaskInput {
-  apiKey: string;
-  baseUrl: string;
-  protocol: ProviderProtocol;
+  // M2 (T2.4): apiKey/baseUrl/protocol 不再由前端传递 —— 服务端按 modelId
+  // （注册表 UUID）从 DB 解析协议/Key。
   mode: NovaTaskMode;
   prompt: string;
   outputSize: OutputSize;
   customSize?: string;
   aspectRatio: AspectRatio;
   temperature: number;
-  model: string;
+  model: string; // 注册表模型 UUID
   gptImageQuality?: GptImageQuality;
   gptImageStyle?: GptImageStyle;
   gptImageBackground?: GptImageBackground;
@@ -173,8 +169,14 @@ async function fetchWithTimeout(
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
+    // M2 (T2.5): 核心任务路径统一注入 JWT（任务创建/读取/ack 均需登录）
+    const headers = new Headers(init.headers || {});
+    for (const [k, v] of Object.entries(getAuthHeaders())) {
+      headers.set(k, v);
+    }
     return await fetch(input, {
       ...init,
+      headers,
       signal: controller.signal,
     });
   } catch (error) {
@@ -207,22 +209,8 @@ export async function checkModelsAvailability(
     const completeImageModels = getCompleteImageModels(registry);
     const completeTextModels = getCompleteTextModels(registry);
     const configuredModels = [
-      ...completeImageModels.map((model) => ({
-        id: model.id,
-        name: model.name,
-        protocol: model.protocol,
-        baseUrl: model.baseUrl,
-        apiKey: model.apiKey,
-        modelId: model.modelId,
-      })),
-      ...completeTextModels.map((model) => ({
-        id: model.id,
-        name: model.name,
-        protocol: model.protocol,
-        baseUrl: model.baseUrl,
-        apiKey: model.apiKey,
-        modelId: model.modelId,
-      })),
+      ...completeImageModels.map((model) => ({ id: model.id, name: model.name, protocol: model.protocol, modelId: model.modelId })),
+      ...completeTextModels.map((model) => ({ id: model.id, name: model.name, protocol: model.protocol, modelId: model.modelId })),
     ];
 
     const filteredModels = targetModelIds && targetModelIds.length > 0
@@ -233,23 +221,14 @@ export async function checkModelsAvailability(
       return [];
     }
 
+    // M2 (T2.4): 服务端按 modelId 解析配置与 Key（/api/nova/proxy/models?modelId=）。
     return Promise.all(filteredModels.map(async (model) => {
       try {
-        const normalizedBaseUrl = completeImageModels.some(imageModel => imageModel.id === model.id)
-          ? normalizeModelBaseUrl(model.protocol as ProviderProtocol, model.baseUrl)
-          : normalizeTextModelBaseUrl(model.protocol as TextProviderProtocol, model.baseUrl);
-        if (!normalizedBaseUrl || !model.apiKey || !model.modelId) {
-          return {
-            modelId: model.id,
-            actualName: model.name,
-            available: false,
-            message: '模型配置不完整',
-          };
-        }
-
-        // 统一通过后端代理使用 /v1/models（NewAPI 兼容）
-        const proxyUrl = `/api/nova/proxy/models?baseUrl=${encodeURIComponent(normalizedBaseUrl)}&apiKey=${encodeURIComponent(model.apiKey)}&protocol=${model.protocol}`;
-        const response = await fetch(proxyUrl, { method: 'GET', cache: 'no-store' });
+        const response = await fetch(`/api/nova/proxy/models?modelId=${encodeURIComponent(model.id)}`, {
+          method: 'GET',
+          cache: 'no-store',
+          headers: authHeaders(),
+        });
         if (!response.ok) {
           const detail = await response.text().catch(() => '');
           return {
@@ -291,29 +270,33 @@ export async function checkModelsAvailability(
   }
 }
 
-export function resolveImageTaskProvider(modelId: string): { apiKey: string; baseUrl: string; protocol: ProviderProtocol; modelId: string } {
+function authHeaders(): Record<string, string> {
+  return getAuthHeaders();
+}
+
+export function resolveImageTaskProvider(modelId: string): { protocol: ProviderProtocol; modelId: string } {
+  // M2 (T2.4): 仅用于检查模型是否可解析（key 由服务端解析），不再返回密钥。
   const registry = loadRegistry();
   const model = getImageModelById(registry, modelId);
   if (!model) throw new Error(`未找到图片模型配置: ${modelId}`);
-  const normalizedBaseUrl = normalizeModelBaseUrl(model.protocol, model.baseUrl);
-  return {
-    apiKey: model.apiKey,
-    baseUrl: normalizedBaseUrl,
-    protocol: model.protocol,
-    modelId: model.modelId,
-  };
+  return { protocol: model.protocol, modelId: model.modelId };
 }
 
-export function resolveTextTaskProvider(modelId: string): { apiKey: string; baseUrl: string; protocol: TextProviderProtocol } {
+/**
+ * 已配置（含 Key）的图片模型；未配置返回 null。M2 起 apiKey 为服务端掩码值，
+ * 非空即表示已配置。
+ */
+export function getConfiguredImageModel(modelId: string): import('@/lib/nova-models').ImageModelConfig | null {
+  const registry = loadRegistry();
+  const model = getImageModelById(registry, modelId);
+  return model && model.apiKey ? model : null;
+}
+
+export function resolveTextTaskProvider(modelId: string): { protocol: TextProviderProtocol } {
   const registry = loadRegistry();
   const model = getTextModelById(registry, modelId);
   if (!model) throw new Error(`未找到文本模型配置: ${modelId}`);
-  const normalizedBaseUrl = normalizeTextModelBaseUrl(model.protocol, model.baseUrl);
-  return {
-    apiKey: model.apiKey,
-    baseUrl: normalizedBaseUrl,
-    protocol: model.protocol,
-  };
+  return { protocol: model.protocol };
 }
 
 export async function getNovaTask(taskId: string): Promise<NovaTaskResponse> {
@@ -335,6 +318,7 @@ export async function getNovaQueueStatus(): Promise<NovaQueueStatus> {
 export async function ackNovaTask(taskId: string): Promise<void> {
   await fetch(`/api/nova/tasks/${encodeURIComponent(taskId)}/ack`, {
     method: 'POST',
+    headers: getAuthHeaders(),
   }).catch(() => undefined);
 }
 

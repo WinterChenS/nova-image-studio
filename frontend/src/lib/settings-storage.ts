@@ -1,6 +1,7 @@
 'use client';
 
 import { getCompleteImageModels, getCompleteTextModels, loadRegistry } from '@/lib/nova-models';
+import { fetchSetting, saveSetting, WORKBENCH_SETTING_KEYS } from '@/lib/settings-api';
 
 export function getStoredApiKey(): string {
   const registry = loadRegistry();
@@ -39,4 +40,31 @@ export function loadJsonFromStorage<T>(key: string): Partial<T> {
 export function saveJsonToStorage<T>(key: string, value: T): void {
   if (typeof window === 'undefined') return;
   localStorage.setItem(key, JSON.stringify(value));
+}
+
+/**
+ * M2 (T2.3)：表单默认值改走设置 API（workbench.*），不再读写 localStorage。
+ * 这两个函数是旧 localStorage 路径（仅迁移向导/UI 偏好使用）。
+ */
+export async function loadApiJsonSetting<T>(key: string, fallback: T): Promise<T> {
+  return fetchSetting<T>(key, fallback);
+}
+
+/** 异步写回设置 API（fire-and-forget，失败静默——下次保存会重试）。 */
+export function saveApiJsonSetting<T>(key: string, value: T): void {
+  void saveSetting(key, value).catch(() => {
+    // 忽略（网络/未登录），表单仍可继续工作
+  });
+}
+
+/** 工作台表单默认值 → 设置 API key 映射（ARCH C.4 workbench.* 命名空间）。 */
+export function workbenchSettingKey(legacyKey: string): string {
+  const mapping: Record<string, string> = {
+    'nova-t2i-settings': WORKBENCH_SETTING_KEYS.t2i,
+    'nova-i2i-settings': WORKBENCH_SETTING_KEYS.i2i,
+    'nova-reverse-prompt-settings': WORKBENCH_SETTING_KEYS.reverse,
+    'nova-gif-settings': WORKBENCH_SETTING_KEYS.gif,
+    'nova-agent-params': WORKBENCH_SETTING_KEYS.agent,
+  };
+  return mapping[legacyKey] || legacyKey;
 }

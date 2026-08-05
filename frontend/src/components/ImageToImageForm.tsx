@@ -47,7 +47,7 @@ import {
 import { prepareUploadImage, getOptimizationBadge } from '@/lib/upload-image-cache';
 import { MAX_UPLOAD_SIZE_BYTES } from '@/lib/constants';
 import { dispatchImageActionToast } from '@/lib/image-actions';
-import { loadJsonFromStorage, saveJsonToStorage } from '@/lib/settings-storage';
+import { loadApiJsonSetting, saveApiJsonSetting, workbenchSettingKey } from '@/lib/settings-storage';
 import type { RefImageData, OutputSize, AspectRatio } from '@/lib/job-store';
 import type { ImageFormSettings } from '@/lib/form-settings';
 
@@ -164,13 +164,12 @@ export function ImageToImageForm({
 
     const images = pendingFiles.map(f => ({ dataUrl: f.dataUrl, mimeType: f.mimeType }));
     const handle = streamPromptOptimize(
-      { apiKey: textModel.apiKey, model: textModel.id, mode: 'image-to-image', prompt: prompt.trim(), images },
+      { modelRef: textModel.id, model: textModel.id, mode: 'image-to-image', prompt: prompt.trim(), images },
       {
         onDelta(token) { setOptimizedText(prev => prev + token); },
         onDone() { setOptimizing(false); },
         onError(err) { setOptimizeError(err.message); setOptimizing(false); },
       },
-      textModel.baseUrl,
     );
     optimizeHandleRef.current = handle;
   }, [prompt, pendingFiles]);
@@ -258,7 +257,16 @@ export function ImageToImageForm({
   const customSizeMaxSide = getCustomSizeMaxSide(model) || 2048;
   const displaySizeLabel = customSize || getOutputSizeLabel(outputSize);
 
-  // 挂载后恢复缓存设置（仅客户端执行）
+  // 挂载后恢复设置（M2 T2.3：从设置 API 读取 workbench.i2i）
+  const [savedSettings, setSavedSettings] = useState<Partial<I2ISettings>>({});
+  useEffect(() => {
+    let cancelled = false;
+    void loadApiJsonSetting<Partial<I2ISettings>>(workbenchSettingKey(I2I_SETTINGS_KEY), {}).then((s) => {
+      if (!cancelled) setSavedSettings(s);
+    });
+    return () => { cancelled = true; };
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -266,7 +274,7 @@ export function ImageToImageForm({
       if (cancelled) return;
       const useInitial = initialData ? true : false;
 
-    const saved = loadJsonFromStorage<I2ISettings>(I2I_SETTINGS_KEY);
+    const saved = savedSettings;
 
     const nextModel = normalizeModel(useInitial && initialData?.model ? initialData.model : saved.model);
     const validSizes = getValidOutputSizes(nextModel);
@@ -321,12 +329,12 @@ export function ImageToImageForm({
     return () => {
       cancelled = true;
     };
-  }, [initialData]);
+  }, [initialData, savedSettings]);
 
-  // 保存设置到缓存
+  // 保存设置到服务器（M2 T2.3）
   useEffect(() => {
     if (!settingsReady) return;
-    saveJsonToStorage(I2I_SETTINGS_KEY, {
+    saveApiJsonSetting(workbenchSettingKey(I2I_SETTINGS_KEY), {
       model,
       outputSize,
       customSize,

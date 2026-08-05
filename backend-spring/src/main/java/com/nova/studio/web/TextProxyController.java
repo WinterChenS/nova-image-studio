@@ -1,7 +1,11 @@
 package com.nova.studio.web;
 
+import com.nova.studio.auth.AuthFilter;
+import com.nova.studio.auth.AuthUser;
 import com.nova.studio.infra.NormalizedError;
+import com.nova.studio.settings.ModelService;
 import com.nova.studio.textproxy.TextProxyService;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -16,7 +20,7 @@ import java.util.Map;
 import java.util.regex.Pattern;
 
 /**
- * Text proxy endpoint (T1.5) — {@code POST /api/nova/proxy/text}. Port of the
+ * Text proxy endpoint (T1.5 + M2 T2.4) — {@code POST /api/nova/proxy/text}. Port of the
  * Node handler: SSE streaming passthrough when {@code stream} is requested and
  * the upstream is 2xx (headers {@code text/event-stream}, {@code Cache-Control:
  * no-cache}, {@code Connection: keep-alive}, {@code X-Accel-Buffering: no}),
@@ -24,6 +28,10 @@ import java.util.regex.Pattern;
  * failures map to 502 (timeouts → 504). Writes directly to
  * {@link HttpServletResponse} so the upstream status/headers and the
  * incremental SSE body are forwarded exactly.
+ *
+ * <p>M2: the request may carry {@code modelId} (registry UUID) — the server
+ * resolves baseUrl/apiKey/protocol from the user's models and the plaintext
+ * key never reaches the client. Legacy apiKey/baseUrl inputs stay supported.
  */
 @RestController
 @RequestMapping("/api/nova/proxy/text")
@@ -32,24 +40,52 @@ public class TextProxyController {
     private static final Pattern TIMEOUT_PATTERN = Pattern.compile("(?i)abort|timeout");
 
     private final TextProxyService textProxyService;
+    private final ModelService modelService;
     private final long requestTimeoutMs;
     private final ObjectMapper objectMapper;
 
     public TextProxyController(TextProxyService textProxyService,
+                               ModelService modelService,
                                @Value("${nova.task.request-timeout-ms:1800000}") long requestTimeoutMs,
                                ObjectMapper objectMapper) {
         this.textProxyService = textProxyService;
+        this.modelService = modelService;
         this.requestTimeoutMs = requestTimeoutMs;
         this.objectMapper = objectMapper;
     }
 
     @PostMapping
-    public void proxy(@RequestBody(required = false) JsonNode body, HttpServletResponse response) throws IOException {
+    public void proxy(@RequestBody(required = false) JsonNode body, HttpServletRequest request,
+                      HttpServletResponse response) throws IOException {
         String protocol = text(body, "protocol");
         String baseUrl = text(body, "baseUrl");
         String apiKey = text(body, "apiKey");
         String model = text(body, "model");
         boolean stream = body != null && body.has("stream") && body.get("stream").asBoolean(false);
+
+        // M2 resolution: modelId (registry UUID) → server-side config.
+        AuthUser authUser = AuthFilter.current(request);
+        String modelIdField = text(body, "modelId");
+        if (modelIdField != null && authUser != null) {
+            ModelService.ResolvedModel resolved = modelService.resolve(authUser.id(), modelIdField).orElse(null);
+            if (resolved == null) {
+                writeJson(response, 400, Map.of("error", "未找到文本模型配置"));
+                return;
+            }
+            if (!"text".equals(resolved.type())) {
+                writeJson(response, 400, Map.of("error", "模型不是文本模型"));
+                return;
+            }
+            if (resolved.apiKey() == null || resolved.apiKey().isBlank()) {
+                writeJson(response, 400, Map.of("error", "模型配置不完整，请先在设置中填写 API Key"));
+                return;
+            }
+            protocol = resolved.protocol();
+            baseUrl = resolved.baseUrl();
+            apiKey = resolved.apiKey();
+            model = resolved.modelId();
+        }
+
         if (baseUrl == null || apiKey == null) {
             writeJson(response, 400, Map.of("error", "Missing baseUrl or apiKey"));
             return;

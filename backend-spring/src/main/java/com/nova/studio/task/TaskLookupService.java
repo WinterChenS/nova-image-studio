@@ -72,4 +72,17 @@ public class TaskLookupService implements WsTaskLookup {
     public Map<String, Object> loadTaskMessage(String taskId) {
         return repository.findById(taskId).map(this::serializeTask).orElse(null);
     }
+
+    /** Task owner (null = system/legacy). Used for read isolation (T2.2). */
+    public java.util.UUID findOwner(String taskId) {
+        String owner = repository.findById(taskId).map(TaskRepository.TaskRow::userId).orElse(null);
+        if (owner == null || owner.isBlank()) {
+            return null;
+        }
+        try {
+            return java.util.UUID.fromString(owner);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
 }

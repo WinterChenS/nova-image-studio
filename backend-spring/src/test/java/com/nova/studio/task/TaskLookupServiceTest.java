@@ -41,12 +41,15 @@ class TaskLookupServiceTest {
 
     @Test
     void completedTaskIncludesParsedResultAndWarning() {
+        // now-relative timestamps so the test stays green after the frozen
+        // 2026-08-03T12:00Z expiresAt passed (latent time-bomb, fixed WIN-12).
+        Instant now = Instant.now();
         TaskRepository.TaskRow row = new TaskRepository.TaskRow(
                 "t1", null, TaskRepository.STATUS_COMPLETED, "text-to-image",
                 "{}", "{\"images\":[\"URL:/api/nova/images/t1/0\"]}", null,
                 "1 张图片生成失败: boom",
-                Instant.parse("2026-08-03T00:00:00Z"), Instant.parse("2026-08-03T00:01:00Z"),
-                Instant.parse("2026-08-03T12:00:00Z"));
+                now.minusSeconds(3600), now.minusSeconds(3540),
+                now.plusSeconds(3600));
         when(repository.findById("t1")).thenReturn(Optional.of(row));
 
         Map<String, Object> msg = service.loadTaskMessage("t1");
@@ -59,14 +62,27 @@ class TaskLookupServiceTest {
     void expiredTaskDerivesExpiredStatus() {
         TaskRepository.TaskRow row = new TaskRepository.TaskRow(
                 "t1", null, TaskRepository.STATUS_COMPLETED, "text-to-image",
-                "{}", "{}", null, null, Instant.parse("2026-08-02T00:00:00Z"),
-                Instant.parse("2026-08-02T00:01:00Z"), Instant.parse("2026-08-02T12:00:00Z"));
+                "{}", "{}", null, null, Instant.now().minusSeconds(7200),
+                Instant.now().minusSeconds(7140), Instant.now().minusSeconds(3600));
         when(repository.findById("t1")).thenReturn(Optional.of(row));
 
         Map<String, Object> msg = service.loadTaskMessage("t1");
 
         assertThat(msg).containsEntry("status", TaskRepository.STATUS_EXPIRED);
         assertThat(msg).containsEntry("error", "该任务已超出取回时间");
+    }
+
+    @Test
+    void queuedTaskWithFutureExpiryKeepsQueuedStatus() {
+        TaskRepository.TaskRow row = new TaskRepository.TaskRow(
+                "t1", null, TaskRepository.STATUS_QUEUED, "text-to-image",
+                "{}", null, null, null, Instant.now(), null,
+                Instant.now().plusSeconds(3600));
+        when(repository.findById("t1")).thenReturn(Optional.of(row));
+
+        Map<String, Object> msg = service.loadTaskMessage("t1");
+
+        assertThat(msg).containsEntry("status", TaskRepository.STATUS_QUEUED);
     }
 
     @Test

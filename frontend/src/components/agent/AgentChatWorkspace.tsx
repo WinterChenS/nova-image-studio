@@ -70,7 +70,7 @@ import { AgentGenerationProgress } from '@/components/agent/AgentGenerationResul
 import { CustomSizeDialog } from '@/components/CustomSizeDialog';
 
 import { MAX_UPLOAD_SIZE_BYTES } from '@/lib/constants';
-import { loadJsonFromStorage, saveJsonToStorage } from '@/lib/settings-storage';
+import { loadApiJsonSetting, saveApiJsonSetting, workbenchSettingKey } from '@/lib/settings-storage';
 
 const MAX_AGENT_ASSET_IMPORTS = 5;
 const AGENT_PARAMS_KEY = 'nova-agent-params';
@@ -146,8 +146,15 @@ export function AgentChatWorkspace({ wideMode = false, disabled = false, onConfi
 
   const intentRecognition = agent.intentRecognition;
 
-  // ===== 用户参数状态（持久化到 localStorage）=====
-  const savedParams = loadJsonFromStorage<AgentParamsSettings>(AGENT_PARAMS_KEY);
+  // ===== 用户参数状态（M2 T2.3：持久化到设置 API workbench.agent）=====
+  const [savedParams, setSavedParams] = useState<Partial<AgentParamsSettings>>({});
+  useEffect(() => {
+    let cancelled = false;
+    void loadApiJsonSetting<Partial<AgentParamsSettings>>(workbenchSettingKey(AGENT_PARAMS_KEY), {}).then((s) => {
+      if (!cancelled) setSavedParams(s);
+    });
+    return () => { cancelled = true; };
+  }, []);
   const initialUserModel = normalizeModel(savedParams.model || agent.imageModel);
   const initialUserOutputSizes = getValidOutputSizes(initialUserModel);
   const initialUserOutputSize: OutputSize = savedParams.outputSize && initialUserOutputSizes.includes(savedParams.outputSize)
@@ -184,9 +191,9 @@ export function AgentChatWorkspace({ wideMode = false, disabled = false, onConfi
   const supportsTemperature = getSupportsTemperature(userModel);
   const supportsAdvancedParams = supportsGptImageAdvancedParams(userModel);
 
-  // 参数变化时自动持久化
+  // 参数变化时自动持久化到服务器
   useEffect(() => {
-    saveJsonToStorage(AGENT_PARAMS_KEY, {
+    saveApiJsonSetting(workbenchSettingKey(AGENT_PARAMS_KEY), {
       model: userModel,
       outputSize: userOutputSize,
       aspectRatio: userAspectRatio,
@@ -494,13 +501,12 @@ export function AgentChatWorkspace({ wideMode = false, disabled = false, onConfi
     setOptimizeOpen(true);
 
     const handle = streamPromptOptimize(
-      { apiKey: textModel.apiKey, model: textModel.id, mode: 'agent', prompt: text, context: context || undefined },
+      { modelRef: textModel.id, model: textModel.id, mode: 'agent', prompt: text, context: context || undefined },
       {
         onDelta(token) { setOptimizedText(prev => prev + token); },
         onDone() { setOptimizing(false); },
         onError(err) { setOptimizeError(err.message); setOptimizing(false); },
       },
-      textModel.baseUrl,
     );
     optimizeHandleRef.current = handle;
   }, [agent.messages, agent.images]);

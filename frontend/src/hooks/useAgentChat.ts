@@ -1,9 +1,10 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { hasAnyApiKey } from '@/lib/settings-storage';
+import { hasAnyApiKey, saveApiJsonSetting } from '@/lib/settings-storage';
+import { fetchSetting } from '@/lib/settings-api';
 import { generateUUID } from '@/lib/uuid';
-import { createNovaTask, getNovaTask, resolveImageTaskProvider, type ImageReference } from '@/lib/ccode-task-client';
+import { createNovaTask, getNovaTask, getConfiguredImageModel, type ImageReference } from '@/lib/ccode-task-client';
 import { fetchImageAsBlob } from '@/lib/image-downloader';
 import {
   getGptImageAdvancedParamsForModel,
@@ -188,12 +189,21 @@ export function useAgentChat() {
   const [generatingStartedAt, setGeneratingStartedAt] = useState<number | null>(null);
   const [generationDraft, setGenerationDraft] = useState<AgentGenerationDraft | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
-  const [webSearchEnabled, setWebSearchEnabled] = useState(() =>
-    typeof localStorage !== 'undefined' ? localStorage.getItem('nova-agent-web-search') === 'true' : false
-  );
-  const [intentRecognition, setIntentRecognition] = useState(() =>
-    typeof localStorage !== 'undefined' ? localStorage.getItem('nova-agent-intent-recognition') !== 'false' : true
-  );
+  // M2 (T2.3): Agent 开关改走设置 API（agent.webSearch / agent.intentRecognition）
+  const [webSearchEnabled, setWebSearchEnabled] = useState(false);
+  const [intentRecognition, setIntentRecognition] = useState(true);
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([
+      fetchSetting('agent.webSearch', false),
+      fetchSetting('agent.intentRecognition', true),
+    ]).then(([ws, ir]) => {
+      if (cancelled) return;
+      setWebSearchEnabled(ws);
+      setIntentRecognition(ir);
+    });
+    return () => { cancelled = true; };
+  }, []);
 
   const streamHandleRef = useRef<StreamAgentHandle | null>(null);
   const mountedRef = useRef(true);
@@ -351,12 +361,11 @@ export function useAgentChat() {
     try {
       const configured = getAgentTextModelConfig();
       description = await describeImage(
-        configured.apiKey,
+        configured.id,
         configured.modelId,
         configured.protocol,
         previewDataUrl,
         describeSignal,
-        configured.baseUrl,
       );
     } catch {
       description = '(图片描述生成失败)';
@@ -384,12 +393,11 @@ export function useAgentChat() {
     if (!record) throw new Error(`图片 ${imgId} 不存在`);
     const configured = getAgentTextModelConfig();
     const newDescription = await describeImage(
-      configured.apiKey,
+      configured.id,
       configured.modelId,
       configured.protocol,
       record.thumbnail,
       undefined,
-      configured.baseUrl,
     );
     const description = newDescription || '(无描述)';
     const updated: AgentImageRecord = { ...record, description };
@@ -410,7 +418,7 @@ export function useAgentChat() {
 
     const handle = streamAgentChat(
       {
-        apiKey: configured.apiKey,
+        modelRef: configured.id,
         model: configured.modelId,
         protocol: configured.protocol,
         history,
@@ -486,7 +494,6 @@ export function useAgentChat() {
           setPhase('idle');
         },
       },
-      configured.baseUrl,
     );
     streamHandleRef.current = handle;
   }, [appendMessage, appendStreamingToken, flushAndCancelRaf, getAgentTextModelConfig, webSearchEnabled]);
@@ -834,19 +841,17 @@ export function useAgentChat() {
         if (bytes) references.push({ data: bytes.data, mimeType: bytes.mimeType });
       }
       const mode = references.length > 0 ? 'image-to-image' : 'text-to-image';
-      const provider = resolveImageTaskProvider(model);
+      const configured = getConfiguredImageModel(model);
+      if (!configured) throw new Error('请先在设置中完成图片模型配置');
 
       const taskId = await createNovaTask({
-        apiKey: provider.apiKey,
-        baseUrl: provider.baseUrl,
-        protocol: provider.protocol,
         mode,
         prompt,
         outputSize: params.outputSize,
         customSize: params.customSize,
         aspectRatio: params.aspectRatio,
         temperature: params.temperature,
-        model: provider.modelId,
+        model: configured.id,
         gptImageQuality: params.gptImageQuality,
         gptImageStyle: params.gptImageStyle,
         gptImageBackground: params.gptImageBackground,
@@ -955,7 +960,7 @@ export function useAgentChat() {
     if (!agentSupportsWebSearch()) return;
     setWebSearchEnabled(prev => {
       const next = !prev;
-      try { localStorage.setItem('nova-agent-web-search', String(next)); } catch { /* ignore */ }
+      saveApiJsonSetting('agent.webSearch', next);
       return next;
     });
   }, [agentSupportsWebSearch]);
@@ -963,7 +968,7 @@ export function useAgentChat() {
   const toggleIntentRecognition = useCallback(() => {
     setIntentRecognition(prev => {
       const next = !prev;
-      try { localStorage.setItem('nova-agent-intent-recognition', String(next)); } catch { /* ignore */ }
+      saveApiJsonSetting('agent.intentRecognition', next);
       return next;
     });
   }, []);

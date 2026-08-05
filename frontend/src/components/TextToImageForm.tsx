@@ -16,7 +16,7 @@ import { ConfirmDialog } from '@/components/workspace/dialogs/ConfirmDialog';
 import { addTextAsset, type TextAsset } from '@/lib/asset-store';
 import { dispatchImageActionToast } from '@/lib/image-actions';
 import { streamPromptOptimize, type StreamPromptOptimizeHandle } from '@/lib/prompt-optimize-client';
-import { loadJsonFromStorage, saveJsonToStorage } from '@/lib/settings-storage';
+import { loadApiJsonSetting, saveApiJsonSetting, workbenchSettingKey } from '@/lib/settings-storage';
 import { requireDefaultConfiguredTextModel } from '@/lib/model-endpoints';
 import { type ModelId } from '@/lib/gemini-config';
 import {
@@ -107,7 +107,7 @@ export function TextToImageForm({ onSubmit, disabled = false, onDraftConsumed, o
     setOptimizeOpen(true);
 
     const handle = streamPromptOptimize(
-      { apiKey: textModel.apiKey, model: textModel.id, mode: 'text-to-image', prompt: prompt.trim() },
+      { modelRef: textModel.id, model: textModel.id, mode: 'text-to-image', prompt: prompt.trim() },
       {
         onDelta(token) {
           setOptimizedText(prev => prev + token);
@@ -120,7 +120,6 @@ export function TextToImageForm({ onSubmit, disabled = false, onDraftConsumed, o
           setOptimizing(false);
         },
       },
-      textModel.baseUrl,
     );
     optimizeHandleRef.current = handle;
   }, [prompt]);
@@ -161,9 +160,19 @@ export function TextToImageForm({ onSubmit, disabled = false, onDraftConsumed, o
     }
   }, [prompt]);
 
+  const [savedSettings, setSavedSettings] = useState<Partial<T2ISettings>>({});
+  useEffect(() => {
+    let cancelled = false;
+    // M2 (T2.3): 表单默认值从设置 API 读取（workbench.t2i）
+    void loadApiJsonSetting<Partial<T2ISettings>>(workbenchSettingKey(T2I_SETTINGS_KEY), {}).then((s) => {
+      if (!cancelled) setSavedSettings(s);
+    });
+    return () => { cancelled = true; };
+  }, []);
+
   useEffect(() => {
     const useInitial = initialData ? true : false;
-    const saved = loadJsonFromStorage<T2ISettings>(T2I_SETTINGS_KEY);
+    const saved = savedSettings;
 
     const nextModel = normalizeModel(useInitial && initialData?.model ? initialData.model : saved.model);
     const validSizes = getValidOutputSizes(nextModel);
@@ -203,12 +212,12 @@ export function TextToImageForm({ onSubmit, disabled = false, onDraftConsumed, o
 
       setSettingsReady(true);
     });
-  }, [initialData]);
+  }, [initialData, savedSettings]);
 
-  // 保存设置到缓存
+  // 保存设置到服务器（M2 T2.3）
   useEffect(() => {
     if (!settingsReady) return;
-    saveJsonToStorage(T2I_SETTINGS_KEY, {
+    saveApiJsonSetting(workbenchSettingKey(T2I_SETTINGS_KEY), {
       model,
       outputSize,
       customSize,

@@ -1,12 +1,14 @@
 package com.nova.studio.task;
 
 import com.nova.studio.infra.RuntimeEnv;
+import com.nova.studio.settings.SettingsService;
 import com.nova.studio.ws.WsQueueStatusProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.UUID;
 
 /**
  * Queue statistics (T1.6) — port of the Node backend's {@code getQueueStats}
@@ -14,11 +16,11 @@ import java.util.Map;
  * {@code NovaQueueStatus} contract ({@code ccode-task-client.ts}); served by
  * {@code GET /api/nova/queue-status} and the WS {@code queueStatus} pushes.
  *
- * <p>Concurrency/limit knobs are read hot from the runtime env (1s TTL) exactly
- * like the Node backend: {@code NOVA_TASK_CONCURRENCY},
- * {@code NOVA_MAX_QUEUE_SIZE}, {@code NOVA_RATE_LIMIT_*},
- * {@code NOVA_MAX_PENDING_TASKS_*}, {@code NOVA_ACCEPT_NEW_TASKS} /
- * {@code NOVA_REJECT_NEW_TASKS} (A.5-Q4/H4: ops switches stay on .env).
+ * <p>M2 (WIN-12): queue/limit knobs are read from the user's DB settings
+ * ({@code limit.*}, per-user rows with fallback to the Node defaults) — the
+ * {@code NOVA_MAX_QUEUE_SIZE}/{@code NOVA_RATE_LIMIT_*}/{@code NOVA_MAX_PENDING_TASKS_*}
+ * env knobs no longer apply. Ops switches ({@code NOVA_ACCEPT_NEW_TASKS} /
+ * {@code NOVA_REJECT_NEW_TASKS}) stay on .env (A.5-Q4/H4).
  */
 @Service
 public class QueueStatsService implements WsQueueStatusProvider {
@@ -28,13 +30,16 @@ public class QueueStatsService implements WsQueueStatusProvider {
     private final TaskRepository repository;
     private final RuntimeEnv runtimeEnv;
     private final ShutdownFlag shutdownFlag;
+    private final SettingsService settingsService;
     private final long ttlMs;
 
     public QueueStatsService(TaskRepository repository, RuntimeEnv runtimeEnv, ShutdownFlag shutdownFlag,
+                             SettingsService settingsService,
                              @Value("${nova.task.ttl-ms:43200000}") long ttlMs) {
         this.repository = repository;
         this.runtimeEnv = runtimeEnv;
         this.shutdownFlag = shutdownFlag;
+        this.settingsService = settingsService;
         this.ttlMs = ttlMs;
     }
 
@@ -48,16 +53,28 @@ public class QueueStatsService implements WsQueueStatusProvider {
         return Math.max(1, Math.min(GLOBAL_CONCURRENCY, configured));
     }
 
-    /** Limit config read hot from .env — Node getLimitConfig defaults. */
+    /** Limit config for a user, read from their {@code limit.*} DB settings. */
+    public LimitConfig getLimitConfig(UUID userId) {
+        return new LimitConfig(
+                settingsService.getInt(userId, "limit.maxQueueSize", SettingsService.DEFAULT_MAX_QUEUE_SIZE),
+                settingsService.getInt(userId, "limit.rateLimitWindowMs", SettingsService.DEFAULT_RATE_LIMIT_WINDOW_MS),
+                settingsService.getInt(userId, "limit.maxRequestsPerIp", SettingsService.DEFAULT_MAX_REQUESTS_PER_IP),
+                settingsService.getInt(userId, "limit.maxRequestsPerApiKey", SettingsService.DEFAULT_MAX_REQUESTS_PER_API_KEY),
+                settingsService.getInt(userId, "limit.maxPendingTasksPerIp", SettingsService.DEFAULT_MAX_PENDING_TASKS_PER_IP),
+                settingsService.getInt(userId, "limit.maxPendingTasksPerApiKey", SettingsService.DEFAULT_MAX_PENDING_TASKS_PER_API_KEY),
+                settingsService.getInt(userId, "limit.retryAfterSeconds", SettingsService.DEFAULT_RETRY_AFTER_SECONDS));
+    }
+
+    /** Node getLimitConfig defaults (anonymous queue-status view). */
     public LimitConfig getLimitConfig() {
         return new LimitConfig(
-                runtimeEnv.getInt("NOVA_MAX_QUEUE_SIZE", 200),
-                runtimeEnv.getInt("NOVA_RATE_LIMIT_WINDOW_MS", 60_000),
-                runtimeEnv.getInt("NOVA_RATE_LIMIT_MAX_REQUESTS_PER_IP", 20),
-                runtimeEnv.getInt("NOVA_RATE_LIMIT_MAX_REQUESTS_PER_API_KEY", 20),
-                runtimeEnv.getInt("NOVA_MAX_PENDING_TASKS_PER_IP", 20),
-                runtimeEnv.getInt("NOVA_MAX_PENDING_TASKS_PER_API_KEY", 10),
-                runtimeEnv.getInt("NOVA_RATE_LIMIT_RETRY_AFTER_SECONDS", 30));
+                SettingsService.DEFAULT_MAX_QUEUE_SIZE,
+                SettingsService.DEFAULT_RATE_LIMIT_WINDOW_MS,
+                SettingsService.DEFAULT_MAX_REQUESTS_PER_IP,
+                SettingsService.DEFAULT_MAX_REQUESTS_PER_API_KEY,
+                SettingsService.DEFAULT_MAX_PENDING_TASKS_PER_IP,
+                SettingsService.DEFAULT_MAX_PENDING_TASKS_PER_API_KEY,
+                SettingsService.DEFAULT_RETRY_AFTER_SECONDS);
     }
 
     public record LimitConfig(int maxQueueSize, int rateLimitWindowMs, int maxRequestsPerIp,

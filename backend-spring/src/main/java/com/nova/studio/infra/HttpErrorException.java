@@ -20,6 +20,10 @@ public class HttpErrorException extends RuntimeException {
         this.retryAfter = retryAfter;
     }
 
+    public HttpErrorException(int statusCode, String code, String message) {
+        this(statusCode, code, message, null);
+    }
+
     public int getStatusCode() {
         return statusCode;
     }

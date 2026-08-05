@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { createNovaTask, getNovaTask, ackNovaTask, resolveImageTaskProvider, type ImageReference } from '@/lib/ccode-task-client';
+import { createNovaTask, getNovaTask, ackNovaTask, getConfiguredImageModel, type ImageReference } from '@/lib/ccode-task-client';
 import { novaTaskSocket } from '@/lib/ccode-task-socket';
 import { generateUUID } from '@/lib/uuid';
 import {
@@ -275,14 +275,8 @@ export function useGifWorkflow(): UseGifWorkflowResult {
   }, []);
 
   const submitGrid = useCallback(async (input: SubmitInput) => {
-    let provider;
-    try {
-      provider = resolveImageTaskProvider(input.model);
-    } catch {
-      setIsApiKeyMissing(true);
-      throw new Error('请先完成 GIF 图片模型配置');
-    }
-    if (!provider.apiKey || !provider.baseUrl) {
+    const configured = getConfiguredImageModel(input.model);
+    if (!configured) {
       setIsApiKeyMissing(true);
       throw new Error('请先完成 GIF 图片模型配置');
     }
@@ -331,18 +325,14 @@ export function useGifWorkflow(): UseGifWorkflowResult {
     void cleanupJobAssets(previousJob);
 
     try {
-      // TODO: 从模型注册表读取实际的 baseUrl 和 protocol
       const serverTaskId = await createNovaTask({
-        apiKey: provider.apiKey,
-        baseUrl: provider.baseUrl,
-        protocol: provider.protocol,
         mode: 'image-to-image',
         prompt: finalPrompt,
         outputSize: GIF_GRID_OUTPUT_SIZE,
         customSize: GIF_GRID_CUSTOM_SIZE,
         aspectRatio: GIF_GRID_ASPECT_RATIO,
         temperature: 1,
-        model: provider.modelId,
+        model: configured.id,
         gptImageQuality: advancedParams.quality,
         gptImageStyle: advancedParams.style,
         gptImageBackground: advancedParams.background,

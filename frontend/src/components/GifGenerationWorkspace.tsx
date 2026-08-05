@@ -7,7 +7,7 @@ import { PromptOptimizeDialog } from '@/components/PromptOptimizeDialog';
 import { streamPromptOptimize, type StreamPromptOptimizeHandle } from '@/lib/prompt-optimize-client';
 import type { RefImageData } from '@/lib/job-store';
 import { cn } from '@/lib/utils';
-import { loadJsonFromStorage, saveJsonToStorage } from '@/lib/settings-storage';
+import { loadApiJsonSetting, saveApiJsonSetting, workbenchSettingKey } from '@/lib/settings-storage';
 import { GifParametersPanel, type GifUploadedRef } from '@/components/gif/GifParametersPanel';
 import { GifReviewPanel } from '@/components/gif/GifReviewPanel';
 import { MissingApiKeyDialog } from '@/components/MissingApiKeyDialog';
@@ -116,13 +116,12 @@ export function GifGenerationWorkspace({ wideMode = false, hasApiKey, onConfigur
 
     const images = refFiles.map(f => ({ dataUrl: f.dataUrl, mimeType: f.mimeType }));
     const handle = streamPromptOptimize(
-      { apiKey: textModel.apiKey, model: textModel.id, mode: 'gif', prompt: prompt.trim(), images },
+      { modelRef: textModel.id, model: textModel.id, mode: 'gif', prompt: prompt.trim(), images },
       {
         onDelta(token) { setOptimizedText(prev => prev + token); },
         onDone() { setOptimizing(false); },
         onError(err) { setOptimizeError(err.message); setOptimizing(false); },
       },
-      textModel.baseUrl,
     );
     optimizeHandleRef.current = handle;
   }, [prompt, refFiles]);
@@ -142,13 +141,23 @@ export function GifGenerationWorkspace({ wideMode = false, hasApiKey, onConfigur
     setOptimizeError(null);
   }, [optimizedText]);
 
+  // 挂载后恢复设置（M2 T2.3：从设置 API 读取 workbench.gif）
+  const [savedSettings, setSavedSettings] = useState<Partial<PersistedSettings>>({});
+  useEffect(() => {
+    let cancelled = false;
+    void loadApiJsonSetting<Partial<PersistedSettings>>(workbenchSettingKey(SETTINGS_KEY), {}).then((s) => {
+      if (!cancelled) setSavedSettings(s);
+    });
+    return () => { cancelled = true; };
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
 
     queueMicrotask(() => {
       if (cancelled) return;
 
-      const saved = loadJsonFromStorage<PersistedSettings>(SETTINGS_KEY);
+      const saved = savedSettings;
       const defaultModel = getDefaultGifModelId();
       const savedModel = saved.model && gifModelOptions.some((option) => option.value === saved.model)
         ? saved.model
@@ -184,7 +193,7 @@ export function GifGenerationWorkspace({ wideMode = false, hasApiKey, onConfigur
 
   useEffect(() => {
     if (!settingsReady) return;
-    saveJsonToStorage(SETTINGS_KEY, {
+    saveApiJsonSetting(workbenchSettingKey(SETTINGS_KEY), {
       model,
       loop,
       closedLoop,

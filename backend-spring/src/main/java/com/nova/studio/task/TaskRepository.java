@@ -12,6 +12,7 @@ import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 
 /**
  * PostgreSQL task storage (T1.1) — port of the Node backend's SQLite
@@ -71,7 +72,7 @@ public class TaskRepository {
     }
 
     @Transactional
-    public void insertTaskAndItems(String id, String userId, String status, String mode,
+    public void insertTaskAndItems(String id, UUID userId, String status, String mode,
                                    String requestJson, String createdAt, int itemCount) {
         jdbc.update("""
                 INSERT INTO tasks (id, user_id, status, mode, request_json, created_at)

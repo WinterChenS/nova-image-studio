@@ -16,6 +16,7 @@ import {
   Settings,
   Trash2,
   Upload,
+  User,
   Wand2,
   XCircle,
 } from 'lucide-react';
@@ -42,8 +43,6 @@ import {
   getCompleteImageModels,
   getCompleteTextModels,
   getImageModelOutputSizes,
-  loadRegistry,
-  saveRegistry,
   type DefaultModels,
   type ImageModelConfig,
   type ProviderProtocol,
@@ -55,9 +54,12 @@ import {
   type TextProviderProtocol,
 } from '@/lib/nova-text-protocol';
 import { syncDynamicModelExports } from '@/lib/gemini-config';
-import { exportAllData, importAllData, downloadBlob, generateBackupFilename, type BackupProgress as BackupProgressType } from '@/lib/backup-utils';
+import { exportAllData, importAllData, downloadBlob, generateBackupFilename, type BackupProgress as BackupProgressType, LEGACY_SETTING_KEYS_TO_CLEAR } from '@/lib/backup-utils';
 import { checkModelsAvailability, type ModelStatus } from '@/lib/ccode-task-client';
 import { hasAnyApiKey } from '@/lib/settings-storage';
+import { loadRegistryFromApi, persistRegistryToApi, importSettings } from '@/lib/settings-api';
+import { setRegistryCache } from '@/lib/nova-models';
+import { isLoggedIn } from '@/lib/auth';
 import { BA_RANDOM_URL, BING_WALLPAPER_URL } from '@/lib/constants';
 import { PROMPT_DATA_SOURCES, getPromptSourceLabel } from '@/lib/prompt-gallery-data';
 
@@ -65,6 +67,8 @@ interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
   onApiKeyChange?: (hasKey: boolean) => void;
+  isLoggedIn?: boolean;
+  onRequireLogin?: () => void;
 }
 
 function cloneImageModel(model: ImageModelConfig): ImageModelConfig {
@@ -140,7 +144,10 @@ function normalizeDefaults(
   };
 }
 
-export function SettingsModal({ isOpen, onClose, onApiKeyChange }: SettingsModalProps) {
+export function SettingsModal({ isOpen, onClose, onApiKeyChange, isLoggedIn: loggedInProp, onRequireLogin }: SettingsModalProps) {
+  const loggedIn = loggedInProp ?? isLoggedIn();
+  const [loading, setLoading] = useState(false);
+  const prevRegistryRef = useRef<import('@/lib/nova-models').NovaModelRegistry | null>(null);
   const [imageModels, setImageModels] = useState<ImageModelConfig[]>([]);
   const [textModels, setTextModels] = useState<TextModelConfig[]>([]);
   const [defaults, setDefaults] = useState<DefaultModels>(DEFAULT_DEFAULTS);
@@ -162,19 +169,45 @@ export function SettingsModal({ isOpen, onClose, onApiKeyChange }: SettingsModal
 
   useEffect(() => {
     if (!isOpen) return;
-    const registry = loadRegistry();
-    setImageModels(registry.imageModels.map(cloneImageModel));
-    setTextModels(registry.textModels.map(cloneTextModel));
-    setDefaults(normalizeDefaults(registry.defaults, registry.imageModels, registry.textModels));
-    setSelectedImageModelId(registry.imageModels[0]?.id || '');
-    setSelectedTextModelId(registry.textModels[0]?.id || '');
+    if (!loggedIn) {
+      setError('请先登录后再管理模型配置');
+      setImageModels([]);
+      setTextModels([]);
+      setDefaults(DEFAULT_DEFAULTS);
+      setLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
     setError(null);
     setSuccess(null);
     setModelStatuses(null);
     setModelCheckError(null);
     setBackupError(null);
     setBackupSuccess(null);
-  }, [isOpen]);
+    // M2 (T2.3): 从设置 API 加载模型注册表（Key 脱敏）
+    loadRegistryFromApi()
+      .then((registry) => {
+        if (cancelled) return;
+        prevRegistryRef.current = registry;
+        setRegistryCache(registry);
+        setImageModels(registry.imageModels.map(cloneImageModel));
+        setTextModels(registry.textModels.map(cloneTextModel));
+        setDefaults(normalizeDefaults(registry.defaults, registry.imageModels, registry.textModels));
+        setSelectedImageModelId(registry.imageModels[0]?.id || '');
+        setSelectedTextModelId(registry.textModels[0]?.id || '');
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setError(err instanceof Error ? `加载设置失败：${err.message}` : '加载设置失败');
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, loggedIn]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -269,7 +302,11 @@ export function SettingsModal({ isOpen, onClose, onApiKeyChange }: SettingsModal
     }
   };
 
-  const persistRegistry = () => {
+  const persistRegistry = async () => {
+    if (!loggedIn) {
+      onRequireLogin?.();
+      return;
+    }
     if (imageModels.length === 0) {
       setError('至少填写一个图片模型');
       return;
@@ -293,14 +330,21 @@ export function SettingsModal({ isOpen, onClose, onApiKeyChange }: SettingsModal
       defaults: normalizeDefaults(defaults, imageModels, textModels),
     };
 
-    saveRegistry(registry);
-    syncDynamicModelExports();
-    window.dispatchEvent(new Event('nova-model-registry-updated'));
-    onApiKeyChange?.(hasAnyApiKey());
-    setSuccess('设置已保存');
     setError(null);
-    setModelStatuses(null);
-    setModelCheckError(null);
+    try {
+      // M2 (T2.3): 写入设置 API（Key 加密落库，掩码 Key 保留旧密文）
+      await persistRegistryToApi(registry, prevRegistryRef.current || undefined);
+      prevRegistryRef.current = registry;
+      setRegistryCache(registry);
+      syncDynamicModelExports();
+      window.dispatchEvent(new Event('nova-model-registry-updated'));
+      onApiKeyChange?.(hasAnyApiKey());
+      setSuccess('设置已保存');
+      setModelStatuses(null);
+      setModelCheckError(null);
+    } catch (err) {
+      setError(err instanceof Error ? `保存失败：${err.message}` : '保存失败');
+    }
   };
 
   const handleCheckModels = async () => {
@@ -367,6 +411,68 @@ export function SettingsModal({ isOpen, onClose, onApiKeyChange }: SettingsModal
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
+  // ===== M2 T2.6: 本地配置一键迁移（localStorage → 设置 API） =====
+  const [migrating, setMigrating] = useState(false);
+  const [migrationDone, setMigrationDone] = useState(false);
+
+  const hasLegacySettings = () => {
+    if (typeof window === 'undefined') return false;
+    return LEGACY_SETTING_KEYS_TO_CLEAR.some((key) => window.localStorage.getItem(key) !== null);
+  };
+
+  const handleMigrate = async () => {
+    if (!loggedIn) {
+      onRequireLogin?.();
+      return;
+    }
+    setMigrating(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      const legacy: Record<string, unknown> = {};
+      for (const key of LEGACY_SETTING_KEYS_TO_CLEAR) {
+        const raw = window.localStorage.getItem(key);
+        if (raw === null) continue;
+        try {
+          legacy[key] = JSON.parse(raw);
+        } catch {
+          legacy[key] = raw;
+        }
+      }
+      if (Object.keys(legacy).length === 0) {
+        setSuccess('没有发现可迁移的本地配置');
+        return;
+      }
+      const summary = await importSettings(legacy);
+      // 服务端导入成功后清除已迁移的 key
+      for (const key of LEGACY_SETTING_KEYS_TO_CLEAR) {
+        try {
+          window.localStorage.removeItem(key);
+        } catch {
+          // ignore
+        }
+      }
+      // 重新从 API 加载注册表
+      const registry = await loadRegistryFromApi();
+      prevRegistryRef.current = registry;
+      setRegistryCache(registry);
+      setImageModels(registry.imageModels.map(cloneImageModel));
+      setTextModels(registry.textModels.map(cloneTextModel));
+      setDefaults(normalizeDefaults(registry.defaults, registry.imageModels, registry.textModels));
+      setSelectedImageModelId(registry.imageModels[0]?.id || '');
+      setSelectedTextModelId(registry.textModels[0]?.id || '');
+      syncDynamicModelExports();
+      window.dispatchEvent(new Event('nova-model-registry-updated'));
+      onApiKeyChange?.(hasAnyApiKey());
+      setMigrationDone(true);
+      setSuccess(`迁移完成：模型 ${summary.modelsCreated} 个，设置 ${summary.settingsWritten} 项`);
+    } catch (err) {
+      setError(err instanceof Error ? `迁移失败：${err.message}` : '迁移失败');
+    } finally {
+      setMigrating(false);
+    }
+  };
+
   const completeImageOptions = imageModels.filter(isCompleteImageModel).map((model) => ({ value: model.id, label: model.name }));
   const completeTextOptions = textModels.filter(isCompleteTextModel).map((model) => ({ value: model.id, label: model.name }));
   const selectedImageOutputSizes = selectedImageModel
@@ -400,6 +506,10 @@ export function SettingsModal({ isOpen, onClose, onApiKeyChange }: SettingsModal
               <Database className="w-4 h-4" />
               备份
             </TabsTrigger>
+            <TabsTrigger value="migrate" className="gap-2 rounded-none border-b-2 border-transparent data-active:border-primary data-active:bg-transparent data-active:shadow-none px-4 py-3">
+              <Upload className="w-4 h-4" />
+              迁移
+            </TabsTrigger>
             <TabsTrigger value="about" className="gap-2 rounded-none border-b-2 border-transparent data-active:border-primary data-active:bg-transparent data-active:shadow-none px-4 py-3">
               <Info className="w-4 h-4" />
               关于
@@ -407,6 +517,16 @@ export function SettingsModal({ isOpen, onClose, onApiKeyChange }: SettingsModal
           </TabsList>
 
           <TabsContent value="models" className="min-h-0 overflow-y-auto p-4 sm:p-6 mt-0 space-y-6">
+            {!loggedIn && (
+              <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm space-y-2">
+                <p className="text-amber-700 dark:text-amber-400">模型配置已迁移到服务器，需要登录后才能查看与管理。</p>
+                <Button size="sm" variant="outline" className="gap-2" onClick={() => onRequireLogin?.()}>
+                  <User className="w-4 h-4" />
+                  去登录
+                </Button>
+              </div>
+            )}
+            {loading && <div className="rounded-lg bg-muted/50 p-4 text-sm text-muted-foreground">正在加载设置...</div>}
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="space-y-1">
                 <p className="text-sm font-medium">模型级独立配置</p>
@@ -742,6 +862,54 @@ export function SettingsModal({ isOpen, onClose, onApiKeyChange }: SettingsModal
                       <Upload className="w-4 h-4" />
                       选择备份文件
                     </Button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </TabsContent>
+
+          <TabsContent value="migrate" className="min-h-0 overflow-y-auto p-4 sm:p-6 space-y-6 mt-0">
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <h3 className="text-base font-medium">本地配置一键迁移</h3>
+                <p className="text-sm text-muted-foreground">
+                  将旧版保存在浏览器 localStorage 中的模型配置、表单默认值与 Agent 开关一键导入到当前登录账号（服务器加密存储）。
+                  迁移成功后本地旧 key 会被清除，功能与迁移前一致。
+                </p>
+              </div>
+
+              {!loggedIn && (
+                <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm">
+                  迁移需要登录账号，请先登录。
+                </div>
+              )}
+
+              <div className="space-y-3 rounded-lg border p-4">
+                <div className="flex items-start gap-3">
+                  <Wand2 className="w-5 h-5 text-muted-foreground mt-0.5" />
+                  <div className="flex-1 space-y-2">
+                    <h4 className="font-medium">导入本地配置</h4>
+                    <p className="text-sm text-muted-foreground">
+                      {hasLegacySettings()
+                        ? '检测到浏览器中存在旧版本地配置，可一键迁移到服务器。'
+                        : '未检测到旧版本地配置。'}
+                    </p>
+                    <Button onClick={() => void handleMigrate()} disabled={migrating || !loggedIn} className="gap-2">
+                      <Wand2 className="w-4 h-4" />
+                      {migrating ? '迁移中...' : '开始迁移'}
+                    </Button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-3 rounded-lg border p-4">
+                <div className="flex items-start gap-3">
+                  <Download className="w-5 h-5 text-muted-foreground mt-0.5" />
+                  <div className="flex-1 space-y-2">
+                    <h4 className="font-medium">先导出再导入（手动）</h4>
+                    <p className="text-sm text-muted-foreground">
+                      旧备份 ZIP（localStorage.json 含 nova-model-registry）可在“备份”页导入，系统会自动识别并迁移到服务器。
+                    </p>
                   </div>
                 </div>
               </div>

@@ -583,8 +583,7 @@ export function AssetsWorkspace({ wideMode = false, active = true }: AssetsWorks
       if (!blob) throw new Error('无法读取素材图片');
       const imageDataUrl = await prepareAssetMetadataImage(editingAsset, blob);
       const suggestion = await generateAssetMetadata({
-        apiKey: textModel.apiKey,
-        baseUrl: textModel.baseUrl,
+        modelRef: textModel.id,
         model: textModel.id,
         imageDataUrl,
         currentName: editName,

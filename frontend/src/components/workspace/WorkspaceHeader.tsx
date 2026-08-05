@@ -50,10 +50,14 @@ interface WorkspaceHeaderProps {
   onOpenSettings: () => void;
   onLogoClick?: () => void;
   sidebarMode?: boolean;
+  user?: import('@/lib/auth').AuthUser | null;
+  onOpenLogin?: () => void;
+  onLogout?: () => void;
 }
 
 export const WorkspaceHeader = forwardRef<WorkspaceHeaderRef, WorkspaceHeaderProps>(function WorkspaceHeader(
-  { queueStatus, wideMode, onToggleWideMode, onOpenSettings, onLogoClick, sidebarMode = false },
+  { queueStatus, wideMode, onToggleWideMode, onOpenSettings, onLogoClick, sidebarMode = false,
+    user, onOpenLogin, onLogout },
   ref,
 ) {
   const [viewerOpen, setViewerOpen] = useState(false);
@@ -206,6 +210,25 @@ export const WorkspaceHeader = forwardRef<WorkspaceHeaderRef, WorkspaceHeaderPro
             </DropdownMenu>
             <ThemeToggle />
             <WideModeToggle enabled={wideMode} onToggle={onToggleWideMode} />
+            {user ? (
+              <DropdownMenu>
+                <DropdownMenuTrigger className="inline-flex items-center gap-2 rounded-md border bg-transparent px-2 sm:px-2.5 h-8 text-sm hover:bg-muted/50" title="账号" aria-label="账号">
+                  <User className="w-4 h-4" />
+                  <span className="hidden max-w-24 truncate sm:inline">{user.username}</span>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" sideOffset={4}>
+                  <DropdownMenuItem disabled className="text-muted-foreground">
+                    已登录：{user.username}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => onLogout?.()}>退出登录</DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ) : (
+              <Button variant="outline" size="sm" onClick={() => onOpenLogin?.()} className="gap-2 px-2 sm:px-2.5" title="登录" aria-label="登录">
+                <User className="w-4 h-4" />
+                <span className="hidden sm:inline">登录</span>
+              </Button>
+            )}
             <Button variant="outline" size="sm" onClick={onOpenSettings} className="gap-0 px-2 sm:gap-2 sm:px-2.5" title="设置" aria-label="设置">
               <Settings className="w-4 h-4" />
               <span className="hidden sm:inline">设置</span>

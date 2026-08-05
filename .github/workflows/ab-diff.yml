@@ -39,6 +39,9 @@ jobs:
       REDIS_HOST: localhost
       REDIS_PORT: "6379"
       REDIS_PASSWORD: ""
+      # M2 (WIN-12): Spring 启动必需 — JWT 签名密钥 + AES-GCM 主密钥（CI 测试值）
+      NOVA_JWT_SECRET: ci-jwt-secret-ci-jwt-secret-ci-jwt-secret-123456
+      NOVA_SETTINGS_SECRET_KEY: Y2ktYWItZGlmZi1zZWNyZXQta2V5LTMyYnl0ZXMhIQ==
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -55,8 +58,11 @@ jobs:
           node-version: "22"
           cache: npm
 
-      - name: "Install JS deps (workspaces: frontend + backend)"
-        run: npm ci
+      - name: "Install JS deps (root + frontend + backend)"
+        run: |
+          npm ci
+          cd frontend && npm ci
+          cd ../backend && npm ci
 
       - name: Build frontend static export (frontend/out)
         run: npm run build
