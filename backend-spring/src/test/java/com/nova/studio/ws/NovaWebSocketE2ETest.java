@@ -62,6 +62,7 @@ class NovaWebSocketE2ETest {
             FlywayAutoConfiguration.class
     })
     @Import({com.nova.studio.config.WebSocketConfig.class, com.nova.studio.config.WsCoreConfig.class,
+            com.nova.studio.config.SecurityConfig.class,
             com.nova.studio.web.SpikeTaskController.class,
             com.nova.studio.auth.JwtService.class})
     static class WsTestApp {

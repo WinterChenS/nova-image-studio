@@ -6,9 +6,16 @@ name: A/B Diff Regression (Spring vs Node)
 #
 # 触发方式：默认仅 workflow_dispatch（手动）——避免在真实 GitHub runner 上验证前
 # 阻塞 PR 门禁。本地等价命令：bash backend-spring/scripts/run-ab-diff.sh（已实测 37/37）。
-# 在 runner 上手动跑通一次后，可按需追加 pull_request 触发器固化为回归门禁。
+# WIN-17 (M1 遗留 1 闭环)：已固化 pull_request 门禁——后端相关改动（Spring/Node/探针/工作流）
+# 自动触发 A/B 回归，防止 Q1 契约或任务链路回归；前端改动由 build.yml 独立门禁覆盖。
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [main, master]
+    paths:
+      - 'backend-spring/**'
+      - 'backend/**'
+      - '.github/workflows/ab-diff.yml'
 
 jobs:
   ab-diff:

@@ -1,11 +1,11 @@
 package com.nova.studio.web;
 
-import com.nova.studio.auth.AuthFilter;
 import com.nova.studio.auth.AuthUser;
 import com.nova.studio.task.TaskService;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -39,15 +39,16 @@ public class TaskController {
     }
 
     @PostMapping
-    public ResponseEntity<Map<String, Object>> create(@RequestBody JsonNode body, HttpServletRequest request) {
-        AuthUser authUser = AuthFilter.current(request);
+    public ResponseEntity<Map<String, Object>> create(@RequestBody JsonNode body, @AuthenticationPrincipal AuthUser authUser,
+                                                      HttpServletRequest request) {
+        // The chain requires auth for POST /api/nova/tasks; TaskService keeps its own
+        // 401 guard for anonymous (null) principals (Q1).
         String taskId = taskService.createTask(body, clientIp(request), authUser);
         return ResponseEntity.status(HttpStatus.ACCEPTED).body(Map.of("taskId", taskId));
     }
 
     @GetMapping("/{taskId}")
-    public ResponseEntity<Map<String, Object>> get(@PathVariable String taskId, HttpServletRequest request) {
-        AuthUser authUser = AuthFilter.current(request);
+    public ResponseEntity<Map<String, Object>> get(@PathVariable String taskId, @AuthenticationPrincipal AuthUser authUser) {
         Map<String, Object> task = taskService.getSerializedTask(taskId, authUser);
         if (task == null) {
             Map<String, Object> expired = new LinkedHashMap<>();
