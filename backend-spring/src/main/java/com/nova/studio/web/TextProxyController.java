@@ -1,13 +1,12 @@
 package com.nova.studio.web;
 
-import com.nova.studio.auth.AuthFilter;
 import com.nova.studio.auth.AuthUser;
 import com.nova.studio.infra.NormalizedError;
 import com.nova.studio.settings.ModelService;
 import com.nova.studio.textproxy.TextProxyService;
-import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -55,7 +54,7 @@ public class TextProxyController {
     }
 
     @PostMapping
-    public void proxy(@RequestBody(required = false) JsonNode body, HttpServletRequest request,
+    public void proxy(@RequestBody(required = false) JsonNode body, @AuthenticationPrincipal AuthUser authUser,
                       HttpServletResponse response) throws IOException {
         String protocol = text(body, "protocol");
         String baseUrl = text(body, "baseUrl");
@@ -64,7 +63,6 @@ public class TextProxyController {
         boolean stream = body != null && body.has("stream") && body.get("stream").asBoolean(false);
 
         // M2 resolution: modelId (registry UUID) → server-side config.
-        AuthUser authUser = AuthFilter.current(request);
         String modelIdField = text(body, "modelId");
         if (modelIdField != null && authUser != null) {
             ModelService.ResolvedModel resolved = modelService.resolve(authUser.id(), modelIdField).orElse(null);

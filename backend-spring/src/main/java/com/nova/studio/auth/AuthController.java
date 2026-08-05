@@ -41,7 +41,7 @@ public class AuthController {
     }
 
     @GetMapping("/me")
-    public Map<String, Object> me(@org.springframework.web.bind.annotation.RequestAttribute("authUser") AuthUser authUser) {
+    public Map<String, Object> me(@org.springframework.security.core.annotation.AuthenticationPrincipal AuthUser authUser) {
         return userService.me(authUser);
     }
 

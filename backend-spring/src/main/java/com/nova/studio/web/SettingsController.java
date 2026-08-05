@@ -1,9 +1,9 @@
 package com.nova.studio.web;
 
-import com.nova.studio.auth.AuthFilter;
+import com.nova.studio.auth.AuthSupport;
 import com.nova.studio.auth.AuthUser;
 import com.nova.studio.settings.SettingsService;
-import jakarta.servlet.http.HttpServletRequest;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
@@ -34,21 +34,21 @@ public class SettingsController {
     }
 
     @GetMapping
-    public Map<String, Object> get(HttpServletRequest request) {
-        AuthUser user = AuthFilter.require(request);
+    public Map<String, Object> get(@AuthenticationPrincipal AuthUser authUser) {
+        AuthUser user = AuthSupport.requireAuth(authUser);
         return settingsService.getAll(user.id());
     }
 
     @PutMapping
-    public Map<String, Object> put(@RequestBody JsonNode body, HttpServletRequest request) {
-        AuthUser user = AuthFilter.require(request);
+    public Map<String, Object> put(@RequestBody JsonNode body, @AuthenticationPrincipal AuthUser authUser) {
+        AuthUser user = AuthSupport.requireAuth(authUser);
         settingsService.putAll(user.id(), body);
         return Map.of("ok", true);
     }
 
     @PostMapping("/import")
-    public Map<String, Object> importLegacy(@RequestBody JsonNode body, HttpServletRequest request) {
-        AuthUser user = AuthFilter.require(request);
+    public Map<String, Object> importLegacy(@RequestBody JsonNode body, @AuthenticationPrincipal AuthUser authUser) {
+        AuthUser user = AuthSupport.requireAuth(authUser);
         return settingsService.importLegacy(user.id(), body);
     }
 }

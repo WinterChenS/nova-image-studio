@@ -1,14 +1,11 @@
 package com.nova.studio.task;
 
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.core.RowMapper;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.sql.ResultSet;
-import java.sql.SQLException;
 import java.time.Instant;
-import java.time.OffsetDateTime;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -17,9 +14,12 @@ import java.util.UUID;
 /**
  * PostgreSQL task storage (T1.1) — port of the Node backend's SQLite
  * {@code tasks}/{@code task_items} tables with the user-confirmed Q1 column
- * {@code user_id} (nullable = system/migrated ownership). Plain JDBC keeps the
- * queries byte-compatible with the Node semantics ('排队中' + 'queued' both
- * counted as queued; expires_at comparisons in UTC).
+ * {@code user_id} (nullable = system/migrated ownership). WIN-16 (ADR-11):
+ * migrated from JdbcTemplate to MyBatis-Plus ({@link TaskMapper} +
+ * {@link TaskEntity}); simple lookups use BaseMapper, every state-machine SQL
+ * is kept verbatim so the Node semantics ('排队中' + 'queued' both counted as
+ * queued; expires_at comparisons in UTC) do not drift. Public signatures and
+ * the {@link TaskRow} record are unchanged (strategy A).
  */
 @Repository
 public class TaskRepository {
@@ -31,164 +31,101 @@ public class TaskRepository {
     public static final String STATUS_FAILED = "failed";
     public static final String STATUS_EXPIRED = "expired";
 
-    private final JdbcTemplate jdbc;
-
-    public TaskRepository(JdbcTemplate jdbc) {
-        this.jdbc = jdbc;
-    }
-
-    /** Full task row (no image data). */
+    /** Public row shape (service/test contract, unchanged). */
     public record TaskRow(String id, String userId, String status, String mode,
                           String requestJson, String resultJson, String error, String warning,
                           Instant createdAt, Instant completedAt, Instant expiresAt) {
     }
 
-    private static final RowMapper<TaskRow> ROW_MAPPER = (rs, rowNum) -> new TaskRow(
-            rs.getString("id"),
-            rs.getString("user_id"),
-            rs.getString("status"),
-            rs.getString("mode"),
-            rs.getString("request_json"),
-            rs.getString("result_json"),
-            rs.getString("error"),
-            rs.getString("warning"),
-            toInstant(rs, "created_at"),
-            toInstant(rs, "completed_at"),
-            toInstant(rs, "expires_at"));
+    private final TaskMapper mapper;
 
-    private static Instant toInstant(ResultSet rs, String column) throws SQLException {
-        OffsetDateTime odt = rs.getObject(column, OffsetDateTime.class);
-        return odt == null ? null : odt.toInstant();
+    public TaskRepository(TaskMapper mapper) {
+        this.mapper = mapper;
     }
 
     public Optional<TaskRow> findById(String id) {
-        List<TaskRow> rows = jdbc.query("SELECT * FROM tasks WHERE id = ?", ROW_MAPPER, id);
-        return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
+        return Optional.ofNullable(mapper.selectById(id)).map(TaskRepository::toRow);
     }
 
     public boolean exists(String id) {
-        Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM tasks WHERE id = ?", Integer.class, id);
-        return count != null && count > 0;
+        return mapper.selectById(id) != null;
     }
 
     @Transactional
     public void insertTaskAndItems(String id, UUID userId, String status, String mode,
                                    String requestJson, String createdAt, int itemCount) {
-        jdbc.update("""
-                INSERT INTO tasks (id, user_id, status, mode, request_json, created_at)
-                VALUES (?, ?, ?, ?, ?::jsonb, ?)
-                """, id, userId, status, mode, requestJson, OffsetDateTime.ofInstant(Instant.parse(createdAt), java.time.ZoneOffset.UTC));
         Instant created = Instant.parse(createdAt);
+        mapper.insertTask(id, userId, status, mode, requestJson, created);
         for (int i = 0; i < itemCount; i++) {
-            jdbc.update("""
-                    INSERT INTO task_items (task_id, item_index, status, created_at)
-                    VALUES (?, ?, ?, ?)
-                    """, id, i, status, OffsetDateTime.ofInstant(created, java.time.ZoneOffset.UTC));
+            mapper.insertItem(id, i, status, created);
         }
     }
 
     public void updateStatus(String id, String status) {
-        jdbc.update("UPDATE tasks SET status = ? WHERE id = ?", status, id);
+        mapper.updateStatus(id, status);
     }
 
     public void updateStatusProcessing(String id, String status, String createdAtIso) {
-        jdbc.update("UPDATE tasks SET status = ? WHERE id = ?", status, id);
+        mapper.updateStatus(id, status);
     }
 
     public void updateItemStatus(String taskId, int itemIndex, String status, String completedAtIso) {
-        jdbc.update("""
-                UPDATE task_items SET status = ?, completed_at = ? WHERE task_id = ? AND item_index = ?
-                """, status, OffsetDateTime.ofInstant(Instant.parse(completedAtIso), java.time.ZoneOffset.UTC),
-                taskId, itemIndex);
+        mapper.updateItemStatus(taskId, itemIndex, status, Instant.parse(completedAtIso));
     }
 
     public void updateItemCreatedAt(String taskId, int itemIndex, String createdAtIso) {
-        jdbc.update("""
-                UPDATE task_items SET created_at = ? WHERE task_id = ? AND item_index = ?
-                """, OffsetDateTime.ofInstant(Instant.parse(createdAtIso), java.time.ZoneOffset.UTC), taskId, itemIndex);
+        mapper.updateItemCreatedAt(taskId, itemIndex, Instant.parse(createdAtIso));
     }
 
     /** Node runTask: items flip to processing with created_at refreshed. */
     public void updateItemProcessing(String taskId, int itemIndex, String createdAtIso) {
-        jdbc.update("""
-                UPDATE task_items SET status = ?, created_at = ? WHERE task_id = ? AND item_index = ?
-                """, STATUS_PROCESSING, OffsetDateTime.ofInstant(Instant.parse(createdAtIso), java.time.ZoneOffset.UTC),
-                taskId, itemIndex);
+        mapper.updateItemProcessing(taskId, itemIndex, STATUS_PROCESSING, Instant.parse(createdAtIso));
     }
 
     /** Marks a task completed with result_json / warning / completed_at / expires_at. */
     public void completeTask(String id, String resultJson, String warning, String completedAtIso, String expiresAtIso) {
-        jdbc.update("""
-                UPDATE tasks SET status = ?, result_json = ?::jsonb, warning = ?, completed_at = ?, expires_at = ?
-                WHERE id = ?
-                """, STATUS_COMPLETED, resultJson, warning,
-                OffsetDateTime.ofInstant(Instant.parse(completedAtIso), java.time.ZoneOffset.UTC),
-                OffsetDateTime.ofInstant(Instant.parse(expiresAtIso), java.time.ZoneOffset.UTC),
-                id);
+        mapper.completeTask(id, STATUS_COMPLETED, resultJson, warning,
+                Instant.parse(completedAtIso), Instant.parse(expiresAtIso));
     }
 
     /** Marks a task failed with error / completed_at / expires_at. */
     public void failTask(String id, String error, String completedAtIso, String expiresAtIso) {
-        jdbc.update("""
-                UPDATE tasks SET status = ?, error = ?, completed_at = ?, expires_at = ?
-                WHERE id = ?
-                """, STATUS_FAILED, error,
-                OffsetDateTime.ofInstant(Instant.parse(completedAtIso), java.time.ZoneOffset.UTC),
-                OffsetDateTime.ofInstant(Instant.parse(expiresAtIso), java.time.ZoneOffset.UTC),
-                id);
+        mapper.failTask(id, STATUS_FAILED, error,
+                Instant.parse(completedAtIso), Instant.parse(expiresAtIso));
     }
 
     /** Marks interrupted (queued/processing) tasks failed — Node initDatabase semantics. */
     public List<String> markInterruptedTasksFailed(String error, String completedAtIso, String expiresAtIso) {
-        List<String> interrupted = jdbc.queryForList(
-                "SELECT id FROM tasks WHERE status IN (?, ?)", String.class, STATUS_QUEUED, STATUS_PROCESSING);
-        jdbc.update("""
-                UPDATE tasks SET status = ?, error = ?, completed_at = ?, expires_at = ?
-                WHERE status IN (?, ?)
-                """, STATUS_FAILED, error,
-                OffsetDateTime.ofInstant(Instant.parse(completedAtIso), java.time.ZoneOffset.UTC),
-                OffsetDateTime.ofInstant(Instant.parse(expiresAtIso), java.time.ZoneOffset.UTC),
+        List<String> interrupted = mapper.findInterrupted(STATUS_QUEUED, STATUS_PROCESSING);
+        mapper.failInterrupted(STATUS_FAILED, error,
+                Instant.parse(completedAtIso), Instant.parse(expiresAtIso),
                 STATUS_QUEUED, STATUS_PROCESSING);
         return interrupted;
     }
 
     /** Normalizes legacy 'queued' rows to '排队中' — Node startup behavior. */
     public void normalizeLegacyQueued() {
-        jdbc.update("UPDATE tasks SET status = ? WHERE status = ?", STATUS_QUEUED, STATUS_LEGACY_QUEUED);
-        jdbc.update("UPDATE task_items SET status = ? WHERE status = ?", STATUS_QUEUED, STATUS_LEGACY_QUEUED);
+        mapper.normalizeTaskStatus(STATUS_QUEUED, STATUS_LEGACY_QUEUED);
+        mapper.normalizeItemStatus(STATUS_QUEUED, STATUS_LEGACY_QUEUED);
     }
 
     public void updateExpiresAt(String id, Instant expiresAt) {
-        jdbc.update("UPDATE tasks SET expires_at = ? WHERE id = ?",
-                OffsetDateTime.ofInstant(expiresAt, java.time.ZoneOffset.UTC), id);
+        mapper.updateExpiresAt(id, expiresAt);
     }
 
     public void updateItemImageData(String taskId, int itemIndex, String status, String imageDataJson, String completedAtIso) {
-        jdbc.update("""
-                UPDATE task_items SET status = ?, image_data = ?, completed_at = ?
-                WHERE task_id = ? AND item_index = ?
-                """, status, imageDataJson,
-                OffsetDateTime.ofInstant(Instant.parse(completedAtIso), java.time.ZoneOffset.UTC),
-                taskId, itemIndex);
+        mapper.updateItemImageData(taskId, itemIndex, status, imageDataJson, Instant.parse(completedAtIso));
     }
 
     public void updateItemError(String taskId, int itemIndex, String status, String error, String completedAtIso) {
-        jdbc.update("""
-                UPDATE task_items SET status = ?, error = ?, completed_at = ?
-                WHERE task_id = ? AND item_index = ?
-                """, status, error,
-                OffsetDateTime.ofInstant(Instant.parse(completedAtIso), java.time.ZoneOffset.UTC),
-                taskId, itemIndex);
+        mapper.updateItemError(taskId, itemIndex, status, error, Instant.parse(completedAtIso));
     }
 
     /** Queue stats grouping — Node getQueueStats SQL (statuses '排队中'/'queued'/'processing'). */
     public Map<String, Long> countByQueueStatuses() {
-        List<Map<String, Object>> rows = jdbc.queryForList("""
-                SELECT status, COUNT(*) AS count FROM tasks
-                WHERE status IN (?, ?, ?)
-                GROUP BY status
-                """, STATUS_QUEUED, STATUS_LEGACY_QUEUED, STATUS_PROCESSING);
-        java.util.LinkedHashMap<String, Long> counts = new java.util.LinkedHashMap<>();
+        List<Map<String, Object>> rows = mapper.countByQueueStatuses(
+                STATUS_QUEUED, STATUS_LEGACY_QUEUED, STATUS_PROCESSING);
+        LinkedHashMap<String, Long> counts = new LinkedHashMap<>();
         for (Map<String, Object> row : rows) {
             counts.put(String.valueOf(row.get("status")), ((Number) row.get("count")).longValue());
         }
@@ -196,14 +133,18 @@ public class TaskRepository {
     }
 
     public List<String> findExpired(Instant now) {
-        return jdbc.queryForList(
-                "SELECT id FROM tasks WHERE expires_at IS NOT NULL AND expires_at <= ?",
-                String.class, OffsetDateTime.ofInstant(now, java.time.ZoneOffset.UTC));
+        return mapper.findExpired(now);
     }
 
     @Transactional
     public void deleteTaskAndItems(String id) {
-        jdbc.update("DELETE FROM task_items WHERE task_id = ?", id);
-        jdbc.update("DELETE FROM tasks WHERE id = ?", id);
+        mapper.deleteItems(id);
+        mapper.deleteTask(id);
+    }
+
+    private static TaskRow toRow(TaskEntity e) {
+        return new TaskRow(e.getId(), e.getUserId(), e.getStatus(), e.getMode(),
+                e.getRequestJson(), e.getResultJson(), e.getError(), e.getWarning(),
+                e.getCreatedAt(), e.getCompletedAt(), e.getExpiresAt());
     }
 }
