@@ -71,6 +71,7 @@ export default function RootLayout({
       </head>
       <body
         className="antialiased min-h-screen bg-background text-foreground"
+        suppressHydrationWarning
       >
         <div id="app-boot-loader" className="fixed inset-0 z-[99999] flex items-center justify-center bg-background" suppressHydrationWarning>
           <svg className="animate-spin h-8 w-8 text-primary" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
