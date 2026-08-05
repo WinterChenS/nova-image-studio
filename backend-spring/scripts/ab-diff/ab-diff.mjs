@@ -9,6 +9,9 @@
  *   - 两个后端必须已启动（各指向同一 frontend/out 静态产物、各自的端口）。
  *   - 图片生成路径使用脚本内置的 mock 上游（不需要真实 AI Key）：
  *     通过任务请求里的 baseUrl 指向 mock server，两个后端走同一 mock。
+ *   - M2 (WIN-12) Q1 用户隔离：任务创建需登录；Spring 端轮询任务状态/
+ *     图片拉取/WS 订阅均携带 ab-diff 用户的 JWT（匿名只读仅限 NULL 归属
+ *     遗留任务，Node 无用户体系忽略该头）——WIN-17 探针适配，保持 A/B 1:1。
  *   - 对比前对时间戳/任务ID/图片URL做归一化（两端 UUID/时间必然不同）。
  *   - 输出 PASS/FAIL 逐项结果；任何 FAIL 以非 0 退出。
  */
@@ -174,9 +177,9 @@ async function taskBody(mockPort, overrides = {}) {
   };
 }
 
-async function waitCompleted(base, taskId) {
+async function waitCompleted(base, taskId, headers) {
   for (let i = 0; i < 100; i++) {
-    const r = await req(base, 'GET', `/api/nova/tasks/${taskId}`);
+    const r = await req(base, 'GET', `/api/nova/tasks/${taskId}`, null, headers);
     if (r.text.includes('"completed"') || r.text.includes('"failed"')) {
       return r;
     }
@@ -202,9 +205,11 @@ async function probeQueueStatus(base, _, ip) {
 async function probeCreatePollImage(base, _, ip) {
   const r = await req(base, 'POST', '/api/nova/tasks', await taskBody(mockPort), ip({}));
   const taskId = JSON.parse(r.text).taskId;
-  const done = await waitCompleted(base, taskId);
+  // Q1 (M2): user-owned tasks are only readable by their owner — poll with the
+  // caller's headers so Spring carries the ab-diff user's JWT (Node ignores it).
+  const done = await waitCompleted(base, taskId, ip({}));
   const img = done.text.includes('"completed"')
-    ? await req(base, 'GET', `/api/nova/images/${taskId}/0`)
+    ? await req(base, 'GET', `/api/nova/images/${taskId}/0`, null, ip({}))
     : null;
   return {
     createStatus: r.status,
@@ -219,7 +224,7 @@ async function probeCreatePollImage(base, _, ip) {
 async function probeCreateParallel(base, _, ip) {
   const r = await req(base, 'POST', '/api/nova/tasks', await taskBody(mockPort, { parallelCount: 2 }), ip({}));
   const taskId = JSON.parse(r.text).taskId;
-  const done = await waitCompleted(base, taskId);
+  const done = await waitCompleted(base, taskId, ip({}));
   return { createStatus: r.status, images: (done.text.match(/URL:\/api\/nova\/images/g) || []).length };
 }
 
@@ -327,8 +332,12 @@ async function probeWs(base) {
 
 async function probeWsTaskPush(base, _, ip) {
   // subscribe to a task before creating it → watch queued → processing → completed
-  const wsUrl = base.replace(/^http/, 'ws') + '/api/nova/ws';
-  const ws = new WebSocket(wsUrl);
+  const wsBase = base.replace(/^http/, 'ws') + '/api/nova/ws';
+  // Q1 (M2): task pushes are owner-filtered — Spring's WS handshake takes
+  // ?token= (browsers can't set WS headers); the Node backend ignores it.
+  const token = base === springBase && springAuth.token
+    ? `?token=${encodeURIComponent(springAuth.token)}` : '';
+  const ws = new WebSocket(wsBase + token);
   const opened = await Promise.race([once(ws, 'open'), sleep(8000).then(() => 'timeout')]);
   if (opened === 'timeout') {
     try { ws.close(); } catch { /* ignore */ }
