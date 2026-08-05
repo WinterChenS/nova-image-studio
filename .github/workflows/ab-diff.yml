@@ -41,7 +41,8 @@ jobs:
       REDIS_PASSWORD: ""
       # M2 (WIN-12): Spring 启动必需 — JWT 签名密钥 + AES-GCM 主密钥（CI 测试值）
       NOVA_JWT_SECRET: ci-jwt-secret-ci-jwt-secret-ci-jwt-secret-123456
-      NOVA_SETTINGS_SECRET_KEY: Y2ktYWItZGlmZi1zZWNyZXQta2V5LTMyYnl0ZXMhIQ==
+      # S1-R (WIN-12 复审): 必须为合法 16/24/32 字节 base64（旧值解码 31 字节导致 Spring 启动失败）
+      NOVA_SETTINGS_SECRET_KEY: Y2ktYWItZGlmZi1zZWNyZXQta2V5LTMyYnl0ZXMteHg=
     steps:
       - name: Checkout
         uses: actions/checkout@v4
