@@ -51,6 +51,16 @@ class GalleryControllerTest {
     }
 
     @Test
+    void promptsFilterHiddenRowsOnPublicEndpoint() {
+        // T3.1 复审闭环：admin 设 enabled=false 的条目对公开端点隐藏（admin 列表仍全量）。
+        when(galleryDataService.prompts()).thenReturn(List.of(
+                new GalleryDataService.PromptRow(UUID.randomUUID(), "可见", "c", 1, true, 0),
+                new GalleryDataService.PromptRow(UUID.randomUUID(), "隐藏", "c", 1, false, 1)));
+        List<Map<String, Object>> body = newController().prompts();
+        assertThat(body).extracting(item -> item.get("title")).containsExactly("可见");
+    }
+
+    @Test
     void configModeAndPasswordEnabled() {
         when(runtimeEnv.getString("PROMPT_GALLERY_MODE", "2")).thenReturn("1");
         when(runtimeEnv.getString("PROMPT_GALLERY_PASSWORD", "")).thenReturn("8848");

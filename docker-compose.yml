@@ -65,8 +65,9 @@ services:
       NOVA_BLACKLIST_PATH: /app/backend/blacklist.json
     volumes:
       - ./data:/app/data
-      - ./prompts.json:/app/backend/prompts.json
-      - ./blacklist.json:/app/backend/blacklist.json
+      # 种子文件实际在仓库 backend/ 下（镜像内已 COPY；挂载用于宿主自定义覆盖）
+      - ./backend/prompts.json:/app/backend/prompts.json
+      - ./backend/blacklist.json:/app/backend/blacklist.json
       - ./.env:/app/.env:ro
     depends_on:
       postgres:

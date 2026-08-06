@@ -36,6 +36,11 @@ RUN mvn -B -ntp -DskipTests package
 # ---- stage 3: production runtime -------------------------------------------
 FROM eclipse-temurin:21-jre
 
+# HEALTHCHECK 依赖 curl（temurin 镜像不含 wget/curl，显式安装）
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends curl \
+  && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 # Spring Boot fat jar (single artifact — no node_modules, no sqlite natives)
@@ -56,6 +61,6 @@ ENV PORT=3000 \
 EXPOSE 3000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-  CMD ["sh", "-c", "wget -q -O - http://127.0.0.1:3000/actuator/health | grep -q UP || exit 1"]
+  CMD ["sh", "-c", "curl -fs http://127.0.0.1:3000/actuator/health | grep -q UP || exit 1"]
 
 CMD ["java", "-jar", "app.jar"]

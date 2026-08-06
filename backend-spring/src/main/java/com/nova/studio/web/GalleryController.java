@@ -46,8 +46,13 @@ public class GalleryController {
 
     @GetMapping("/prompts")
     public List<Map<String, Object>> prompts() {
-        // Public shape parity with the legacy file: only title/content/type.
+        // Public shape parity with the legacy file: only title/content/type, and
+        // only enabled rows (admin may hide entries via PUT enabled=false — the
+        // hidden flag takes effect on the public endpoint; the admin list still
+        // returns everything). File-fallback rows carry enabled=true, so the
+        // filter is transparent there.
         return galleryDataService.prompts().stream()
+                .filter(GalleryDataService.PromptRow::enabled)
                 .map(row -> {
                     Map<String, Object> item = new LinkedHashMap<>();
                     item.put("title", row.title());
