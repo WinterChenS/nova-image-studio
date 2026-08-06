@@ -1,6 +1,6 @@
 'use client';
 
-import { Copy, Download, ImagePlus, Maximize2, Settings, Wand2, X, Shuffle, User, Wallpaper, RefreshCw } from 'lucide-react';
+import { Copy, Download, ImagePlus, LayoutGrid, Maximize2, Settings, Wand2, X, Shuffle, User, Wallpaper, RefreshCw } from 'lucide-react';
 import { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, useId, forwardRef, useImperativeHandle } from 'react';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -48,6 +48,8 @@ interface WorkspaceHeaderProps {
   wideMode: boolean;
   onToggleWideMode: () => void;
   onOpenSettings: () => void;
+  onOpenConsole?: () => void;
+  projectSwitcher?: React.ReactNode;
   onLogoClick?: () => void;
   sidebarMode?: boolean;
   user?: import('@/lib/auth').AuthUser | null;
@@ -56,7 +58,7 @@ interface WorkspaceHeaderProps {
 }
 
 export const WorkspaceHeader = forwardRef<WorkspaceHeaderRef, WorkspaceHeaderProps>(function WorkspaceHeader(
-  { queueStatus, wideMode, onToggleWideMode, onOpenSettings, onLogoClick, sidebarMode = false,
+  { queueStatus, wideMode, onToggleWideMode, onOpenSettings, onOpenConsole, projectSwitcher, onLogoClick, sidebarMode = false,
     user, onOpenLogin, onLogout },
   ref,
 ) {
@@ -233,6 +235,13 @@ export const WorkspaceHeader = forwardRef<WorkspaceHeaderRef, WorkspaceHeaderPro
               <Settings className="w-4 h-4" />
               <span className="hidden sm:inline">设置</span>
             </Button>
+            {projectSwitcher}
+            {onOpenConsole && (
+              <Button variant="outline" size="sm" onClick={onOpenConsole} className="gap-1 px-2 sm:px-2.5" title="管理控制台" aria-label="管理控制台">
+                <LayoutGrid className="w-4 h-4" />
+                <span className="hidden sm:inline">管理控制台</span>
+              </Button>
+            )}
           </div>
         </div>
       </div>

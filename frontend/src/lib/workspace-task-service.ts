@@ -19,6 +19,7 @@ import { downloadAndStoreImages, type DownloadResult, type ImageDownloadProgress
 
 export interface TextToImageSubmitInput {
   prompts: string[];
+  projectId?: string; // WIN-22 (F-4)
   outputSize: OutputSize;
   customSize?: string;
   aspectRatio: AspectRatio;
@@ -32,6 +33,7 @@ export interface TextToImageSubmitInput {
 
 export interface ImageToImageSubmitInput {
   prompt: string;
+  projectId?: string; // WIN-22 (F-4)
   files: { id: string; name: string; dataUrl: string; mimeType: string }[];
   outputSize: OutputSize;
   customSize?: string;
@@ -343,6 +345,7 @@ export async function submitTextToImage(
       const serverTaskId = await createNovaTask({
         mode: 'text-to-image',
         prompt,
+        projectId: input.projectId,
         outputSize: input.outputSize,
         customSize: input.customSize,
         aspectRatio: input.aspectRatio,
@@ -406,6 +409,7 @@ export async function submitImageToImage(
     const serverTaskId = await createNovaTask({
       mode: 'image-to-image',
       prompt: input.prompt,
+      projectId: input.projectId,
       outputSize: input.outputSize,
       customSize: input.customSize,
       aspectRatio: input.aspectRatio,

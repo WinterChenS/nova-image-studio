@@ -7,7 +7,6 @@ import { ImageGenerationWorkbench } from '@/components/ImageGenerationWorkbench'
 import { ReversePromptForm } from '@/components/ReversePromptForm';
 import { GifGenerationWorkspace } from '@/components/GifGenerationWorkspace';
 import { AgentChatWorkspace } from '@/components/agent/AgentChatWorkspace';
-import { AssetsWorkspace } from '@/components/assets/AssetsWorkspace';
 import { CanvasWorkspace } from '@/components/canvas/CanvasWorkspace';
 import { PromptGallery } from '@/components/PromptGallery';
 import { SettingsModal } from '@/components/SettingsModal';
@@ -18,6 +17,9 @@ import { useWideMode } from '@/hooks/useWideMode';
 import { useAuthHydration } from '@/hooks/useAuthHydration';
 import { useServerTaskPolling } from '@/hooks/useServerTaskPolling';
 import { useWorkspaceJobs } from '@/hooks/useWorkspaceJobs';
+import { useCurrentProject } from '@/hooks/useCurrentProject';
+import { useAppShell } from '@/components/console/AppShell';
+import { ProjectSwitcher } from '@/components/workspace/ProjectSwitcher';
 import { WorkspaceHeader, type WorkspaceHeaderRef } from '@/components/workspace/WorkspaceHeader';
 import { WorkspaceModeTabs } from '@/components/workspace/WorkspaceModeTabs';
 import { HistoryJobList, type GenerationHistoryFilter, type HistoryClearScope } from '@/components/workspace/results/HistoryJobList';
@@ -51,11 +53,13 @@ export function WorkspaceShell() {
   const queueStatus = useQueueStatus();
   const { wideMode, toggleWideMode } = useWideMode();
   const { user, handleLogout } = useAuthHydration();
+  const { enterConsole } = useAppShell();
+  const { currentProject } = useCurrentProject();
   const [loginOpen, setLoginOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [missingApiKeyDialogOpen, setMissingApiKeyDialogOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'image-generation' | 'agent' | 'canvas' | 'assets' | 'reverse-prompt' | 'gif' | 'prompt-gallery'>('agent');
+  const [activeTab, setActiveTab] = useState<'image-generation' | 'agent' | 'canvas' | 'reverse-prompt' | 'gif' | 'prompt-gallery'>('agent');
   const [generationHistoryFilter, setGenerationHistoryFilter] = useState<GenerationHistoryFilter>('all');
   const [generationClearScope, setGenerationClearScope] = useState<HistoryClearScope | null>(null);
   const [referenceDraft, setReferenceDraft] = useState<{ id: number; refImages: RefImageData[]; prompt?: string } | null>(null);
@@ -236,6 +240,8 @@ export function WorkspaceShell() {
             wideMode={wideMode}
             onToggleWideMode={toggleWideMode}
             onOpenSettings={() => setSettingsOpen(true)}
+            onOpenConsole={enterConsole}
+            projectSwitcher={<ProjectSwitcher />}
             onLogoClick={promptGallery.handlePromptGalleryEntry}
             sidebarMode={wideMode}
             user={user}
@@ -358,8 +364,8 @@ export function WorkspaceShell() {
                   <div className={cn(wideMode && 'xl:h-full xl:min-h-0 xl:overflow-y-auto xl:pr-1')}>
                     <ImageGenerationWorkbench
                       wideMode={wideMode}
-                      onSubmitText={data => void submitTextToImage(data, submitActions, handleSubmitError)}
-                      onSubmitImage={data => void submitImageToImage(data, submitActions, handleSubmitError)}
+                      onSubmitText={data => void submitTextToImage({ ...data, projectId: currentProject?.id }, submitActions, handleSubmitError)}
+                      onSubmitImage={data => void submitImageToImage({ ...data, projectId: currentProject?.id }, submitActions, handleSubmitError)}
                       disabled={!workspace.hasApiKey}
                       onConfigureApiKey={() => setSettingsOpen(true)}
                       onDraftConsumed={handleImageDraftConsumed}
@@ -413,10 +419,6 @@ export function WorkspaceShell() {
                   showToast={showToast}
                   showPromptGallery={promptGallery.showPromptGallery}
                 />
-              </TabsContent>
-
-              <TabsContent value="assets" keepMounted className={cn(wideMode ? 'space-y-6 xl:min-h-0 xl:min-w-0 xl:flex xl:flex-col' : 'space-y-6')}>
-                <AssetsWorkspace wideMode={wideMode} active={activeTab === 'assets'} />
               </TabsContent>
 
               <TabsContent value="reverse-prompt" keepMounted className={cn(wideMode ? 'space-y-6 xl:min-h-0 xl:flex xl:flex-col' : 'space-y-6')}>

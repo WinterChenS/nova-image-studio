@@ -44,7 +44,7 @@ describe.skipIf(!WS_URL)('ccode-task-socket vs Spring WS server (M0 spike)', () 
       addEventListener: () => {},
     }
     const mod = await import('@/lib/ccode-task-socket')
-    socket = mod.novaTaskSocket as SocketLike
+    socket = mod.novaTaskSocket as unknown as SocketLike
   })
 
   afterAll(() => {
@@ -110,7 +110,7 @@ describe.skipIf(!WS_URL)('ccode-task-socket vs Spring WS server (M0 spike)', () 
     // force-close the underlying socket (simulates network drop; 4000 = app code)
     const ws = socket.ws
     expect(ws?.readyState).toBe(1)
-    ws.close(4000, 'simulated drop')
+    ws?.close(4000, 'simulated drop')
 
     // client should reconnect (backoff 1s+) and re-subscribe → new immediate push
     await waitFor(() => updates.filter((s) => s === 'queued').length >= 2, 12000)
