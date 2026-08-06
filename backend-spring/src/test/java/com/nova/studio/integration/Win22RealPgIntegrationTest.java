@@ -43,7 +43,8 @@ class Win22RealPgIntegrationTest {
     @Autowired
     private org.springframework.jdbc.core.JdbcTemplate jdbcTemplate;
 
-    private final RestTemplate rest = new RestTemplate();
+    // B-4/QA: 默认 RestTemplate（HttpURLConnection）不支持 PATCH —— 显式用 JDK HttpClient 工厂
+    private final RestTemplate rest = new RestTemplate(new org.springframework.http.client.JdkClientHttpRequestFactory());
     private final ObjectMapper mapper = new ObjectMapper();
     private String token;
     private String username;
@@ -266,12 +267,27 @@ class Win22RealPgIntegrationTest {
 
     @Test
     void crossUserAccessReturns404() {
-        // 用户 A 的项目
+        // 用户 A 创建项目 + 素材（B-4 同时覆盖：tags jsonb 绑定）
         Map<String, Object> proj = new LinkedHashMap<>();
         proj.put("name", "A 的项目");
         String projectId = postJson("/api/nova/projects", proj).get("id").asText();
 
-        // 用户 B 访问 A 的项目 → 404
+        HttpHeaders formHeaders = new HttpHeaders();
+        formHeaders.setContentType(MediaType.MULTIPART_FORM_DATA);
+        formHeaders.setBearerAuth(token);
+        MultiValueMap<String, Object> form = new LinkedMultiValueMap<>();
+        form.add("file", new ByteArrayResource(new byte[]{9, 8, 7}) {
+            @Override
+            public String getFilename() {
+                return "a.png";
+            }
+        });
+        form.add("projectId", projectId);
+        form.add("sourceKind", "upload");
+        String assetId = read(rest.postForEntity(url("/api/nova/assets"),
+                new HttpEntity<>(form, formHeaders), String.class)).get("id").asText();
+
+        // 用户 B 访问 A 的素材 → 404（属主校验，GET /api/nova/assets/{id}）
         String other = "win22b_" + UUID.randomUUID().toString().substring(0, 8);
         Map<String, Object> reg = new LinkedHashMap<>();
         reg.put("username", other);
@@ -284,7 +300,7 @@ class Win22RealPgIntegrationTest {
 
         HttpHeaders headers = new HttpHeaders();
         headers.setBearerAuth(otherToken);
-        ResponseEntity<String> resp = rest.exchange(url("/api/nova/projects/" + projectId),
+        ResponseEntity<String> resp = rest.exchange(url("/api/nova/assets/" + assetId),
                 HttpMethod.GET, new HttpEntity<>(headers), String.class);
         assertThat(resp.getStatusCode().value()).isEqualTo(404);
 

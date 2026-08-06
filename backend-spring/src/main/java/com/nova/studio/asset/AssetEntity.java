@@ -35,8 +35,8 @@ public class AssetEntity {
     private Integer width;
     @TableField("height")
     private Integer height;
-    @TableField("tags")
-    private String tags;                 // JSONB array kept as string + service-layer serialize
+    @TableField(value = "tags", typeHandler = com.nova.studio.infra.JsonbTypeHandler.class)
+    private String tags;                 // JSONB array kept as string + service-layer serialize (B-4: jsonb TypeHandler)
     @TableField("note")
     private String note;
     @TableField("source_kind")
