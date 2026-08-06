@@ -47,6 +47,7 @@ public class TaskQueueService {
     private final TaskEventBroadcaster broadcaster;
     private final ObjectMapper objectMapper;
     private final QueueStatsService queueStatsService;
+    private final TaskMetrics taskMetrics;
     private final long ttlMs;
     private final long requestTimeoutMs;
 
@@ -72,6 +73,7 @@ public class TaskQueueService {
                             TaskEventBroadcaster broadcaster,
                             ObjectMapper objectMapper,
                             QueueStatsService queueStatsService,
+                            TaskMetrics taskMetrics,
                             @Value("${nova.task.ttl-ms:43200000}") long ttlMs,
                             @Value("${nova.task.request-timeout-ms:1800000}") long requestTimeoutMs) {
         this.repository = repository;
@@ -80,6 +82,7 @@ public class TaskQueueService {
         this.broadcaster = broadcaster;
         this.objectMapper = objectMapper;
         this.queueStatsService = queueStatsService;
+        this.taskMetrics = taskMetrics;
         this.ttlMs = ttlMs;
         this.requestTimeoutMs = requestTimeoutMs;
     }
@@ -211,6 +214,7 @@ public class TaskQueueService {
         TaskRequest request = parseRequest(rowOpt.get().requestJson()).orElse(null);
         if (request == null) {
             repository.failTask(taskId, "任务请求解析失败", Instant.now().toString(), Instant.now().plusMillis(ttlMs).toString());
+            taskMetrics.taskFailed();
             cleanupTaskRuntimeState(taskId);
             broadcaster.broadcastTask(taskId);
             broadcaster.broadcastQueueStatus();
@@ -225,6 +229,7 @@ public class TaskQueueService {
         }
 
         repository.updateStatus(taskId, TaskRepository.STATUS_PROCESSING);
+        taskMetrics.taskProcessing();
         broadcaster.broadcastTask(taskId);
         broadcaster.broadcastQueueStatus();
 
@@ -263,9 +268,11 @@ public class TaskQueueService {
                     : errors.size() + " 张图片生成失败: " + String.join("; ", errors);
             String resultJson = jsonObject(Map.of("images", images));
             repository.completeTask(taskId, resultJson, warning, completedAt.toString(), expiresAt.toString());
+            taskMetrics.taskCompleted();
         } else {
             repository.failTask(taskId, "所有图片生成失败: " + String.join("; ", errors),
                     completedAt.toString(), expiresAt.toString());
+            taskMetrics.taskFailed();
         }
         cleanupTaskRuntimeState(taskId);
         broadcaster.broadcastTask(taskId);

@@ -59,6 +59,7 @@ public class TaskService {
     private final ModelService modelService;
     private final SettingsService settingsService;
     private final ObjectMapper objectMapper;
+    private final TaskMetrics taskMetrics;
     private final long ackGraceMs;
     private final long ttlMs;
 
@@ -73,6 +74,7 @@ public class TaskService {
                        ModelService modelService,
                        SettingsService settingsService,
                        ObjectMapper objectMapper,
+                       TaskMetrics taskMetrics,
                        @Value("${nova.task.ack-grace-ms:120000}") long ackGraceMs,
                        @Value("${nova.task.ttl-ms:43200000}") long ttlMs) {
         this.repository = repository;
@@ -86,6 +88,7 @@ public class TaskService {
         this.modelService = modelService;
         this.settingsService = settingsService;
         this.objectMapper = objectMapper;
+        this.taskMetrics = taskMetrics;
         this.ackGraceMs = ackGraceMs;
         this.ttlMs = ttlMs;
     }
@@ -143,6 +146,7 @@ public class TaskService {
         repository.insertTaskAndItems(taskId, userId, TaskRepository.STATUS_QUEUED,
                 body.get("mode").asText(), requestJson, nowIso,
                 body.get("parallelCount").asInt());
+        taskMetrics.taskQueued();
 
         queueService.registerRuntimeState(taskId, apiKey, images,
                 new TaskQueueService.Source(clientIp, apiKeyHash));

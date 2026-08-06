@@ -3,6 +3,7 @@ package com.nova.studio.task;
 import com.nova.studio.imagegen.ImageGenService;
 import com.nova.studio.storage.ImageStorageService;
 import com.nova.studio.ws.TaskEventBroadcaster;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -60,7 +61,7 @@ class TaskQueueServiceTest {
         broadcaster = mock(TaskEventBroadcaster.class);
         queueStatsService = mock(QueueStatsService.class);
         queueService = new TaskQueueService(repository, imageGenService, imageStorageService, broadcaster,
-                MAPPER, queueStatsService, 43_200_000, 1_800_000);
+                MAPPER, queueStatsService, new TaskMetrics(new SimpleMeterRegistry()), 43_200_000, 1_800_000);
     }
 
     @Test

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  T3.2 (WIN-13) — console logging with secret redaction (F-17 / PRD §7 安全
+  「日志无 Key」). Keeps Spring Boot's standard CONSOLE_LOG_PATTERN from
+  defaults.xml; only the rendered message passes through MaskingPatternLayout
+  (sk-.../AIza.../JWT/Bearer/api_key values → ***).
+-->
+<configuration>
+  <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+
+  <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder class="com.nova.studio.infra.logging.MaskingPatternLayoutEncoder">
+      <pattern>${CONSOLE_LOG_PATTERN}</pattern>
+      <charset>UTF-8</charset>
+    </encoder>
+  </appender>
+
+  <root level="INFO">
+    <appender-ref ref="CONSOLE"/>
+  </root>
+</configuration>
