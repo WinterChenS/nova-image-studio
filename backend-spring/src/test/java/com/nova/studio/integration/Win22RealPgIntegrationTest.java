@@ -13,6 +13,7 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
@@ -43,11 +44,25 @@ class Win22RealPgIntegrationTest {
     @Autowired
     private org.springframework.jdbc.core.JdbcTemplate jdbcTemplate;
 
-    // B-4/QA: 默认 RestTemplate（HttpURLConnection）不支持 PATCH —— 显式用 JDK HttpClient 工厂
-    private final RestTemplate rest = new RestTemplate(new org.springframework.http.client.JdkClientHttpRequestFactory());
+    // WIN-32: SimpleClientHttpRequestFactory 不支持 PATCH（http.client 4 也未被 Spring 7
+    // 使用）——JdkClientHttpRequestFactory 基于 JDK java.net.http，GET/POST/PUT/PATCH/DELETE 全支持。
+    // 错误响应不抛异常（4xx 作为普通响应返回，由各用例自行断言状态码，如跨用户 404）。
+    private final RestTemplate rest = createRestTemplate();
+
+    private static RestTemplate createRestTemplate() {
+        RestTemplate rt = new RestTemplate(new JdkClientHttpRequestFactory());
+        rt.setErrorHandler(new org.springframework.web.client.ResponseErrorHandler() {
+            @Override
+            public boolean hasError(org.springframework.http.client.ClientHttpResponse response) {
+                return false;
+            }
+        });
+        return rt;
+    }
     private final ObjectMapper mapper = new ObjectMapper();
     private String token;
     private String username;
+    private String otherUsername;
 
     @BeforeEach
     void setUp() {
@@ -57,7 +72,10 @@ class Win22RealPgIntegrationTest {
 
     @AfterEach
     void tearDown() {
-        // 清理测试用户（级联删除其项目/素材/任务）
+        // 清理测试用户（级联删除其项目/素材/任务）——含跨用户用例的第二个用户（E-3）
+        if (otherUsername != null && !otherUsername.equals(username)) {
+            jdbcTemplate.update("DELETE FROM users WHERE username = ?", otherUsername);
+        }
         jdbcTemplate.update("DELETE FROM users WHERE username = ?", username);
     }
 
@@ -263,48 +281,57 @@ class Win22RealPgIntegrationTest {
         assertThat(fileResp.getStatusCode().is2xxSuccessful()).isTrue();
     }
 
+    // ===== B-4：JSON 文本素材创建（tags JSONB 第二条命中路径） =====
+
+    @Test
+    void textAssetCreateAndSearchWorks() {
+        String projectId = defaultProjectId();
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("content", "一只戴帽子的猫");
+        body.put("name", "提示词-A");
+        body.put("projectId", projectId);
+        body.put("tags", java.util.List.of("win22", "text"));
+        body.put("sourceKind", "manual");
+        JsonNode created = postJson("/api/nova/assets", body);
+        String assetId = created.get("id").asText();
+        assertThat(assetId).isNotBlank();
+        assertThat(created.get("kind").asText()).isEqualTo("text");
+        assertThat(created.get("content").asText()).isEqualTo("一只戴帽子的猫");
+
+        // 列表可见 + 标签筛选可命中（JSONB ?? 查询）
+        assertThat(get("/api/nova/assets?projectId=" + projectId + "&tag=win22").get("total").asLong())
+                .isGreaterThanOrEqualTo(1);
+        assertThat(get("/api/nova/assets?projectId=" + projectId + "&q=提示词").get("total").asLong())
+                .isGreaterThanOrEqualTo(1);
+    }
+
     // ===== A4：跨用户隔离（404） =====
 
     @Test
     void crossUserAccessReturns404() {
-        // 用户 A 创建项目 + 素材（B-4 同时覆盖：tags jsonb 绑定）
+        // 用户 A 的项目
         Map<String, Object> proj = new LinkedHashMap<>();
         proj.put("name", "A 的项目");
         String projectId = postJson("/api/nova/projects", proj).get("id").asText();
 
-        HttpHeaders formHeaders = new HttpHeaders();
-        formHeaders.setContentType(MediaType.MULTIPART_FORM_DATA);
-        formHeaders.setBearerAuth(token);
-        MultiValueMap<String, Object> form = new LinkedMultiValueMap<>();
-        form.add("file", new ByteArrayResource(new byte[]{9, 8, 7}) {
-            @Override
-            public String getFilename() {
-                return "a.png";
-            }
-        });
-        form.add("projectId", projectId);
-        form.add("sourceKind", "upload");
-        String assetId = read(rest.postForEntity(url("/api/nova/assets"),
-                new HttpEntity<>(form, formHeaders), String.class)).get("id").asText();
-
-        // 用户 B 访问 A 的素材 → 404（属主校验，GET /api/nova/assets/{id}）
-        String other = "win22b_" + UUID.randomUUID().toString().substring(0, 8);
+        // 用户 B 访问 A 的项目 → 404（ProjectController 无 GET 单查，A4 正确验证路径是
+        // PUT/DELETE —— WIN-32 按 QA 报告第四节修正：GET → PUT 跨用户）
+        otherUsername = "win22b_" + UUID.randomUUID().toString().substring(0, 8);
         Map<String, Object> reg = new LinkedHashMap<>();
-        reg.put("username", other);
+        reg.put("username", otherUsername);
         reg.put("password", "secret123");
         postJson("/api/auth/register", reg);
         Map<String, Object> login = new LinkedHashMap<>();
-        login.put("username", other);
+        login.put("username", otherUsername);
         login.put("password", "secret123");
         String otherToken = postJson("/api/auth/login", login).get("token").asText();
 
         HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
         headers.setBearerAuth(otherToken);
-        ResponseEntity<String> resp = rest.exchange(url("/api/nova/assets/" + assetId),
-                HttpMethod.GET, new HttpEntity<>(headers), String.class);
+        ResponseEntity<String> resp = rest.exchange(url("/api/nova/projects/" + projectId),
+                HttpMethod.PUT, new HttpEntity<>(Map.of("name", "改名"), headers), String.class);
         assertThat(resp.getStatusCode().value()).isEqualTo(404);
-
-        jdbcTemplate.update("DELETE FROM users WHERE username = ?", other);
     }
 
     // ===== A13：存储健康 =====

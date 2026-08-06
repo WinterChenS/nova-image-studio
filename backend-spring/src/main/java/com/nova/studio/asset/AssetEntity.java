@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
+import com.nova.studio.infra.JsonbTypeHandler;
 
 import java.time.Instant;
 
@@ -35,8 +36,8 @@ public class AssetEntity {
     private Integer width;
     @TableField("height")
     private Integer height;
-    @TableField(value = "tags", typeHandler = com.nova.studio.infra.JsonbTypeHandler.class)
-    private String tags;                 // JSONB array kept as string + service-layer serialize (B-4: jsonb TypeHandler)
+    @TableField(value = "tags", typeHandler = JsonbTypeHandler.class)
+    private String tags;                 // JSONB array kept as string + service-layer serialize
     @TableField("note")
     private String note;
     @TableField("source_kind")
