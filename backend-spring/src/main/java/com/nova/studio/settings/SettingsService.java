@@ -1,13 +1,10 @@
 package com.nova.studio.settings;
 
-import com.nova.studio.infra.HttpErrorException;
-import com.nova.studio.settings.ModelService.ResolvedModel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
-import tools.jackson.databind.node.ObjectNode;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -24,8 +21,11 @@ import java.util.UUID;
  *
  * <p>Hot reads go through {@link SettingsCache} (Caffeine 1s TTL, ADR-6);
  * writes invalidate the user's entry immediately. The legacy localStorage
- * import (T2.6) maps old registry ids onto fresh server UUIDs and rewrites
- * {@code registry.defaults} accordingly.
+ * import (T2.6) imports <b>settings only</b> — the legacy model branch is
+ * <b>下线</b> (WIN-33): the old {@code models} table is logically frozen
+ * (PRD v1.1 §5 Q1/A2, ARCH C.4), so {@code nova-model-registry} is no longer
+ * written; the response reports {@code modelsImport: "deprecated"}. Frontend
+ * removal of the import wizard is M2 T19.
  */
 @Service
 public class SettingsService {
@@ -46,19 +46,11 @@ public class SettingsService {
 
     private final SettingsRepository repository;
     private final SettingsCache cache;
-    private final ModelRepository modelRepository;
-    private final ModelService modelService;
-    private final CryptoService crypto;
     private final ObjectMapper objectMapper;
 
-    public SettingsService(SettingsRepository repository, SettingsCache cache,
-                           ModelRepository modelRepository, ModelService modelService,
-                           CryptoService crypto, ObjectMapper objectMapper) {
+    public SettingsService(SettingsRepository repository, SettingsCache cache, ObjectMapper objectMapper) {
         this.repository = repository;
         this.cache = cache;
-        this.modelRepository = modelRepository;
-        this.modelService = modelService;
-        this.crypto = crypto;
         this.objectMapper = objectMapper;
     }
 
@@ -139,17 +131,21 @@ public class SettingsService {
     /**
      * Import a legacy localStorage export (the object the old frontend stored,
      * e.g. the {@code localStorage.json} inside an old backup ZIP or the direct
-     * export of the migration wizard): {@code nova-model-registry} → models +
-     * {@code registry.defaults} (ids remapped to server UUIDs), form-default
-     * keys → {@code workbench.*}, agent keys → {@code agent.*}.
+     * export of the migration wizard): form-default keys → {@code workbench.*},
+     * agent keys → {@code agent.*}.
+     *
+     * <p>WIN-33: the legacy model branch ({@code nova-model-registry} → old
+     * {@code models} table) is <b>下线</b> — the table is logically frozen
+     * (PRD v1.1 §5 Q1/A2, ARCH C.4 “业务代码不再读写 models”), so imported
+     * models are NOT written anymore; the response keeps the legacy shape
+     * ({@code modelsCreated: 0}) and reports {@code modelsImport: "deprecated"}
+     * for the frontend/M2 T19 to surface. Settings import is unchanged.
      */
     public Map<String, Object> importLegacy(UUID userId, JsonNode legacy) {
         if (legacy == null || !legacy.isObject()) {
             throw new IllegalArgumentException("导入数据格式无效");
         }
         Map<String, Object> summary = new LinkedHashMap<>();
-        int modelsCreated = importLegacyRegistry(userId, legacy.get("nova-model-registry"));
-        summary.put("modelsCreated", modelsCreated);
         int settingsWritten = 0;
         settingsWritten += importWorkbench(userId, legacy, "nova-t2i-settings", "workbench.t2i");
         settingsWritten += importWorkbench(userId, legacy, "nova-i2i-settings", "workbench.i2i");
@@ -159,85 +155,9 @@ public class SettingsService {
         settingsWritten += importBoolean(userId, legacy, "nova-agent-web-search", "agent.webSearch");
         settingsWritten += importBoolean(userId, legacy, "nova-agent-intent-recognition", "agent.intentRecognition");
         summary.put("settingsWritten", settingsWritten);
+        summary.put("modelsCreated", 0);
+        summary.put("modelsImport", "deprecated");
         return summary;
-    }
-
-    private int importLegacyRegistry(UUID userId, JsonNode registry) {
-        if (registry == null || !registry.isObject()) {
-            return 0;
-        }
-        int created = 0;
-        Map<String, String> idMapping = new LinkedHashMap<>();
-
-        JsonNode imageModels = registry.get("imageModels");
-        if (imageModels != null && imageModels.isArray()) {
-            for (JsonNode model : imageModels) {
-                String oldId = text(model, "id");
-                String newId = insertLegacyModel(userId, "image", model);
-                if (newId != null) {
-                    idMapping.put(oldId, newId);
-                    created++;
-                }
-            }
-        }
-        JsonNode textModels = registry.get("textModels");
-        if (textModels != null && textModels.isArray()) {
-            for (JsonNode model : textModels) {
-                String oldId = text(model, "id");
-                String newId = insertLegacyModel(userId, "text", model);
-                if (newId != null) {
-                    idMapping.put(oldId, newId);
-                    created++;
-                }
-            }
-        }
-
-        JsonNode defaults = registry.get("defaults");
-        if (defaults != null && defaults.isObject()) {
-            ObjectNode mappedDefaults = objectMapper.createObjectNode();
-            ((tools.jackson.databind.node.ObjectNode) defaults).properties().forEach(entry -> {
-                // defaults shape: { slotName: legacyModelId } — the legacy model
-                // id is the VALUE; remap it onto the fresh server UUID.
-                String mapped = entry.getValue().isTextual()
-                        ? idMapping.get(entry.getValue().asText()) : null;
-                mappedDefaults.put(entry.getKey(), mapped != null ? mapped : "");
-            });
-            repository.upsert(userId, "registry.defaults", mappedDefaults.toString(), "json");
-        }
-        cache.invalidate(userId);
-        return created;
-    }
-
-    private String insertLegacyModel(UUID userId, String type, JsonNode model) {
-        String protocol = text(model, "protocol");
-        String name = text(model, "name");
-        String modelId = text(model, "modelId");
-        String baseUrl = text(model, "baseUrl");
-        if (protocol == null || name == null || modelId == null || baseUrl == null) {
-            return null;
-        }
-        Set<String> allowed = "image".equals(type) ? ModelService.IMAGE_PROTOCOLS : ModelService.TEXT_PROTOCOLS;
-        if (!allowed.contains(protocol)) {
-            return null;
-        }
-        String apiKey = text(model, "apiKey");
-        String keyEnc = apiKey != null && !apiKey.isBlank() && !apiKey.contains("***") ? crypto.encrypt(apiKey.trim()) : null;
-
-        ObjectNode caps = objectMapper.createObjectNode();
-        String builtinPreset = null;
-        if ("image".equals(type)) {
-            builtinPreset = text(model, "builtinPreset");
-            caps.put("max_ref_images", number(model, "maxRefImages", 0));
-            caps.put("max_output_size", text(model, "maxOutputSize", "1K"));
-            caps.put("supports_advanced_params", booleanValue(model, "supportsAdvancedParams", false));
-        } else {
-            String note = text(model, "note");
-            if (note != null) {
-                caps.put("note", note);
-            }
-        }
-        return modelRepository.insert(userId, type, protocol, name.trim(), modelId.trim(), baseUrl.trim(),
-                keyEnc, caps.toString(), builtinPreset).toString();
     }
 
     private int importWorkbench(UUID userId, JsonNode legacy, String legacyKey, String settingsKey) {
@@ -275,25 +195,5 @@ public class SettingsService {
         } catch (Exception e) {
             return raw;
         }
-    }
-
-    private static String text(JsonNode node, String key) {
-        JsonNode value = node == null ? null : node.get(key);
-        return value != null && value.isTextual() ? value.asText() : null;
-    }
-
-    private static String text(JsonNode node, String key, String fallback) {
-        JsonNode value = node == null ? null : node.get(key);
-        return value != null && value.isTextual() ? value.asText() : fallback;
-    }
-
-    private static double number(JsonNode node, String key, double fallback) {
-        JsonNode value = node == null ? null : node.get(key);
-        return value != null && value.isNumber() ? value.asDouble() : fallback;
-    }
-
-    private static boolean booleanValue(JsonNode node, String key, boolean fallback) {
-        JsonNode value = node == null ? null : node.get(key);
-        return value != null && value.isBoolean() ? value.asBoolean() : fallback;
     }
 }
