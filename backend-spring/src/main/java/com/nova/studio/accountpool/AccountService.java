@@ -249,6 +249,11 @@ public class AccountService {
         return repository.findById(id);
     }
 
+    /** Decrypt the account's API key (scheduler dispatch / connectivity test). */
+    public String decryptKey(AccountRepository.Row row) {
+        return crypto.decrypt(row.apiKeyEnc());
+    }
+
     // ===== helpers =====
 
     private AccountRepository.Row require(UUID id) {
