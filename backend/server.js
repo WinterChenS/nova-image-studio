@@ -107,7 +107,28 @@ const HOSTNAME = process.env.HOSTNAME || '0.0.0.0';
 // WIN-21: Spring 独占 API 前缀（认证/设置/模型）。node(3000) 命中以下前缀时转发到
 // Spring(8080)，使前端相对路径调用（/api/auth/* 等）不再 404。注意不要覆盖 node 自有
 // 路由（/api/nova/tasks|queue-status|prompts|blacklist|config|proxy/*|images/* 等）。
-const SPRING_PROXY_PREFIXES = ['/api/auth', '/api/nova/settings', '/api/nova/models'];
+// WIN-22: 追加 projects/assets/storage/admin；tasks 的「列表 + 归入」按方法感知精确透传
+// （见 shouldProxyToSpring）——POST/单查/ack 仍走 node 自有 SQLite 链路（不回归）。
+const SPRING_PROXY_PREFIXES = ['/api/auth', '/api/nova/settings', '/api/nova/models',
+  '/api/nova/projects', '/api/nova/assets', '/api/nova/storage', '/api/nova/admin'];
+
+/**
+ * WIN-22 (ARCH D.6 注): 双栈下 /api/nova/tasks 前缀由 node 自有链路拦截，但新增的
+ * 「GET 列表」与「PATCH {id}/project」在 Spring 实现 —— 仅这两类请求透传 Spring，
+ * 其余（POST 创建 / GET {id} / POST {id}/ack）仍走 node（避免开发模式任务链断裂）。
+ */
+function shouldProxyToSpring(pathname, method) {
+  if (SPRING_PROXY_PREFIXES.some(prefix => pathname === prefix || pathname.startsWith(`${prefix}/`))) {
+    return true;
+  }
+  if (pathname === '/api/nova/tasks' && method === 'GET') {
+    return true;   // 任务历史列表（node 无此路由，透传安全）
+  }
+  if (pathname.startsWith('/api/nova/tasks/') && pathname.endsWith('/project')) {
+    return true;   // PATCH /api/nova/tasks/{id}/project（一键归入，node 无此路由）
+  }
+  return false;
+}
 const DB_PATH = process.env.NOVA_TASK_DB || path.join(__dirname, 'nova-tasks.sqlite');
 const TASK_TTL_MS = 12 * 60 * 60 * 1000;
 const CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
@@ -436,6 +457,8 @@ function initDatabase() {
   db.exec(`
     CREATE TABLE IF NOT EXISTS tasks (
       id TEXT PRIMARY KEY,
+      user_id TEXT,
+      project_id TEXT,
       status TEXT NOT NULL,
       mode TEXT NOT NULL,
       request_json TEXT NOT NULL,
@@ -460,6 +483,13 @@ function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_tasks_expires_at ON tasks(expires_at);
     CREATE INDEX IF NOT EXISTS idx_task_items_task_id ON task_items(task_id);
   `);
+
+  // WIN-22: 旧库升级 —— tasks 增加 project_id 列（SQLite 无 IF NOT EXISTS ADD COLUMN，
+  // 用 pragma 探测；旧任务保持 NULL = 未分类，G-4）。
+  const taskColumns = db.prepare(`SELECT name FROM pragma_table_info('tasks')`).all().map(r => r.name);
+  if (!taskColumns.includes('project_id')) {
+    db.exec(`ALTER TABLE tasks ADD COLUMN project_id TEXT`);
+  }
 
   const now = new Date().toISOString();
   db.prepare('UPDATE tasks SET status = ? WHERE status = ?').run(TASK_STATUS.QUEUED, TASK_STATUS.LEGACY_QUEUED);
@@ -575,27 +605,31 @@ function serveStatic(req, res, pathname) {
   return false;
 }
 
-const MAX_REQUEST_BODY_BYTES = 10 * 1024 * 1024; // 10MB
+const MAX_REQUEST_BODY_BYTES = 21 * 1024 * 1024; // 21MB（WIN-22 Q2：与 Spring max-http-request-size 对齐，支撑 20MB 素材上传）
 
-// 原样读取请求体（不解析 JSON），供 Spring 反向代理透传使用。上限与 readJsonBody 一致。
+// 原样读取请求体（不解析），供 Spring 反向代理透传使用。WIN-22 修复：改用 Buffer 累积，
+// 避免 utf8 字符串解码损坏二进制 multipart 字节（Buffer.toString('utf8') 会把非 UTF-8
+// 字节替换为 U+FFFD，再编码无法还原 —— 素材图片上传经代理必坏）。上限与 readJsonBody 一致。
 function readRawBody(req) {
   return new Promise((resolve, reject) => {
-    let raw = '';
+    const chunks = [];
+    let total = 0;
     let aborted = false;
-    req.setEncoding('utf8');
     req.on('data', chunk => {
       if (aborted) return;
-      raw += chunk;
-      if (raw.length > MAX_REQUEST_BODY_BYTES) {
+      total += chunk.length;
+      if (total > MAX_REQUEST_BODY_BYTES) {
         aborted = true;
-        raw = ''; // 释放已缓冲内存
+        chunks.length = 0; // 释放已缓冲内存
         req.resume();
         reject(createHttpError(413, 'PAYLOAD_TOO_LARGE', '请求体过大：请减少请求数据后重试。'));
+        return;
       }
+      chunks.push(chunk);
     });
     req.on('end', () => {
       if (aborted) return;
-      resolve(raw);
+      resolve(Buffer.concat(chunks));
     });
     req.on('error', reject);
   });
@@ -689,6 +723,7 @@ function createTask(body, req) {
 
   const taskId = randomUUID();
   const now = new Date().toISOString();
+  const projectId = typeof body.projectId === 'string' && body.projectId ? body.projectId : null; // WIN-22 (F-4)
   const requestForDb = {
     mode: body.mode,
     source: 'nova',
@@ -708,9 +743,9 @@ function createTask(body, req) {
   };
   const tx = db.transaction(() => {
     db.prepare(`
-      INSERT INTO tasks (id, status, mode, request_json, created_at)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(taskId, TASK_STATUS.QUEUED, body.mode, JSON.stringify(requestForDb), now);
+      INSERT INTO tasks (id, project_id, status, mode, request_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(taskId, projectId, TASK_STATUS.QUEUED, body.mode, JSON.stringify(requestForDb), now);
     const insertItem = db.prepare(`
       INSERT INTO task_items (task_id, item_index, status, created_at)
       VALUES (?, ?, ?, ?)
@@ -1393,7 +1428,7 @@ function serializeTask(task) {
     return { id: task.id, status: 'expired', error: '该任务已超出取回时间' };
   }
   const result = task.result_json ? JSON.parse(task.result_json) : undefined;
-  return {
+  const serialized = {
     id: task.id,
     status: task.status,
     mode: task.mode,
@@ -1404,6 +1439,9 @@ function serializeTask(task) {
     completedAt: task.completed_at,
     expiresAt: task.expires_at,
   };
+  // WIN-22 (F-4): 任务响应携带 projectId（NULL=未分类省略）
+  if (task.project_id) serialized.projectId = task.project_id;
+  return serialized;
 }
 
 function deleteTask(taskId) {
@@ -2022,17 +2060,21 @@ async function proxyToSpring(req, res, pathname, search) {
   }
 
   const init = { method: req.method, headers };
-  if (rawBody) init.body = rawBody;
+  // 空 Buffer 为 truthy，须显式判长度 —— 否则 GET 请求会被 undici 拒绝（GET cannot have body）
+  if (rawBody && rawBody.length > 0) init.body = rawBody;
 
   try {
     const upstream = await fetchWithTimeout(targetUrl, init);
     const contentType = upstream.headers.get('content-type') || '';
-    const raw = await upstream.text();
     if (contentType.includes('application/json')) {
+      const raw = await upstream.text();
       let data = null;
       try { data = JSON.parse(raw); } catch { /* 非 JSON 时保留原样 */ }
       sendJson(res, upstream.status, data ?? { error: `上游返回 ${upstream.status}` });
     } else {
+      // WIN-22: 非 JSON 响应（素材/文件流）用 arrayBuffer 原样透传，避免 utf8 字符串
+      // 解码损坏二进制字节（与 readRawBody 修复同因）。
+      const raw = Buffer.from(await upstream.arrayBuffer());
       res.writeHead(upstream.status, {
         'Content-Type': contentType || 'text/plain; charset=utf-8',
         'Cache-Control': 'no-store',
@@ -2059,8 +2101,8 @@ const startServer = () => {
   const httpServer = http.createServer(async (req, res) => {
     const parsedUrl = new URL(req.url || '/', `http://${req.headers.host || `${HOSTNAME}:${PORT}`}`);
     const pathname = parsedUrl.pathname || '';
-    // WIN-21: Spring 独占前缀先于 node 自有路由检查，命中即转发（含尾斜杠形式）
-    if (SPRING_PROXY_PREFIXES.some(prefix => pathname === prefix || pathname.startsWith(`${prefix}/`))) {
+    // WIN-21/WIN-22: Spring 独占前缀先于 node 自有路由检查，命中即转发（含尾斜杠形式）
+    if (shouldProxyToSpring(pathname, req.method)) {
       await proxyToSpring(req, res, pathname, parsedUrl.search);
       return;
     }

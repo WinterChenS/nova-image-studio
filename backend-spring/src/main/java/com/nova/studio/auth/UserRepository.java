@@ -16,8 +16,9 @@ import java.util.UUID;
 @Repository
 public class UserRepository {
 
-    /** Public row shape (service/test contract, unchanged). */
+    /** Public row shape (service/test contract). */
     public record UserRow(UUID id, String username, String passwordHash, String role,
+                          String status, Instant lastLoginAt,
                           Instant createdAt, Instant updatedAt) {
     }
 
@@ -51,10 +52,57 @@ public class UserRepository {
         entity.setUsername(username);
         entity.setPasswordHash(passwordHash);
         entity.setRole(role);
+        entity.setStatus("active");
         entity.setCreatedAt(now);
         entity.setUpdatedAt(now);
         mapper.insert(entity);
         return id;
+    }
+
+    /** WIN-22 (T6): all users (admin console list), newest first. */
+    public java.util.List<UserRow> listAll() {
+        return mapper.selectList(new LambdaQueryWrapper<UserEntity>()
+                        .orderByDesc(UserEntity::getCreatedAt))
+                .stream().map(UserRepository::toRow).toList();
+    }
+
+    /** WIN-22 (T6): count users with a given role — used by the last-admin guard. */
+    public long countByRole(String role) {
+        Long count = mapper.selectCount(new LambdaQueryWrapper<UserEntity>()
+                .eq(UserEntity::getRole, role));
+        return count == null ? 0 : count;
+    }
+
+    /** WIN-22 (T6): update status / role / password hash / last login. */
+    public void updateStatus(UUID id, String status) {
+        UserEntity patch = new UserEntity();
+        patch.setId(id);
+        patch.setStatus(status);
+        patch.setUpdatedAt(Instant.now());
+        mapper.updateById(patch);
+    }
+
+    public void updateRole(UUID id, String role) {
+        UserEntity patch = new UserEntity();
+        patch.setId(id);
+        patch.setRole(role);
+        patch.setUpdatedAt(Instant.now());
+        mapper.updateById(patch);
+    }
+
+    public void updatePasswordHash(UUID id, String passwordHash) {
+        UserEntity patch = new UserEntity();
+        patch.setId(id);
+        patch.setPasswordHash(passwordHash);
+        patch.setUpdatedAt(Instant.now());
+        mapper.updateById(patch);
+    }
+
+    public void recordLogin(UUID id, Instant at) {
+        UserEntity patch = new UserEntity();
+        patch.setId(id);
+        patch.setLastLoginAt(at);
+        mapper.updateById(patch);
     }
 
     /** Test-only helper: hard-delete a user row (settings/models cascade via FK). */
@@ -64,6 +112,7 @@ public class UserRepository {
 
     private static UserRow toRow(UserEntity e) {
         return new UserRow(e.getId(), e.getUsername(), e.getPasswordHash(), e.getRole(),
+                e.getStatus(), e.getLastLoginAt(),
                 e.getCreatedAt(), e.getUpdatedAt());
     }
 }

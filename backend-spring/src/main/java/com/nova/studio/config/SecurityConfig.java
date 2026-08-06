@@ -63,7 +63,9 @@ public class SecurityConfig {
                         .requestMatchers("/api/auth/register", "/api/auth/login", "/api/nova/health").permitAll()
                         .requestMatchers(HttpMethod.POST, "/api/nova/tasks").authenticated()   // Q1: task creation requires login
                         .requestMatchers("/api/auth/me", "/api/nova/settings/**", "/api/nova/models/**",
-                                "/api/nova/admin/**").authenticated()   // T3.1: admin API requires login (role in controller)
+                                "/api/nova/admin/**",
+                                "/api/nova/projects/**", "/api/nova/assets/**", "/api/nova/storage/**")
+                                .authenticated()   // T3.1/T6: admin API requires login (role in controller); WIN-22: projects/assets/storage require login
                         .requestMatchers("/", "/index.html", "/assets/**", "/favicon.ico",
                                 "/api/nova/ws", "/api/nova/images/**", "/api/nova/queue-status",
                                 "/api/nova/prompts", "/api/nova/blacklist", "/api/nova/config",

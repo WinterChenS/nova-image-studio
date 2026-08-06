@@ -9,7 +9,9 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -71,7 +73,7 @@ class UserServiceTest {
     void loginSucceedsAndReturnsToken() {
         String hash = new org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder(12).encode("secret123");
         when(repository.findByUsername("alice")).thenReturn(Optional.of(
-                new UserRepository.UserRow(USER_ID, "alice", hash, "user", null, null)));
+                new UserRepository.UserRow(USER_ID, "alice", hash, "user", "active", null, null, null)));
         var body = service.login("alice", "secret123");
         assertThat(body).containsKey("token");
         assertThat(body.get("user")).isInstanceOf(java.util.Map.class);
@@ -81,7 +83,7 @@ class UserServiceTest {
     void loginRejectsWrongPassword() {
         String hash = new org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder(12).encode("secret123");
         when(repository.findByUsername("alice")).thenReturn(Optional.of(
-                new UserRepository.UserRow(USER_ID, "alice", hash, "user", null, null)));
+                new UserRepository.UserRow(USER_ID, "alice", hash, "user", "active", null, null, null)));
         assertThatThrownBy(() -> service.login("alice", "wrong-pass"))
                 .isInstanceOfSatisfying(HttpErrorException.class, e -> {
                     assertThat(e.getStatusCode()).isEqualTo(401);
@@ -94,5 +96,26 @@ class UserServiceTest {
         when(repository.findByUsername("ghost")).thenReturn(Optional.empty());
         assertThatThrownBy(() -> service.login("ghost", "secret123"))
                 .isInstanceOfSatisfying(HttpErrorException.class, e -> assertThat(e.getStatusCode()).isEqualTo(401));
+    }
+
+    @Test
+    void loginRejectsDisabledAccount() {
+        String hash = new org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder(12).encode("secret123");
+        when(repository.findByUsername("alice")).thenReturn(Optional.of(
+                new UserRepository.UserRow(USER_ID, "alice", hash, "user", "disabled", null, null, null)));
+        assertThatThrownBy(() -> service.login("alice", "secret123"))
+                .isInstanceOfSatisfying(HttpErrorException.class, e -> {
+                    assertThat(e.getStatusCode()).isEqualTo(401);
+                    assertThat(e.getCode()).isEqualTo("USER_DISABLED");
+                });
+    }
+
+    @Test
+    void loginRecordsLastLogin() {
+        String hash = new org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder(12).encode("secret123");
+        when(repository.findByUsername("alice")).thenReturn(Optional.of(
+                new UserRepository.UserRow(USER_ID, "alice", hash, "user", "active", null, null, null)));
+        service.login("alice", "secret123");
+        verify(repository).recordLogin(eq(USER_ID), any());
     }
 }

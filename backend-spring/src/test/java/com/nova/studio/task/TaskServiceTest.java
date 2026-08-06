@@ -3,6 +3,7 @@ package com.nova.studio.task;
 import com.nova.studio.auth.AuthUser;
 import com.nova.studio.infra.HttpErrorException;
 import com.nova.studio.settings.ModelService;
+import com.nova.studio.project.ProjectService;
 import com.nova.studio.settings.SettingsService;
 import com.nova.studio.storage.ImageStorageService;
 import com.nova.studio.ws.TaskEventBroadcaster;
@@ -59,9 +60,12 @@ class TaskServiceTest {
         TaskLookupService lookupService = mock(TaskLookupService.class);
         modelService = mock(ModelService.class);
         SettingsService settingsService = mock(SettingsService.class);
+        ProjectService projectService = mock(ProjectService.class);
+        when(projectService.defaultProjectId(USER_ID)).thenReturn("default-project");
+        when(projectService.owns(eq(USER_ID), anyString())).thenReturn(true);
         taskService = new TaskService(repository, queueService, queueStatsService, rateLimiter,
                 shutdownFlag, imageStorageService, broadcaster, lookupService,
-                modelService, settingsService, MAPPER, new TaskMetrics(new SimpleMeterRegistry()), 120_000, 43_200_000);
+                modelService, settingsService, projectService, MAPPER, new TaskMetrics(new SimpleMeterRegistry()), 120_000, 43_200_000);
     }
 
     private void defaults() {
@@ -133,7 +137,7 @@ class TaskServiceTest {
         String taskId = taskService.createTask(body, "10.0.0.1", USER);
 
         assertThat(taskId).isNotBlank();
-        verify(repository).insertTaskAndItems(anyString(), eq(USER_ID), anyString(), anyString(),
+        verify(repository).insertTaskAndItems(anyString(), eq(USER_ID), anyString(), anyString(), anyString(),
                 anyString(), anyString(), any(Integer.class));
         verify(queueService).registerRuntimeState(anyString(), eq("sk-resolved"), any(), any());
         verify(queueService).enqueue(taskId);
@@ -207,7 +211,7 @@ class TaskServiceTest {
         ObjectNode body = validBody();
         String taskId = taskService.createTask(body, "10.0.0.1", USER);
         assertThat(taskId).isNotBlank();
-        verify(repository).insertTaskAndItems(anyString(), eq(USER_ID), anyString(), anyString(),
+        verify(repository).insertTaskAndItems(anyString(), eq(USER_ID), anyString(), anyString(), anyString(),
                 anyString(), anyString(), any(Integer.class));
         verify(queueService).registerRuntimeState(anyString(), eq("sk-test"), any(), any());
         verify(queueService).enqueue(taskId);

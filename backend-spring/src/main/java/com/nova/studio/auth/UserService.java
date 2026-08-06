@@ -47,7 +47,7 @@ public class UserService {
         return publicUser(id, user, "user");
     }
 
-    /** Login: verify credentials, issue JWT. */
+    /** Login: verify credentials, reject disabled accounts (G-1), record last login, issue JWT. */
     public Map<String, Object> login(String username, String password) {
         String user = normalize(username, "用户名不能为空");
         if (password == null || password.isEmpty()) {
@@ -55,9 +55,13 @@ public class UserService {
         }
         UserRepository.UserRow row = repository.findByUsername(user)
                 .orElseThrow(() -> new HttpErrorException(401, "INVALID_CREDENTIALS", "用户名或密码错误"));
+        if ("disabled".equals(row.status())) {
+            throw new HttpErrorException(401, "USER_DISABLED", "账号已被禁用");
+        }
         if (!encoder.matches(password, row.passwordHash())) {
             throw new HttpErrorException(401, "INVALID_CREDENTIALS", "用户名或密码错误");
         }
+        repository.recordLogin(row.id(), java.time.Instant.now());
         String token = jwtService.issue(row.id(), row.username(), row.role());
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("token", token);

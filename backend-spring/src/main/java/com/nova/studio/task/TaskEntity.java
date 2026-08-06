@@ -20,6 +20,8 @@ public class TaskEntity {
     private String id;
     @TableField("user_id")
     private String userId;
+    @TableField("project_id")
+    private String projectId;
     @TableField("status")
     private String status;
     @TableField("mode")
@@ -53,6 +55,14 @@ public class TaskEntity {
 
     public void setUserId(String userId) {
         this.userId = userId;
+    }
+
+    public String getProjectId() {
+        return projectId;
+    }
+
+    public void setProjectId(String projectId) {
+        this.projectId = projectId;
     }
 
     public String getStatus() {

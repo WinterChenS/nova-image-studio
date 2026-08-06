@@ -26,7 +26,7 @@ class TaskLookupServiceTest {
     @Test
     void queuedTaskOmitsNullFields() {
         TaskRepository.TaskRow row = new TaskRepository.TaskRow(
-                "t1", null, TaskRepository.STATUS_QUEUED, "text-to-image",
+                "t1", null, null, TaskRepository.STATUS_QUEUED, "text-to-image",
                 "{}", null, null, null, Instant.parse("2026-08-03T00:00:00Z"), null, null);
         when(repository.findById("t1")).thenReturn(Optional.of(row));
 
@@ -45,7 +45,7 @@ class TaskLookupServiceTest {
         // 2026-08-03T12:00Z expiresAt passed (latent time-bomb, fixed WIN-12).
         Instant now = Instant.now();
         TaskRepository.TaskRow row = new TaskRepository.TaskRow(
-                "t1", null, TaskRepository.STATUS_COMPLETED, "text-to-image",
+                "t1", null, null, TaskRepository.STATUS_COMPLETED, "text-to-image",
                 "{}", "{\"images\":[\"URL:/api/nova/images/t1/0\"]}", null,
                 "1 张图片生成失败: boom",
                 now.minusSeconds(3600), now.minusSeconds(3540),
@@ -61,7 +61,7 @@ class TaskLookupServiceTest {
     @Test
     void expiredTaskDerivesExpiredStatus() {
         TaskRepository.TaskRow row = new TaskRepository.TaskRow(
-                "t1", null, TaskRepository.STATUS_COMPLETED, "text-to-image",
+                "t1", null, null, TaskRepository.STATUS_COMPLETED, "text-to-image",
                 "{}", "{}", null, null, Instant.now().minusSeconds(7200),
                 Instant.now().minusSeconds(7140), Instant.now().minusSeconds(3600));
         when(repository.findById("t1")).thenReturn(Optional.of(row));
@@ -75,7 +75,7 @@ class TaskLookupServiceTest {
     @Test
     void queuedTaskWithFutureExpiryKeepsQueuedStatus() {
         TaskRepository.TaskRow row = new TaskRepository.TaskRow(
-                "t1", null, TaskRepository.STATUS_QUEUED, "text-to-image",
+                "t1", null, null, TaskRepository.STATUS_QUEUED, "text-to-image",
                 "{}", null, null, null, Instant.now(), null,
                 Instant.now().plusSeconds(3600));
         when(repository.findById("t1")).thenReturn(Optional.of(row));

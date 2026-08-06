@@ -3,6 +3,7 @@ package com.nova.studio.task;
 import com.nova.studio.auth.AuthUser;
 import com.nova.studio.imagegen.ImageGenService;
 import com.nova.studio.infra.HttpErrorException;
+import com.nova.studio.project.ProjectService;
 import com.nova.studio.settings.ModelService;
 import com.nova.studio.settings.SettingsService;
 import com.nova.studio.storage.ImageStorageService;
@@ -58,6 +59,7 @@ public class TaskService {
     private final TaskLookupService taskLookupService;
     private final ModelService modelService;
     private final SettingsService settingsService;
+    private final ProjectService projectService;
     private final ObjectMapper objectMapper;
     private final TaskMetrics taskMetrics;
     private final long ackGraceMs;
@@ -73,6 +75,7 @@ public class TaskService {
                        TaskLookupService taskLookupService,
                        ModelService modelService,
                        SettingsService settingsService,
+                       ProjectService projectService,
                        ObjectMapper objectMapper,
                        TaskMetrics taskMetrics,
                        @Value("${nova.task.ack-grace-ms:120000}") long ackGraceMs,
@@ -87,6 +90,7 @@ public class TaskService {
         this.taskLookupService = taskLookupService;
         this.modelService = modelService;
         this.settingsService = settingsService;
+        this.projectService = projectService;
         this.objectMapper = objectMapper;
         this.taskMetrics = taskMetrics;
         this.ackGraceMs = ackGraceMs;
@@ -119,6 +123,9 @@ public class TaskService {
         JsonNode imagesNode = body.has("images") ? body.get("images") : null;
         List<TaskRequest.ImageReference> images = parseImages(imagesNode);
 
+        // WIN-22 (F-4): 任务携带 projectId —— 显式 id 校验属主（404），缺省兜底默认项目（ADR-17）
+        String projectId = resolveProjectId(userId, body);
+
         // requestForDb: full params, images carry only mimeType (data stays in memory).
         Map<String, Object> requestForDb = new LinkedHashMap<>();
         requestForDb.put("mode", body.get("mode").asText());
@@ -143,7 +150,7 @@ public class TaskService {
         requestForDb.put("images", mimeOnly);
         String requestJson = toJson(requestForDb);
 
-        repository.insertTaskAndItems(taskId, userId, TaskRepository.STATUS_QUEUED,
+        repository.insertTaskAndItems(taskId, userId, projectId, TaskRepository.STATUS_QUEUED,
                 body.get("mode").asText(), requestJson, nowIso,
                 body.get("parallelCount").asInt());
         taskMetrics.taskQueued();
@@ -163,6 +170,22 @@ public class TaskService {
                 target.put(key, value.asText());
             }
         }
+    }
+
+    /** WIN-22: project id resolution for task creation (explicit → ownership 404; absent → default project). */
+    private String resolveProjectId(UUID userId, JsonNode body) {
+        JsonNode projectNode = body.get("projectId");
+        if (projectNode == null || projectNode.isNull() || (projectNode.isTextual() && projectNode.asText().isBlank())) {
+            return projectService.defaultProjectId(userId);
+        }
+        if (!projectNode.isTextual()) {
+            throw new IllegalArgumentException("projectId 格式无效");
+        }
+        String projectId = projectNode.asText();
+        if (!projectService.owns(userId, projectId)) {
+            throw new HttpErrorException(404, "NOT_FOUND", "项目不存在");
+        }
+        return projectId;
     }
 
     private List<TaskRequest.ImageReference> parseImages(JsonNode imagesNode) {

@@ -158,7 +158,7 @@ class MybatisPlusDataLayerIntegrationTest {
         UUID userId = freshUserId();
         String nowIso = Instant.now().toString();
 
-        taskRepository.insertTaskAndItems(id, userId, TaskRepository.STATUS_QUEUED,
+        taskRepository.insertTaskAndItems(id, userId, null, TaskRepository.STATUS_QUEUED,
                 "text-to-image", "{\"mode\":\"text-to-image\"}", nowIso, 2);
         cleanup.add(() -> taskRepository.deleteTaskAndItems(id));
 
@@ -212,7 +212,7 @@ class MybatisPlusDataLayerIntegrationTest {
         String id = UUID.randomUUID().toString();
         UUID userId = freshUserId();
         String nowIso = Instant.now().toString();
-        taskRepository.insertTaskAndItems(id, userId, TaskRepository.STATUS_QUEUED,
+        taskRepository.insertTaskAndItems(id, userId, null, TaskRepository.STATUS_QUEUED,
                 "text-to-image", "{}", nowIso, 1);
         cleanup.add(() -> taskRepository.deleteTaskAndItems(id));
 

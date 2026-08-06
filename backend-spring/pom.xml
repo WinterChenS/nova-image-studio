@@ -126,6 +126,13 @@
       <scope>runtime</scope>
     </dependency>
 
+    <!-- WIN-22 (T3): MinIO object storage SDK (spike-verified resolvable, 8.5.17) -->
+    <dependency>
+      <groupId>io.minio</groupId>
+      <artifactId>minio</artifactId>
+      <version>8.5.17</version>
+    </dependency>
+
     <!-- Observability -->
     <dependency>
       <groupId>org.springframework.boot</groupId>
