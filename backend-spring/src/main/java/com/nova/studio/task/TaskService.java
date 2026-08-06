@@ -1,10 +1,12 @@
 package com.nova.studio.task;
 
+import com.nova.studio.accountpool.AccountService;
+import com.nova.studio.accountpool.CatalogModelRepository;
+import com.nova.studio.accountpool.CatalogModelService;
 import com.nova.studio.auth.AuthUser;
 import com.nova.studio.imagegen.ImageGenService;
 import com.nova.studio.infra.HttpErrorException;
 import com.nova.studio.project.ProjectService;
-import com.nova.studio.settings.ModelService;
 import com.nova.studio.settings.SettingsService;
 import com.nova.studio.storage.ImageStorageService;
 import com.nova.studio.ws.TaskEventBroadcaster;
@@ -15,14 +17,11 @@ import org.springframework.stereotype.Service;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -30,23 +29,24 @@ import java.util.UUID;
  * {@code createTask} / {@code serializeTask} / {@code deleteTask} /
  * {@code cleanupExpiredTasks} ({@code backend/server.js}).
  *
- * <p>Create flow: require login (Q1, T2.2) → validate body → resolve model
- * config (server-side from {@code modelId}, T2.4) → accept/reject switch (503)
- * → dual-dimension rate limit (429) → queue capacity (503/429) → insert task +
- * items → register runtime state → enqueue. The WS task push / queue broadcast
- * hooks run through {@link TaskEventBroadcaster}.
+ * <p>Create flow (WIN-28 T5): require login → validate body → resolve the
+ * {@code model} field as a <b>catalog UUID</b> (global {@code ai_models},
+ * replacing the per-user {@code models} resolution — Q1 直接移除) + usable
+ * account pre-check (A5) → accept/reject switch (503) → dual-dimension rate
+ * limit by IP + <b>userId</b> (T12/ADR-27, apiKeyHash → userId) → queue
+ * capacity (503/429) → insert task + items → register runtime state (catalog
+ * model id, no per-task apiKey — the account is selected at dispatch by
+ * {@code TaskQueueService} via {@code AccountScheduler}) → enqueue.
  *
- * <p>M2 resolution: the task body's {@code model} field is the registry model
- * UUID; protocol/baseUrl/apiKey are resolved server-side per (user, modelId)
- * and the plaintext key never reaches the client (H2/Q2). Legacy apiKey/
- * baseUrl/protocol inputs are still honored when present (compatibility period).
+ * <p>The request JSON snapshot keeps {@code model} = catalog UUID and
+ * {@code modelId} = upstream model name for historical detail display (B1);
+ * the old per-user apiKey/baseUrl legacy inputs are removed.
  */
 @Service
 public class TaskService {
 
     private static final Logger log = LoggerFactory.getLogger(TaskService.class);
 
-    private static final Set<String> VALID_PROTOCOLS = Set.of("google", "openai", "grok");
     private static final String TASK_SOURCE = "nova";
 
     private final TaskRepository repository;
@@ -57,7 +57,8 @@ public class TaskService {
     private final ImageStorageService imageStorageService;
     private final TaskEventBroadcaster broadcaster;
     private final TaskLookupService taskLookupService;
-    private final ModelService modelService;
+    private final CatalogModelService catalogModelService;
+    private final AccountService accountService;
     private final SettingsService settingsService;
     private final ProjectService projectService;
     private final ObjectMapper objectMapper;
@@ -73,7 +74,8 @@ public class TaskService {
                        ImageStorageService imageStorageService,
                        TaskEventBroadcaster broadcaster,
                        TaskLookupService taskLookupService,
-                       ModelService modelService,
+                       CatalogModelService catalogModelService,
+                       AccountService accountService,
                        SettingsService settingsService,
                        ProjectService projectService,
                        ObjectMapper objectMapper,
@@ -88,7 +90,8 @@ public class TaskService {
         this.imageStorageService = imageStorageService;
         this.broadcaster = broadcaster;
         this.taskLookupService = taskLookupService;
-        this.modelService = modelService;
+        this.catalogModelService = catalogModelService;
+        this.accountService = accountService;
         this.settingsService = settingsService;
         this.projectService = projectService;
         this.objectMapper = objectMapper;
@@ -112,10 +115,9 @@ public class TaskService {
                     "服务器正在升级维护，暂不接受新任务。未完成任务将继续完成。", config.retryAfterSeconds());
         }
 
-        String apiKey = resolved.apiKey();
-        String apiKeyHash = apiKey != null ? hashApiKey(apiKey) : "";
-        enforceRateLimit(clientIp, apiKeyHash, config);
-        enforceQueueCapacity(clientIp, apiKeyHash, config);
+        // T12 (ADR-27): 限流维度 apiKeyHash → userId（IP + 用户双维度）
+        enforceRateLimit(clientIp, userId, config);
+        enforceQueueCapacity(clientIp, userId, config);
 
         String taskId = UUID.randomUUID().toString();
         Instant now = Instant.now();
@@ -132,13 +134,13 @@ public class TaskService {
         requestForDb.put("source", TASK_SOURCE);
         requestForDb.put("protocol", resolved.protocol());
         requestForDb.put("baseUrl", resolved.baseUrl());
-        requestForDb.put("modelId", resolved.modelId());
+        requestForDb.put("modelId", resolved.modelId());          // 上游模型名快照（历史详情展示，B1）
         requestForDb.put("prompt", body.get("prompt").asText());
         putIfPresent(requestForDb, "outputSize", body, "outputSize");
         putIfPresent(requestForDb, "customSize", body, "customSize");
         putIfPresent(requestForDb, "aspectRatio", body, "aspectRatio");
         putIfPresent(requestForDb, "temperature", body, "temperature");
-        requestForDb.put("model", body.get("model").asText());
+        requestForDb.put("model", body.get("model").asText());    // 目录 UUID
         putIfPresent(requestForDb, "gptImageQuality", body, "gptImageQuality");
         putIfPresent(requestForDb, "gptImageStyle", body, "gptImageStyle");
         putIfPresent(requestForDb, "gptImageBackground", body, "gptImageBackground");
@@ -155,8 +157,8 @@ public class TaskService {
                 body.get("parallelCount").asInt());
         taskMetrics.taskQueued();
 
-        queueService.registerRuntimeState(taskId, apiKey, images,
-                new TaskQueueService.Source(clientIp, apiKeyHash));
+        queueService.registerRuntimeState(taskId, resolved.catalogModelId().toString(), images,
+                new TaskQueueService.Source(clientIp, userId.toString()));
         queueService.enqueue(taskId);
         return taskId;
     }
@@ -201,10 +203,10 @@ public class TaskService {
     }
 
     /**
-     * M2 validation + server-side model resolution. The {@code model} field is
-     * the registry UUID — resolved against the user's models (key decrypted
-     * server-side, never sent to the client). Legacy apiKey/baseUrl/protocol
-     * inputs are honored when present (compatibility period, H2/Q2).
+     * T5 validation + catalog resolution (WIN-28): the {@code model} field is
+     * a catalog UUID; the global model must be an enabled image model with at
+     * least one usable account (A5, H1). The account itself is NOT reserved
+     * here — only a pre-check (fast fail); dispatch selects it (E.2).
      */
     private ResolvedRequest validateAndResolve(JsonNode body, UUID userId) {
         if (body == null || !body.isObject()) {
@@ -226,42 +228,32 @@ public class TaskService {
             throw new IllegalArgumentException("模型名称不能为空");
         }
 
-        // Primary path (T2.4): resolve the registry UUID server-side.
         String modelKey = body.get("model").asText();
-        ModelService.ResolvedModel resolved = modelService.resolve(userId, modelKey).orElse(null);
-        if (resolved != null) {
-            if (!resolved.type().equals("image")) {
-                throw new IllegalArgumentException("模型不是图片模型");
-            }
-            if (resolved.apiKey() == null || resolved.apiKey().isBlank()) {
-                throw new IllegalArgumentException("模型配置不完整，请先在设置中填写 API Key");
-            }
-            String normalized = ImageGenService.normalizeProtocolBaseUrl(resolved.protocol(), resolved.baseUrl());
-            if (normalized.isEmpty()) {
-                throw new IllegalArgumentException("缺少 API 基础地址");
-            }
-            return new ResolvedRequest(resolved.protocol(), normalized, resolved.apiKey(), resolved.modelId());
+        UUID catalogId;
+        try {
+            catalogId = UUID.fromString(modelKey.trim());
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("未找到模型配置");
         }
-
-        // Compatibility path: legacy apiKey/baseUrl/protocol from the request body.
-        if (hasText(body, "apiKey") && hasText(body, "baseUrl")) {
-            String protocol = body.get("protocol") != null && body.get("protocol").isTextual()
-                    ? body.get("protocol").asText() : null;
-            if (!VALID_PROTOCOLS.contains(protocol)) {
-                throw new IllegalArgumentException("协议类型无效，必须为 google、openai 或 grok");
-            }
-            String normalized = ImageGenService.normalizeProtocolBaseUrl(protocol, body.get("baseUrl").asText());
-            if (normalized.isEmpty()) {
-                throw new IllegalArgumentException("缺少 API 基础地址");
-            }
-            String modelId = hasText(body, "modelId") ? body.get("modelId").asText() : body.get("model").asText();
-            return new ResolvedRequest(protocol, normalized, body.get("apiKey").asText(), modelId);
+        CatalogModelRepository.Row model = catalogModelService.resolve(catalogId)
+                .orElseThrow(() -> new IllegalArgumentException("未找到模型配置"));
+        if (!"image".equals(model.type())) {
+            throw new IllegalArgumentException("模型不是图片模型");
         }
-
-        throw new IllegalArgumentException("未找到模型配置");
+        if (model.enabled() == null || !model.enabled()) {
+            throw new HttpErrorException(400, "MODEL_DISABLED", "模型已禁用，请联系管理员");
+        }
+        if (!accountService.hasCandidate(model)) {
+            throw new HttpErrorException(400, "NO_AVAILABLE_ACCOUNT", "该模型暂无可用账号，请联系管理员");
+        }
+        String normalized = ImageGenService.normalizeProtocolBaseUrl(model.protocol(), model.baseUrl());
+        if (normalized.isEmpty()) {
+            throw new IllegalArgumentException("缺少 API 基础地址");
+        }
+        return new ResolvedRequest(model.protocol(), normalized, model.modelId(), catalogId);
     }
 
-    private record ResolvedRequest(String protocol, String baseUrl, String apiKey, String modelId) {
+    private record ResolvedRequest(String protocol, String baseUrl, String modelId, UUID catalogModelId) {
     }
 
     private static boolean hasText(JsonNode body, String key) {
@@ -269,24 +261,22 @@ public class TaskService {
         return value != null && value.isTextual() && !value.asText().trim().isEmpty();
     }
 
-    /** Node enforceRateLimit: IP then apiKeyHash, both fixed-window. */
-    private void enforceRateLimit(String clientIp, String apiKeyHash, QueueStatsService.LimitConfig config) {
+    /** T12 (ADR-27): IP + userId 双维度 fixed-window 限流. */
+    private void enforceRateLimit(String clientIp, UUID userId, QueueStatsService.LimitConfig config) {
         long ipRetry = rateLimiter.consume("ip:" + clientIp, config.maxRequestsPerIp(), config.rateLimitWindowMs());
         if (ipRetry > 0) {
             throw new HttpErrorException(429, "RATE_LIMITED", "请求太频繁，请稍后再试。",
                     Math.max(config.retryAfterSeconds(), (int) ipRetry));
         }
-        if (!apiKeyHash.isEmpty()) {
-            long keyRetry = rateLimiter.consume("api:" + apiKeyHash, config.maxRequestsPerApiKey(), config.rateLimitWindowMs());
-            if (keyRetry > 0) {
-                throw new HttpErrorException(429, "RATE_LIMITED", "请求太频繁，请稍后再试。",
-                        Math.max(config.retryAfterSeconds(), (int) keyRetry));
-            }
+        long userRetry = rateLimiter.consume("user:" + userId, config.maxRequestsPerApiKey(), config.rateLimitWindowMs());
+        if (userRetry > 0) {
+            throw new HttpErrorException(429, "RATE_LIMITED", "请求太频繁，请稍后再试。",
+                    Math.max(config.retryAfterSeconds(), (int) userRetry));
         }
     }
 
     /** Node enforceQueueCapacity: global queue size + per-source pending counts. */
-    private void enforceQueueCapacity(String clientIp, String apiKeyHash, QueueStatsService.LimitConfig config) {
+    private void enforceQueueCapacity(String clientIp, UUID userId, QueueStatsService.LimitConfig config) {
         long pendingCount = queueStatsService.getQueueStatus().get("pendingCount") instanceof Number n
                 ? n.longValue() : 0;
         if (pendingCount >= config.maxQueueSize()) {
@@ -297,7 +287,7 @@ public class TaskService {
             throw new HttpErrorException(429, "TOO_MANY_PENDING_TASKS",
                     "你已有较多任务正在排队或生成，请稍后再提交。", config.retryAfterSeconds());
         }
-        if (queueService.getPendingCountByApiKeyHash(apiKeyHash) >= config.maxPendingTasksPerApiKey()) {
+        if (queueService.getPendingCountByUser(userId.toString()) >= config.maxPendingTasksPerApiKey()) {
             throw new HttpErrorException(429, "TOO_MANY_PENDING_TASKS",
                     "你已有较多任务正在排队或生成，请稍后再提交。", config.retryAfterSeconds());
         }
@@ -336,7 +326,8 @@ public class TaskService {
     }
 
     /** Node cleanupExpiredTasks — TTL 12h, sweep every 5min. */
-    public void cleanupExpiredTasks() {        List<String> expired = repository.findExpired(Instant.now());
+    public void cleanupExpiredTasks() {
+        List<String> expired = repository.findExpired(Instant.now());
         int success = 0;
         int failed = 0;
         for (String id : expired) {
@@ -371,21 +362,6 @@ public class TaskService {
             return objectMapper.writeValueAsString(value);
         } catch (Exception e) {
             throw new IllegalStateException("JSON 序列化失败", e);
-        }
-    }
-
-    /** Node hashApiKey: sha256 hex, first 24 chars. */
-    public static String hashApiKey(String apiKey) {
-        try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] hash = digest.digest(String.valueOf(apiKey).getBytes(StandardCharsets.UTF_8));
-            StringBuilder sb = new StringBuilder();
-            for (byte b : hash) {
-                sb.append(String.format("%02x", b));
-            }
-            return sb.substring(0, 24);
-        } catch (Exception e) {
-            throw new IllegalStateException(e);
         }
     }
 }
