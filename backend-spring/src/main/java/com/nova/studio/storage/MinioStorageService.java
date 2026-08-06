@@ -217,7 +217,12 @@ public class MinioStorageService implements ObjectStorageService {
             return false;
         }
         try {
-            return ensureBucket();
+            boolean ok = ensureBucket();
+            if (!ok) {
+                lastFailureAt = now;
+                log.warn("[minio-storage] 健康检查失败（已降级至 disk，10s 内不再重复探测）");
+            }
+            return ok;
         } catch (Exception e) {
             lastFailureAt = now;
             log.warn("[minio-storage] 健康检查失败: {}", e.getMessage());
