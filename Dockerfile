@@ -22,7 +22,7 @@ COPY frontend/ ./frontend/
 RUN cd frontend && npm ci && npm run build
 
 # ---- stage 2: Spring Boot backend build ------------------------------------
-FROM eclipse-temurin:21-jdk AS backend-builder
+FROM maven:3.9-eclipse-temurin-21 AS backend-builder
 
 WORKDIR /app/backend-spring
 
