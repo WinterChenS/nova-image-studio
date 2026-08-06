@@ -29,6 +29,8 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 
+import org.springframework.test.annotation.DirtiesContext;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -48,6 +50,7 @@ import static org.assertj.core.api.Assertions.assertThat;
                 "nova.ws.max-heartbeat-misses=2",
                 "NOVA_JWT_SECRET=test-secret-test-secret-test-secret-test-secret"
         })
+@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class NovaWebSocketE2ETest {
 
     @LocalServerPort

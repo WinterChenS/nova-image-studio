@@ -6,6 +6,7 @@ import com.nova.studio.settings.ModelService;
 import com.nova.studio.settings.SettingsService;
 import com.nova.studio.storage.ImageStorageService;
 import com.nova.studio.ws.TaskEventBroadcaster;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import tools.jackson.databind.ObjectMapper;
@@ -60,7 +61,7 @@ class TaskServiceTest {
         SettingsService settingsService = mock(SettingsService.class);
         taskService = new TaskService(repository, queueService, queueStatsService, rateLimiter,
                 shutdownFlag, imageStorageService, broadcaster, lookupService,
-                modelService, settingsService, MAPPER, 120_000, 43_200_000);
+                modelService, settingsService, MAPPER, new TaskMetrics(new SimpleMeterRegistry()), 120_000, 43_200_000);
     }
 
     private void defaults() {

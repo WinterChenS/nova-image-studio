@@ -1,9 +1,9 @@
 package com.nova.studio.web;
 
+import com.nova.studio.gallery.GalleryDataService;
 import com.nova.studio.infra.RuntimeEnv;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -14,19 +14,20 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import tools.jackson.databind.JsonNode;
 
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.security.MessageDigest;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 /**
  * Prompt gallery / blacklist / config endpoints (contract parity for the 12-item
- * checklist #12). M1 keeps the Node backend's file-backed behavior
- * ({@code prompts.json} / {@code blacklist.json} + env-driven mode); DB-ization
- * with the admin API is P1 (T3.1). Paths are configurable via
- * {@code NOVA_PROMPTS_PATH} / {@code NOVA_BLACKLIST_PATH}.
+ * checklist #12).
+ *
+ * <p>T3.1 (WIN-13): prompts/blacklist moved to the DB — {@code GalleryDataService}
+ * serves them DB-first with legacy-file fallback (F-14, ARCH H5). The public
+ * payloads keep the exact file-era shapes ({@code [{title, content, type}]} and
+ * {@code {keywords: [...]}}) so the frontend stays untouched. {@code /config}
+ * and {@code /prompt-gallery/verify} stay env-driven (ops-knob layer, A.5-Q4/H4).
  */
 @RestController
 @RequestMapping("/api/nova")
@@ -36,50 +37,35 @@ public class GalleryController {
     private static final String PROMPT_GALLERY_PASSWORD_SALT = "nova-pg-2026";
 
     private final RuntimeEnv runtimeEnv;
-    private final Path promptsPath;
-    private final Path blacklistPath;
-    private final tools.jackson.databind.ObjectMapper objectMapper;
+    private final GalleryDataService galleryDataService;
 
-    public GalleryController(RuntimeEnv runtimeEnv,
-                             @Value("${nova.storage.prompts-path:../backend/prompts.json}") String promptsPath,
-                             @Value("${nova.storage.blacklist-path:../backend/blacklist.json}") String blacklistPath,
-                             tools.jackson.databind.ObjectMapper objectMapper) {
+    public GalleryController(RuntimeEnv runtimeEnv, GalleryDataService galleryDataService) {
         this.runtimeEnv = runtimeEnv;
-        this.promptsPath = Path.of(promptsPath);
-        this.blacklistPath = Path.of(blacklistPath);
-        this.objectMapper = objectMapper;
+        this.galleryDataService = galleryDataService;
     }
 
     @GetMapping("/prompts")
-    public List<?> prompts() {
-        try {
-            if (!Files.exists(promptsPath)) {
-                return List.of();
-            }
-            String raw = Files.readString(promptsPath, StandardCharsets.UTF_8);
-            JsonNode data = objectMapper.readTree(raw);
-            return objectMapper.convertValue(data.isArray() ? data : objectMapper.createArrayNode(), List.class);
-        } catch (Exception e) {
-            log.warn("[gallery] prompts 读取失败: {}", e.getMessage());
-            return List.of();
-        }
+    public List<Map<String, Object>> prompts() {
+        // Public shape parity with the legacy file: only title/content/type, and
+        // only enabled rows (admin may hide entries via PUT enabled=false — the
+        // hidden flag takes effect on the public endpoint; the admin list still
+        // returns everything). File-fallback rows carry enabled=true, so the
+        // filter is transparent there.
+        return galleryDataService.prompts().stream()
+                .filter(GalleryDataService.PromptRow::enabled)
+                .map(row -> {
+                    Map<String, Object> item = new LinkedHashMap<>();
+                    item.put("title", row.title());
+                    item.put("content", row.content());
+                    item.put("type", row.type());
+                    return item;
+                })
+                .toList();
     }
 
     @GetMapping("/blacklist")
     public Map<String, Object> blacklist() {
-        try {
-            if (!Files.exists(blacklistPath)) {
-                return Map.of("keywords", List.of());
-            }
-            String raw = Files.readString(blacklistPath, StandardCharsets.UTF_8);
-            JsonNode data = objectMapper.readTree(raw);
-            JsonNode keywords = data != null && data.has("keywords") && data.get("keywords").isArray()
-                    ? data.get("keywords") : objectMapper.createArrayNode();
-            return Map.of("keywords", objectMapper.convertValue(keywords, List.class));
-        } catch (Exception e) {
-            log.warn("[gallery] blacklist 读取失败: {}", e.getMessage());
-            return Map.of("keywords", List.of());
-        }
+        return Map.of("keywords", galleryDataService.blacklistKeywords());
     }
 
     @GetMapping("/config")
@@ -113,7 +99,7 @@ public class GalleryController {
     private static String hashGalleryPassword(String password) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] hash = digest.digest((PROMPT_GALLERY_PASSWORD_SALT + String.valueOf(password)).getBytes(StandardCharsets.UTF_8));
+            byte[] hash = digest.digest((PROMPT_GALLERY_PASSWORD_SALT + String.valueOf(password)).getBytes(java.nio.charset.StandardCharsets.UTF_8));
             StringBuilder sb = new StringBuilder();
             for (byte b : hash) {
                 sb.append(String.format("%02x", b));

@@ -48,9 +48,18 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# local env files
+# local env files（T3.5 强化：覆盖 .env 全变体，白名单放行示例文件，见 ARCH B.7）
 .env
-.env*.local
+.env.*
+!.env.example
+!.env.docker.example
+
+# backend env files（含全变体）
+backend/.env
+backend/.env.*
+backend-spring/.env
+backend-spring/.env.*
+!backend-spring/.env.example
 
 # vercel
 .vercel
@@ -60,8 +69,7 @@ yarn-error.log*
 next-env.d.ts
 
 # backend temp files
-backend/.env
-backend/.env.local
+# (env 忽略规则已上移到上方统一处理)
 
 # frontend build output
 frontend/out/

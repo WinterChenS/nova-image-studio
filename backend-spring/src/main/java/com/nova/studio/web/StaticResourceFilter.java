@@ -42,6 +42,8 @@ public class StaticResourceFilter extends OncePerRequestFilter {
                 || upgrade
                 || path.startsWith("/api/")
                 || path.startsWith("/actuator/")
+                || path.startsWith("/v3/")           // T3.3: springdoc OpenAPI
+                || path.startsWith("/swagger-ui/")   // T3.3: Swagger UI webjars
                 || path.startsWith("/error");
     }
 

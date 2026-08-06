@@ -20,4 +20,13 @@ public final class AuthSupport {
         }
         return user;
     }
+
+    /** T3.1 (WIN-13) — admin-gated management API: 403 for non-admin, 401 anonymous. */
+    public static AuthUser requireAdmin(AuthUser user) {
+        AuthUser auth = requireAuth(user);
+        if (!auth.isAdmin()) {
+            throw new HttpErrorException(403, "FORBIDDEN", "无权访问该资源");
+        }
+        return auth;
+    }
 }

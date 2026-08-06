@@ -16,6 +16,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestTemplate;
 import tools.jackson.databind.JsonNode;
+import org.springframework.test.annotation.DirtiesContext;
 import tools.jackson.databind.ObjectMapper;
 
 import java.util.LinkedHashMap;
@@ -33,6 +34,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * tasks or read settings).
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 @EnabledIfEnvironmentVariable(named = "DB_HOST", matches = ".+")
 class SettingsUsersIsolationE2EIntegrationTest {
 

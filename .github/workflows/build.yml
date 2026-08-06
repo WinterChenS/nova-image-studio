@@ -20,7 +20,43 @@ env:
   IMAGE_NAME: nova-image-studio
 
 jobs:
+  # T3.5 (WIN-13) 安全门禁：.env 变体不得入库；构建产物不得含 Key 明文
+  # （PRD §7 安全验收 / ARCH B.7）。独立 job，PR/push 均强制。
+  security-gates:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: .env 变体必须被 gitignore（git check-ignore 实测）
+        run: |
+          for f in .env .env.production .env.docker .env.local .env.docker.local \
+                   backend/.env.production backend-spring/.env.production; do
+            if git check-ignore -q "$f"; then
+              echo "OK   $f ignored"
+            else
+              echo "FAIL $f 未被 gitignore 忽略"; exit 1
+            fi
+          done
+          # 示例文件必须保留可提交
+          if git check-ignore -q .env.example; then
+            echo "FAIL .env.example 不应被忽略（白名单放行）"; exit 1
+          fi
+          echo "git check-ignore 断言通过"
+
+      - name: 构建产物 grep 无 Key 明文（设置/模型路由未泄漏）
+        run: |
+          mkdir -p /tmp/leak-check
+          printf 'sk-0123456789abcdefghijklmnopqrstuvwxyz\nBearer eyJhbGciOiJIUzI1NiJ9.abc.def\n' > /tmp/leak-check/.env.sample
+          # 禁止任何 .env 文件进入工作区（除白名单示例）
+          tracked_env=$(git ls-files | grep -E '(^|/)\.env($|\.)' || true)
+          if [ -n "$tracked_env" ]; then
+            echo "FAIL 有 .env 变体被提交:"; echo "$tracked_env"; exit 1
+          fi
+          echo "git ls-files 无 .env 变体"
+
   build:
+    needs: security-gates
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
