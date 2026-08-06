@@ -1,13 +1,14 @@
 package com.nova.studio.web;
 
+import com.nova.studio.auth.AuthUser;
+import com.nova.studio.gallery.GalleryDataService;
 import com.nova.studio.infra.RuntimeEnv;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
 import tools.jackson.databind.ObjectMapper;
 
-import java.nio.file.Files;
-import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
@@ -15,52 +16,45 @@ import static org.mockito.Mockito.when;
 
 /**
  * Checklist #12 — gallery/config endpoints (Node parity): prompts/blacklist
- * file reads, config mode + password flag, verify sha256(password) check and
- * the no-password passthrough.
+ * served from the DB via {@link GalleryDataService} (public payload shape
+ * {@code [{title, content, type}]} / {@code {keywords: [...]}} unchanged),
+ * config mode + password flag, verify sha256(password) check and the
+ * no-password passthrough. T3.1: file reads moved into GalleryDataService.
  */
 class GalleryControllerTest {
 
-    @TempDir
-    Path tempDir;
-
     private final RuntimeEnv runtimeEnv = mock(RuntimeEnv.class);
+    private final GalleryDataService galleryDataService = mock(GalleryDataService.class);
     private final ObjectMapper mapper = new ObjectMapper();
 
-    private GalleryController newController() throws Exception {
-        Path prompts = tempDir.resolve("prompts.json");
-        Files.writeString(prompts, "[{\"title\":\"t\",\"content\":\"c\"}]");
-        Path blacklist = tempDir.resolve("blacklist.json");
-        Files.writeString(blacklist, "{\"keywords\":[\"bad\",\"worse\"]}");
-        return new GalleryController(runtimeEnv, prompts.toString(), blacklist.toString(), mapper);
+    private GalleryController newController() {
+        return new GalleryController(runtimeEnv, galleryDataService);
     }
 
     @Test
-    void promptsReturnedFromFile() throws Exception {
-        GalleryController controller = newController();
-        assertThat(controller.prompts()).hasSize(1);
+    void promptsServedFromDbWithPublicShape() {
+        UUID id = UUID.randomUUID();
+        when(galleryDataService.prompts()).thenReturn(List.of(
+                new GalleryDataService.PromptRow(id, "去水印", "去除画面中的水印", 2, true, 0)));
+        List<Map<String, Object>> body = newController().prompts();
+        assertThat(body).hasSize(1);
+        assertThat(body.get(0))
+                .containsEntry("title", "去水印")
+                .containsEntry("content", "去除画面中的水印")
+                .containsEntry("type", 2);
     }
 
     @Test
-    void missingPromptsFileReturnsEmptyList() {
-        GalleryController controller = new GalleryController(runtimeEnv,
-                tempDir.resolve("nope.json").toString(), tempDir.resolve("nope2.json").toString(), mapper);
-        assertThat(controller.prompts()).isEmpty();
-        assertThat(controller.blacklist()).isEqualTo(Map.of("keywords", java.util.List.of()));
-    }
-
-    @Test
-    void blacklistKeywordsReturned() throws Exception {
-        GalleryController controller = newController();
-        assertThat(controller.blacklist()).isEqualTo(Map.of("keywords", java.util.List.of("bad", "worse")));
+    void blacklistKeywordsReturnedFromDb() {
+        when(galleryDataService.blacklistKeywords()).thenReturn(List.of("色情", "暴力"));
+        assertThat(newController().blacklist()).isEqualTo(Map.of("keywords", List.of("色情", "暴力")));
     }
 
     @Test
     void configModeAndPasswordEnabled() {
         when(runtimeEnv.getString("PROMPT_GALLERY_MODE", "2")).thenReturn("1");
         when(runtimeEnv.getString("PROMPT_GALLERY_PASSWORD", "")).thenReturn("8848");
-        GalleryController controller = new GalleryController(runtimeEnv,
-                tempDir.resolve("p.json").toString(), tempDir.resolve("b.json").toString(), mapper);
-        var body = controller.config().getBody();
+        var body = newController().config().getBody();
         assertThat(body).containsEntry("promptGalleryMode", "1")
                 .containsEntry("promptGalleryPasswordEnabled", true);
     }
@@ -68,17 +62,16 @@ class GalleryControllerTest {
     @Test
     void verifyChecksHashedPassword() {
         when(runtimeEnv.getString("PROMPT_GALLERY_PASSWORD", "")).thenReturn("8848");
-        GalleryController controller = new GalleryController(runtimeEnv,
-                tempDir.resolve("p.json").toString(), tempDir.resolve("b.json").toString(), mapper);
-        assertThat(controller.verify(mapper.createObjectNode().put("password", "8848"))).isEqualTo(Map.of("ok", true));
-        assertThat(controller.verify(mapper.createObjectNode().put("password", "wrong"))).isEqualTo(Map.of("ok", false));
+        assertThat(newController().verify(mapper.createObjectNode().put("password", "8848")))
+                .isEqualTo(Map.of("ok", true));
+        assertThat(newController().verify(mapper.createObjectNode().put("password", "wrong")))
+                .isEqualTo(Map.of("ok", false));
     }
 
     @Test
     void verifyWithoutConfiguredPasswordAlwaysOk() {
         when(runtimeEnv.getString("PROMPT_GALLERY_PASSWORD", "")).thenReturn("");
-        GalleryController controller = new GalleryController(runtimeEnv,
-                tempDir.resolve("p.json").toString(), tempDir.resolve("b.json").toString(), mapper);
-        assertThat(controller.verify(mapper.createObjectNode().put("password", "anything"))).isEqualTo(Map.of("ok", true));
+        assertThat(newController().verify(mapper.createObjectNode().put("password", "anything")))
+                .isEqualTo(Map.of("ok", true));
     }
 }
