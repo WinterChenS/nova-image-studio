@@ -104,6 +104,10 @@ function hashPromptGalleryPassword(password) {
 
 const PORT = Number(process.env.PORT || 3000);
 const HOSTNAME = process.env.HOSTNAME || '0.0.0.0';
+// WIN-21: Spring 独占 API 前缀（认证/设置/模型）。node(3000) 命中以下前缀时转发到
+// Spring(8080)，使前端相对路径调用（/api/auth/* 等）不再 404。注意不要覆盖 node 自有
+// 路由（/api/nova/tasks|queue-status|prompts|blacklist|config|proxy/*|images/* 等）。
+const SPRING_PROXY_PREFIXES = ['/api/auth', '/api/nova/settings', '/api/nova/models'];
 const DB_PATH = process.env.NOVA_TASK_DB || path.join(__dirname, 'nova-tasks.sqlite');
 const TASK_TTL_MS = 12 * 60 * 60 * 1000;
 const CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
@@ -572,6 +576,30 @@ function serveStatic(req, res, pathname) {
 }
 
 const MAX_REQUEST_BODY_BYTES = 10 * 1024 * 1024; // 10MB
+
+// 原样读取请求体（不解析 JSON），供 Spring 反向代理透传使用。上限与 readJsonBody 一致。
+function readRawBody(req) {
+  return new Promise((resolve, reject) => {
+    let raw = '';
+    let aborted = false;
+    req.setEncoding('utf8');
+    req.on('data', chunk => {
+      if (aborted) return;
+      raw += chunk;
+      if (raw.length > MAX_REQUEST_BODY_BYTES) {
+        aborted = true;
+        raw = ''; // 释放已缓冲内存
+        req.resume();
+        reject(createHttpError(413, 'PAYLOAD_TOO_LARGE', '请求体过大：请减少请求数据后重试。'));
+      }
+    });
+    req.on('end', () => {
+      if (aborted) return;
+      resolve(raw);
+    });
+    req.on('error', reject);
+  });
+}
 
 function readJsonBody(req) {
   return new Promise((resolve, reject) => {
@@ -1955,6 +1983,71 @@ async function handleApi(req, res, pathname) {
   }
 }
 
+// ===== Spring 独占 API 反向代理（WIN-21） =====
+// 前端认证/设置/模型 API 仅存在于 Spring 后端（8080）。node(3000) 命中 SPRING_PROXY_PREFIXES
+// 时原样转发 method/headers/body 到 NOVA_SPRING_API_TARGET（默认 http://localhost:8080），
+// 并把上游 status/body 回传。上游不可达 → 502 JSON、超时 → 504 JSON，进程不崩。
+// dev 与 prod 均生效；docker 容器只暴露 3000，Spring 需在同一网络内可达。
+const SPRING_PROXY_FORWARD_HEADERS = [
+  'authorization', 'content-type', 'accept', 'accept-language',
+  'origin', 'referer', 'user-agent', 'x-requested-with',
+];
+
+function resolveSpringApiTarget() {
+  return normalizeBaseUrl(getRuntimeEnv().NOVA_SPRING_API_TARGET) || 'http://localhost:8080';
+}
+
+async function proxyToSpring(req, res, pathname, search) {
+  // 尾斜杠归一化：/api/auth/login/ → /api/auth/login
+  // （Spring 6+ PathPatternParser 默认不匹配尾斜杠，避免再次 404）
+  const normalizedPath = pathname.replace(/\/+$/, '') || '/';
+  const targetUrl = `${resolveSpringApiTarget()}${normalizedPath}${search || ''}`;
+
+  const headers = {};
+  for (const name of SPRING_PROXY_FORWARD_HEADERS) {
+    const value = req.headers[name];
+    if (value !== undefined) headers[name] = value;
+  }
+
+  let rawBody;
+  try {
+    rawBody = await readRawBody(req);
+  } catch (error) {
+    if (isHttpError(error)) {
+      sendHttpError(res, error);
+    } else {
+      sendJson(res, 400, { error: normalizeError(error) });
+    }
+    return;
+  }
+
+  const init = { method: req.method, headers };
+  if (rawBody) init.body = rawBody;
+
+  try {
+    const upstream = await fetchWithTimeout(targetUrl, init);
+    const contentType = upstream.headers.get('content-type') || '';
+    const raw = await upstream.text();
+    if (contentType.includes('application/json')) {
+      let data = null;
+      try { data = JSON.parse(raw); } catch { /* 非 JSON 时保留原样 */ }
+      sendJson(res, upstream.status, data ?? { error: `上游返回 ${upstream.status}` });
+    } else {
+      res.writeHead(upstream.status, {
+        'Content-Type': contentType || 'text/plain; charset=utf-8',
+        'Cache-Control': 'no-store',
+      });
+      res.end(raw);
+    }
+  } catch (error) {
+    if (error && typeof error.message === 'string' && /abort|timeout|timed out/i.test(error.message)) {
+      sendJson(res, 504, { error: '代理请求 Spring 上游超时' });
+    } else {
+      sendJson(res, 502, { error: normalizeError(error) });
+    }
+  }
+}
+
 initDatabase();
 ensureImageDir();
 cleanupExpiredTasks();
@@ -1965,8 +2058,14 @@ const startServer = () => {
   const wss = setupWebSocketServer();
   const httpServer = http.createServer(async (req, res) => {
     const parsedUrl = new URL(req.url || '/', `http://${req.headers.host || `${HOSTNAME}:${PORT}`}`);
-    if (parsedUrl.pathname?.startsWith('/api/nova/')) {
-      const handled = await handleApi(req, res, parsedUrl.pathname);
+    const pathname = parsedUrl.pathname || '';
+    // WIN-21: Spring 独占前缀先于 node 自有路由检查，命中即转发（含尾斜杠形式）
+    if (SPRING_PROXY_PREFIXES.some(prefix => pathname === prefix || pathname.startsWith(`${prefix}/`))) {
+      await proxyToSpring(req, res, pathname, parsedUrl.search);
+      return;
+    }
+    if (pathname.startsWith('/api/nova/')) {
+      const handled = await handleApi(req, res, pathname);
       if (handled || res.headersSent || res.writableEnded) return;
     }
     if (!IS_DEV) {
