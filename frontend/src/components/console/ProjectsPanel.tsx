@@ -15,10 +15,12 @@ import {
   updateProject,
   type ProjectDto,
 } from '@/lib/projects-api';
+import { authFetch, readApiError } from '@/lib/auth';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Badge } from '@/components/ui/badge';
+import { Select } from '@/components/ui/select';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { ConfirmDialog } from '@/components/workspace/dialogs/ConfirmDialog';
 import { useToast } from '@/components/console/useToast';
@@ -26,6 +28,86 @@ import { useToast } from '@/components/console/useToast';
 interface EditState {
   mode: 'create' | 'rename';
   project?: ProjectDto;
+}
+
+interface UnclassifiedTask {
+  id: string;
+  status?: string;
+  mode?: string;
+  createdAt?: string;
+}
+
+/** 未分类任务（A3）：历史无项目任务一键归入指定项目。 */
+function UnclassifiedTasksSection({ projects, refresh }: { projects: ProjectDto[]; refresh: () => Promise<void> }) {
+  const [tasks, setTasks] = useState<UnclassifiedTask[]>([]);
+  const [assignTarget, setAssignTarget] = useState<Record<string, string>>({});
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const toast = useToast();
+
+  const load = useCallback(async () => {
+    try {
+      const response = await authFetch('/api/nova/tasks?projectId=__unclassified__&size=50', { cache: 'no-store' });
+      if (!response.ok) throw await readApiError(response);
+      const data = (await response.json()) as { items?: UnclassifiedTask[] };
+      setTasks(data.items ?? []);
+    } catch {
+      setTasks([]); // 未登录/接口不可用时静默
+    }
+  }, []);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- async unclassified tasks load
+    void load();
+  }, [load]);
+
+  if (tasks.length === 0) return null;
+
+  const assign = async (taskId: string) => {
+    const projectId = assignTarget[taskId];
+    if (!projectId) return;
+    setBusyId(taskId);
+    try {
+      const response = await authFetch(`/api/nova/tasks/${encodeURIComponent(taskId)}/project`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectId }),
+      });
+      if (!response.ok) throw await readApiError(response);
+      toast.show('任务已归入项目', 'success');
+      await load();
+      await refresh();
+    } catch (e) {
+      toast.show(e instanceof Error ? e.message : String(e), 'error');
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  return (
+    <div className="rounded-xl border border-dashed border-border/70 bg-card/60 p-4">
+      <h3 className="text-sm font-semibold">未分类任务（{tasks.length}）</h3>
+      <p className="mt-1 text-xs text-muted-foreground">历史无项目任务显示为「未分类」，可一键归入指定项目（A3）。</p>
+      <div className="mt-3 max-h-56 space-y-2 overflow-y-auto pr-1">
+        {tasks.map(task => (
+          <div key={task.id} className="flex items-center gap-2 rounded-lg border border-border/50 px-2.5 py-1.5 text-xs">
+            <span className="min-w-0 flex-1 truncate font-mono">{task.id.slice(0, 18)}</span>
+            <span className="shrink-0 text-muted-foreground">{task.status}</span>
+            <Select
+              value={assignTarget[task.id] ?? ''}
+              onValueChange={value => setAssignTarget(prev => ({ ...prev, [task.id]: value }))}
+              options={projects.map(p => ({ value: p.id, label: p.name }))}
+              placeholder="归入项目…"
+              className="w-32"
+              size="sm"
+            />
+            <Button size="sm" disabled={!assignTarget[task.id] || busyId === task.id} onClick={() => void assign(task.id)}>
+              {busyId === task.id ? '归入中…' : '归入'}
+            </Button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 export function ProjectsPanel() {
@@ -161,6 +243,8 @@ export function ProjectsPanel() {
           暂无项目 — 新建一个项目来组织素材与生成任务。
         </div>
       )}
+
+      <UnclassifiedTasksSection projects={projects} refresh={refresh} />
 
       <div className="grid gap-3 sm:grid-cols-2">
         {projects.map(project => (
