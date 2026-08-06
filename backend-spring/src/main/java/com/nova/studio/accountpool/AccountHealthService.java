@@ -116,7 +116,8 @@ public class AccountHealthService {
         if (CLIENT_STATUS.matcher(msg).find()) {
             return ErrorKind.REJECTED;
         }
-        return ErrorKind.REJECTED;
+        // 无状态码可识别（连接重置/未知传输错误等）→ 视为可重试的服务端/传输错误（R3）
+        return ErrorKind.SERVER_ERROR;
     }
 
     private AccountHealth state(AccountRepository.Row account) {

@@ -8,10 +8,9 @@ import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.time.Instant;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * T7 (WIN-28) — usage record service (ADR-26): bounded async write queue
@@ -35,6 +34,7 @@ public class UsageRecordService {
     private final PricingService pricingService;
     private final LinkedBlockingQueue<Runnable> queue;
     private final Thread consumer;
+    private final AtomicBoolean consumerBusy = new AtomicBoolean(false);
 
     public UsageRecordService(UsageRecordMapper mapper,
                               PricingService pricingService,
@@ -63,15 +63,26 @@ public class UsageRecordService {
                 cost, currency, rec.durationMs(), Instant.now());
     }
 
-    /** Drains the pending queue synchronously (tests / graceful shutdown). */
+    /** Drains the pending queue and waits for in-flight consumer work (tests / shutdown). */
     public void flush() {
-        List<Runnable> pending = new ArrayList<>();
-        queue.drainTo(pending);
-        for (Runnable task : pending) {
+        while (true) {
+            Runnable task = queue.poll();
+            if (task != null) {
+                try {
+                    task.run();
+                } catch (Exception e) {
+                    log.warn("[usage] 异步写入失败: {}", e.getMessage());
+                }
+                continue;
+            }
+            if (!consumerBusy.get()) {
+                return;
+            }
             try {
-                task.run();
-            } catch (Exception e) {
-                log.warn("[usage] 异步写入失败: {}", e.getMessage());
+                Thread.sleep(10);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
             }
         }
     }
@@ -80,10 +91,13 @@ public class UsageRecordService {
         while (true) {
             try {
                 Runnable task = queue.take();
+                consumerBusy.set(true);
                 try {
                     task.run();
                 } catch (Exception e) {
                     log.warn("[usage] 异步写入失败: {}", e.getMessage());
+                } finally {
+                    consumerBusy.set(false);
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();

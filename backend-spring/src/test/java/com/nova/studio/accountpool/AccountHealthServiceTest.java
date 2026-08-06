@@ -136,6 +136,15 @@ class AccountHealthServiceTest {
                 .isEqualTo(AccountHealthService.ErrorKind.REJECTED);
     }
 
+    @Test
+    void classifiesUnknownTransportErrorAsRetriableServerError() {
+        // 连接重置/未知错误（消息无可识别状态码）→ 可重试（R3）
+        assertThat(health.classify(new RuntimeException()))
+                .isEqualTo(AccountHealthService.ErrorKind.SERVER_ERROR);
+        assertThat(health.classify(new RuntimeException("connection reset by peer")))
+                .isEqualTo(AccountHealthService.ErrorKind.SERVER_ERROR);
+    }
+
     // ===== retriability (R3 boundary) =====
 
     @Test

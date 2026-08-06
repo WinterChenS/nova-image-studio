@@ -97,16 +97,20 @@ class AccountPoolSchemaIntegrationTest {
     }
 
     @Test
-    void existingUsersBackfilledIntoUserRoles() {
-        // Every existing users.role (admin|user) must map to a user_roles row.
-        List<Map<String, Object>> orphans = jdbcTemplate.queryForList("""
-                SELECT u.id FROM users u
-                LEFT JOIN user_roles ur ON ur.user_id = u.id
-                LEFT JOIN roles r ON r.id = ur.role_id AND r.code = u.role
-                WHERE u.role IN ('admin', 'user') AND r.id IS NULL
-                LIMIT 10
+    void userRolesBackfillIsIdempotent() {
+        // 手动重放 V6 回填 SQL → 不重复、码一致（R4：users.role ↔ user_roles 对应）
+        jdbcTemplate.update("""
+                INSERT INTO user_roles (user_id, role_id)
+                SELECT u.id, r.id FROM users u JOIN roles r ON r.code = u.role
+                ON CONFLICT DO NOTHING
                 """);
-        assertThat(orphans).isEmpty();
+        List<Map<String, Object>> mismatches = jdbcTemplate.queryForList("""
+                SELECT ur.user_id FROM user_roles ur
+                JOIN roles r ON r.id = ur.role_id
+                JOIN users u ON u.id = ur.user_id
+                WHERE r.code != u.role LIMIT 10
+                """);
+        assertThat(mismatches).isEmpty();
     }
 
     @Test

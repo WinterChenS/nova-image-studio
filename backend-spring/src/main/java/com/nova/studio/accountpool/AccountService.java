@@ -254,6 +254,11 @@ public class AccountService {
         return crypto.decrypt(row.apiKeyEnc());
     }
 
+    /** 显式清空账号缓存（管理端写操作后 / 测试种子变更后调用）。 */
+    public void invalidateCaches() {
+        invalidate();
+    }
+
     // ===== helpers =====
 
     private AccountRepository.Row require(UUID id) {
