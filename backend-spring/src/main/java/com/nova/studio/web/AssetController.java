@@ -74,48 +74,60 @@ public class AssetController {
         return body;
     }
 
-    /** Multipart image upload OR JSON text asset (kind inferred from content-type). */
-    @PostMapping(consumes = {MediaType.MULTIPART_FORM_DATA_VALUE, MediaType.APPLICATION_JSON_VALUE})
-    public ResponseEntity<Map<String, Object>> create(@RequestParam(required = false) MultipartFile file,
-                                                      @RequestParam(required = false) String projectId,
-                                                      @RequestParam(required = false) String name,
-                                                      @RequestParam(required = false) String tags,
-                                                      @RequestParam(required = false) String note,
-                                                      @RequestParam(required = false) String sourceKind,
-                                                      @RequestParam(required = false) String sourceLabel,
-                                                      @RequestParam(required = false) String sourceRef,
-                                                      @RequestParam(required = false) String prompt,
-                                                      @RequestParam(required = false) Integer width,
-                                                      @RequestParam(required = false) Integer height,
-                                                      @RequestBody(required = false) JsonNode jsonBody,
-                                                      @AuthenticationPrincipal AuthUser authUser) {
+    /**
+     * Multipart image upload (B-2 修复：与 JSON 拆分为两个 handler，避免
+     * {@code @RequestBody} 对 multipart Content-Type 触发 HttpMediaTypeNotSupportedException；
+     * 不再声明 consumes 精确匹配 —— Boot 4.1 会把 multipart 归一为带 charset=UTF-8）。
+     */
+    @PostMapping
+    public ResponseEntity<Map<String, Object>> createMultipart(@RequestParam(required = false) MultipartFile file,
+                                                               @RequestParam(required = false) String projectId,
+                                                               @RequestParam(required = false) String name,
+                                                               @RequestParam(required = false) String tags,
+                                                               @RequestParam(required = false) String note,
+                                                               @RequestParam(required = false) String sourceKind,
+                                                               @RequestParam(required = false) String sourceLabel,
+                                                               @RequestParam(required = false) String sourceRef,
+                                                               @RequestParam(required = false) String prompt,
+                                                               @RequestParam(required = false) Integer width,
+                                                               @RequestParam(required = false) Integer height,
+                                                               @AuthenticationPrincipal AuthUser authUser) {
         AuthSupport.requireAuth(authUser);
-        Instant now = Instant.now();
-        Map<String, Object> created;
-        if (file != null && !file.isEmpty()) {
-            byte[] bytes;
-            try {
-                bytes = file.getBytes();
-            } catch (Exception e) {
-                throw new IllegalArgumentException("文件读取失败");
-            }
-            created = AssetService.toJson(assetService.createImage(
-                    authUser.id(), projectId, name, splitTags(tags), note,
-                    sourceKind, sourceLabel, sourceRef, prompt,
-                    bytes, file.getContentType(), width, height, now));
-        } else if (jsonBody != null && jsonBody.isObject() && jsonBody.hasNonNull("content")) {
-            created = AssetService.toJson(assetService.createText(
-                    authUser.id(), projectId, jsonBody.get("content").asText(),
-                    jsonBody.hasNonNull("name") ? jsonBody.get("name").asText() : null,
-                    jsonArray(jsonBody.get("tags")),
-                    jsonBody.hasNonNull("note") ? jsonBody.get("note").asText() : null,
-                    jsonBody.hasNonNull("sourceKind") ? jsonBody.get("sourceKind").asText() : null,
-                    jsonBody.hasNonNull("sourceLabel") ? jsonBody.get("sourceLabel").asText() : null,
-                    jsonBody.hasNonNull("sourceRef") ? jsonBody.get("sourceRef").asText() : null,
-                    now));
-        } else {
-            throw new IllegalArgumentException("请提供图片文件或文本内容");
+        if (file == null || file.isEmpty()) {
+            throw new IllegalArgumentException("请提供图片文件");
         }
+        byte[] bytes;
+        try {
+            bytes = file.getBytes();
+        } catch (Exception e) {
+            throw new IllegalArgumentException("文件读取失败");
+        }
+        Map<String, Object> created = AssetService.toJson(assetService.createImage(
+                authUser.id(), projectId, name, splitTags(tags), note,
+                sourceKind, sourceLabel, sourceRef, prompt,
+                bytes, file.getContentType(), width, height, Instant.now()));
+        return ResponseEntity.status(201).body(created);
+    }
+
+    /** JSON text asset (新建提示词 / 迁移导入). */
+    @PostMapping(consumes = {MediaType.APPLICATION_JSON_VALUE})
+    public ResponseEntity<Map<String, Object>> createText(@RequestBody JsonNode jsonBody,
+                                                          @AuthenticationPrincipal AuthUser authUser) {
+        AuthSupport.requireAuth(authUser);
+        if (jsonBody == null || !jsonBody.isObject() || !jsonBody.hasNonNull("content")) {
+            throw new IllegalArgumentException("请提供文本内容");
+        }
+        Map<String, Object> created = AssetService.toJson(assetService.createText(
+                authUser.id(),
+                jsonBody.hasNonNull("projectId") ? jsonBody.get("projectId").asText() : null,
+                jsonBody.get("content").asText(),
+                jsonBody.hasNonNull("name") ? jsonBody.get("name").asText() : null,
+                jsonArray(jsonBody.get("tags")),
+                jsonBody.hasNonNull("note") ? jsonBody.get("note").asText() : null,
+                jsonBody.hasNonNull("sourceKind") ? jsonBody.get("sourceKind").asText() : null,
+                jsonBody.hasNonNull("sourceLabel") ? jsonBody.get("sourceLabel").asText() : null,
+                jsonBody.hasNonNull("sourceRef") ? jsonBody.get("sourceRef").asText() : null,
+                Instant.now()));
         return ResponseEntity.status(201).body(created);
     }
 
