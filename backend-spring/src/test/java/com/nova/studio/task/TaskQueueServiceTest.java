@@ -5,6 +5,7 @@ import com.nova.studio.accountpool.AccountScheduler;
 import com.nova.studio.accountpool.AccountService;
 import com.nova.studio.accountpool.CatalogModelRepository;
 import com.nova.studio.accountpool.CatalogModelService;
+import com.nova.studio.audit.UsageCollector;
 import com.nova.studio.imagegen.ImageGenService;
 import com.nova.studio.infra.HttpErrorException;
 import com.nova.studio.storage.ImageStorageService;
@@ -84,7 +85,8 @@ class TaskQueueServiceTest {
         when(queueStatsService.getMaxServerConcurrency()).thenReturn(50);
         queueService = new TaskQueueService(repository, imageGenService, imageStorageService, broadcaster,
                 MAPPER, queueStatsService, new TaskMetrics(new SimpleMeterRegistry()), scheduler,
-                healthService, accountService, catalogModelService, 43_200_000, 1_800_000);
+                healthService, accountService, catalogModelService, mock(UsageCollector.class),
+                43_200_000, 1_800_000);
     }
 
     private CatalogModelRepository.Row catalogRow() {

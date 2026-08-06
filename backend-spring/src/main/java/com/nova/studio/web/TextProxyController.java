@@ -5,6 +5,9 @@ import com.nova.studio.accountpool.AccountScheduler;
 import com.nova.studio.accountpool.AccountService;
 import com.nova.studio.accountpool.CatalogModelRepository;
 import com.nova.studio.accountpool.CatalogModelService;
+import com.nova.studio.audit.UsageCollector;
+import com.nova.studio.audit.UsageParser;
+import com.nova.studio.audit.UsageTeeInputStream;
 import com.nova.studio.auth.AuthSupport;
 import com.nova.studio.auth.AuthUser;
 import com.nova.studio.infra.HttpErrorException;
@@ -53,6 +56,7 @@ public class TextProxyController {
     private final AccountScheduler accountScheduler;
     private final AccountHealthService accountHealthService;
     private final AccountService accountService;
+    private final UsageCollector usageCollector;
     private final long requestTimeoutMs;
     private final ObjectMapper objectMapper;
 
@@ -61,6 +65,7 @@ public class TextProxyController {
                                AccountScheduler accountScheduler,
                                AccountHealthService accountHealthService,
                                AccountService accountService,
+                               UsageCollector usageCollector,
                                @Value("${nova.task.request-timeout-ms:1800000}") long requestTimeoutMs,
                                ObjectMapper objectMapper) {
         this.textProxyService = textProxyService;
@@ -68,6 +73,7 @@ public class TextProxyController {
         this.accountScheduler = accountScheduler;
         this.accountHealthService = accountHealthService;
         this.accountService = accountService;
+        this.usageCollector = usageCollector;
         this.requestTimeoutMs = requestTimeoutMs;
         this.objectMapper = objectMapper;
     }
@@ -87,6 +93,8 @@ public class TextProxyController {
         }
         boolean stream = body != null && body.has("stream") && body.get("stream").asBoolean(false);
         JsonNode forwarded = TextProxyService.forwardedBody(body);
+        String refId = UUID.randomUUID().toString();   // H5: 代理请求 UUID（usage ref_id）
+        long startedAt = System.currentTimeMillis();
 
         Set<UUID> tried = new HashSet<>();
         int attempts = 0;
@@ -112,11 +120,25 @@ public class TextProxyController {
                     response.setHeader("Cache-Control", "no-cache");
                     response.setHeader("Connection", "keep-alive");
                     response.setHeader("X-Accel-Buffering", "no");
-                    exchange.transferTo(response.getOutputStream());
+                    // T8: 旁路 tee 解析最后 chunk 的 usage（逐字节透传，H6）
+                    final boolean retried = attempts > 1;
+                    UsageTeeInputStream tee = new UsageTeeInputStream(exchange.stream(), (tokens, err) -> {
+                        if (err == null) {
+                            recordProxyUsage(selected, model, user, refId, retried, false,
+                                    tokens == null ? null : tokens.inputTokens(),
+                                    tokens == null ? null : tokens.outputTokens(), startedAt);
+                        }
+                    });
+                    tee.transferTo(response.getOutputStream());
                     return;
                 }
                 if (exchange.status() >= 200 && exchange.status() < 300) {
                     recordSuccess(selected);
+                    // T8: 非流式完整 body 解析 usage（失败 usage=null，H6）
+                    UsageParser.UsageTokens tokens = parseBodyUsage(exchange.jsonBody());
+                    recordProxyUsage(selected, model, user, refId, attempts > 1, false,
+                            tokens == null ? null : tokens.inputTokens(),
+                            tokens == null ? null : tokens.outputTokens(), startedAt);
                     writeJson(response, exchange.status(), parseJsonOrRaw(exchange.jsonBody(), exchange.status()));
                     return;
                 }
@@ -126,6 +148,7 @@ public class TextProxyController {
                 if (kind.retriable() && attempts < MAX_ATTEMPTS) {
                     continue;
                 }
+                recordProxyUsage(selected, model, user, refId, attempts > 1, true, null, null, startedAt);
                 writeJson(response, exchange.status(), parseJsonOrRaw(exchange.jsonBody(), exchange.status()));
                 return;
             } catch (Exception e) {
@@ -135,6 +158,7 @@ public class TextProxyController {
                 if (kind.retriable() && attempts < MAX_ATTEMPTS) {
                     continue;
                 }
+                recordProxyUsage(selected, model, user, refId, attempts > 1, true, null, null, startedAt);
                 if (e.getMessage() != null && TIMEOUT_PATTERN.matcher(e.getMessage()).find()) {
                     writeJson(response, 504, Map.of("error", "代理请求上游超时"));
                 } else {
@@ -144,6 +168,25 @@ public class TextProxyController {
             } finally {
                 accountScheduler.release(selected.accountId());   // E.4: 流结束/非流式完成 → 在飞 --
             }
+        }
+    }
+
+    private void recordProxyUsage(AccountScheduler.SelectedAccount selected, CatalogModelRepository.Row model,
+                                  AuthUser user, String refId, boolean retried, boolean failed,
+                                  Long inputTokens, Long outputTokens, long startedAt) {
+        usageCollector.recordProxyUsage(new UsageCollector.ProxyUsage(
+                refId, user.id(), model.id(), selected.accountId(), selected.protocol(),
+                retried, failed, inputTokens, outputTokens, System.currentTimeMillis() - startedAt));
+    }
+
+    private UsageParser.UsageTokens parseBodyUsage(String bodyText) {
+        if (bodyText == null || bodyText.isBlank()) {
+            return null;
+        }
+        try {
+            return UsageParser.parseUsage(objectMapper.readTree(bodyText));
+        } catch (Exception e) {
+            return null;   // H6: 解析失败 usage=null，业务零影响
         }
     }
 

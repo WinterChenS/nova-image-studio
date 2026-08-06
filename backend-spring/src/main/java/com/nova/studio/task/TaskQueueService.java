@@ -6,6 +6,7 @@ import com.nova.studio.accountpool.AccountScheduler;
 import com.nova.studio.accountpool.AccountService;
 import com.nova.studio.accountpool.CatalogModelRepository;
 import com.nova.studio.accountpool.CatalogModelService;
+import com.nova.studio.audit.UsageCollector;
 import com.nova.studio.imagegen.ImageGenService;
 import com.nova.studio.infra.HttpErrorException;
 import com.nova.studio.infra.NormalizedError;
@@ -66,6 +67,7 @@ public class TaskQueueService {
     private final AccountHealthService accountHealthService;
     private final AccountService accountService;
     private final CatalogModelService catalogModelService;
+    private final UsageCollector usageCollector;
     private final long ttlMs;
     private final long requestTimeoutMs;
 
@@ -97,6 +99,7 @@ public class TaskQueueService {
                             AccountHealthService accountHealthService,
                             AccountService accountService,
                             CatalogModelService catalogModelService,
+                            UsageCollector usageCollector,
                             @Value("${nova.task.ttl-ms:43200000}") long ttlMs,
                             @Value("${nova.task.request-timeout-ms:1800000}") long requestTimeoutMs) {
         this.repository = repository;
@@ -110,6 +113,7 @@ public class TaskQueueService {
         this.accountHealthService = accountHealthService;
         this.accountService = accountService;
         this.catalogModelService = catalogModelService;
+        this.usageCollector = usageCollector;
         this.ttlMs = ttlMs;
         this.requestTimeoutMs = requestTimeoutMs;
     }
@@ -231,6 +235,7 @@ public class TaskQueueService {
 
     private void executeTask(String taskId) {
         var rowOpt = repository.findById(taskId);
+        Instant startedAt = Instant.now();
         String catalogModelId = catalogModelIds.get(taskId);
         if (rowOpt.isEmpty() || catalogModelId == null
                 || !List.of(TaskRepository.STATUS_QUEUED, TaskRepository.STATUS_LEGACY_QUEUED)
@@ -287,13 +292,22 @@ public class TaskQueueService {
         }
         List<String> images = new ArrayList<>();
         List<String> errors = new ArrayList<>();
+        int successfulImages = 0;
+        boolean anyRetried = false;
+        UUID dominantAccount = null;
         for (Future<ItemResult> future : futures) {
             try {
                 ItemResult result = future.get();
                 if (result.success()) {
                     images.addAll(result.images());
+                    successfulImages += result.images().size();
+                    dominantAccount = result.accountId();   // 最后成功项的账号为最终 account（A3）
+                    anyRetried |= result.retried();
                 } else {
                     errors.add(result.error());
+                    if (dominantAccount == null) {
+                        dominantAccount = result.accountId();
+                    }
                 }
             } catch (Exception e) {
                 errors.add(NormalizedError.normalize(e, requestTimeoutMs));
@@ -302,7 +316,8 @@ public class TaskQueueService {
 
         Instant completedAt = Instant.now();
         Instant expiresAt = completedAt.plusMillis(ttlMs);
-        if (!images.isEmpty()) {
+        boolean allFailed = images.isEmpty();
+        if (!allFailed) {
             String warning = errors.isEmpty() ? null
                     : errors.size() + " 张图片生成失败: " + String.join("; ", errors);
             String resultJson = jsonObject(Map.of("images", images));
@@ -313,9 +328,25 @@ public class TaskQueueService {
                     completedAt.toString(), expiresAt.toString());
             taskMetrics.taskFailed();
         }
+        // T7: worker 完成后写 usage（task 级一条，幂等 UNIQUE(ref_type, ref_id)）
+        usageCollector.recordTaskUsage(new UsageCollector.TaskUsage(
+                taskId, parseUserId(rowOpt.get().userId()), catalogModel.id(), catalogModel.protocol(),
+                request.parallelCount(), successfulImages, anyRetried, allFailed, dominantAccount,
+                java.time.Duration.between(startedAt, completedAt).toMillis()));
         cleanupTaskRuntimeState(taskId);
         broadcaster.broadcastTask(taskId);
         broadcaster.broadcastQueueStatus();
+    }
+
+    private UUID parseUserId(String userId) {
+        if (userId == null || userId.isBlank()) {
+            return null;
+        }
+        try {
+            return UUID.fromString(userId);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
     }
 
     private CatalogModelRepository.Row resolveCatalogModel(String catalogModelId) {

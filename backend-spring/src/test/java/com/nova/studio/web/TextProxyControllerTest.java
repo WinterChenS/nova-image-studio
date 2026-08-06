@@ -5,6 +5,7 @@ import com.nova.studio.accountpool.AccountScheduler;
 import com.nova.studio.accountpool.AccountService;
 import com.nova.studio.accountpool.CatalogModelRepository;
 import com.nova.studio.accountpool.CatalogModelService;
+import com.nova.studio.audit.UsageCollector;
 import com.nova.studio.auth.AuthUser;
 import com.nova.studio.infra.HttpErrorException;
 import com.nova.studio.textproxy.TextProxyService;
@@ -58,8 +59,9 @@ class TextProxyControllerTest {
         when(healthService.classify(any())).thenReturn(AccountHealthService.ErrorKind.SERVER_ERROR);
         when(catalogModelService.resolve(MODEL_ID)).thenReturn(Optional.of(textCatalogRow()));
         AccountService accountService = mock(AccountService.class);
+        UsageCollector usageCollector = mock(UsageCollector.class);
         controller = new TextProxyController(textProxyService, catalogModelService, scheduler,
-                healthService, accountService, 1_800_000, MAPPER);
+                healthService, accountService, usageCollector, 1_800_000, MAPPER);
     }
 
     private CatalogModelRepository.Row textCatalogRow() {
