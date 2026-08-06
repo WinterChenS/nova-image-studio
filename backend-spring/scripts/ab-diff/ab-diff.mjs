@@ -71,7 +71,8 @@ function normalize(text) {
     .replace(/"remainingQueueSlots":\d+/g, '"remainingQueueSlots":<N>')
     .replace(/"displayConcurrency":\d+/g, '"displayConcurrency":<N>')
     .replace(/"displayQueued":\d+/g, '"displayQueued":<N>')
-    .replace(/"created":\d+/g, '"created":<N>');
+    .replace(/"created":\d+/g, '"created":<N>')
+    .replace(/"retryAfter":\d+/g, '"retryAfter":<N>');
 }
 
 async function req(base, method, path, body, headers = {}) {
@@ -107,10 +108,57 @@ async function ensureSpringAuth() {
   return springAuthReady;
 }
 
+// WIN-28 (ADR-32): /api/nova/proxy 已加入 SPRING_PROXY_PREFIXES —— 双栈下
+// proxy/text 与 proxy/models 均由 Spring 处理（调度选号 + usage 采集唯一实现点）。
+// A/B 校验因此从「Node 自有 handler vs Spring」变为「Node 透传 → Spring vs 直连
+// Spring」的一致性：有目录模型时走真实调度（两端口响应必须完全一致）；无目录模型时
+// 用随机 UUID，验证两端返回同一 Spring 400（收敛后不再出现 Node 的 Missing baseUrl）。
+let catalogModelId = process.env.ABDIFF_CATALOG_MODEL_ID || null;
+let textCatalogModelId = process.env.ABDIFF_TEXT_CATALOG_MODEL_ID || null;
+async function resolveCatalogModel() {
+  if (catalogModelId) return catalogModelId;
+  await ensureSpringAuth();
+  const r = await req(springBase, 'GET', '/api/nova/models', null,
+    clientIpFor(springBase, SPRING_IP())({}));
+  if (r.status === 200) {
+    try {
+      const list = JSON.parse(r.text);
+      const usable = list.find(m => m.available === true && m.type === 'image')
+        || list.find(m => m.type === 'image') || list[0];
+      if (usable) {
+        catalogModelId = usable.id;
+        return catalogModelId;
+      }
+    } catch { /* fallthrough */ }
+  }
+  return null;   // 无种子 → 随机 UUID 验证一致性 400
+}
+
+async function resolveTextCatalogModel() {
+  if (textCatalogModelId) return textCatalogModelId;
+  await ensureSpringAuth();
+  const r = await req(springBase, 'GET', '/api/nova/models', null,
+    clientIpFor(springBase, SPRING_IP())({}));
+  if (r.status === 200) {
+    try {
+      const list = JSON.parse(r.text);
+      const usable = list.find(m => m.available === true && m.type === 'text')
+        || list.find(m => m.type === 'text');
+      if (usable) {
+        textCatalogModelId = usable.id;
+        return textCatalogModelId;
+      }
+    } catch { /* fallthrough */ }
+  }
+  return null;   // 无种子 → 随机 UUID 验证一致性 400
+}
+
 function clientIpFor(base, ip) {
+  // WIN-28 (ADR-32): /api/nova/proxy + /api/nova/usage 已透传 Spring，node(3000) 侧
+  // 请求同样需要携带 JWT（两端最终都打到 Spring）。
   return (headers) => ({
     'X-Forwarded-For': ip,
-    ...(base === springBase && springAuth.token ? { Authorization: 'Bearer ' + springAuth.token } : {}),
+    ...(springAuth.token ? { Authorization: 'Bearer ' + springAuth.token } : {}),
     ...headers,
   });
 }
@@ -157,23 +205,31 @@ async function diff(name, fn) {
   return { a, b };
 }
 
-async function taskBody(mockPort, overrides = {}) {
-  return {
-    apiKey: 'sk-ab-diff-' + runId + '-' + probeIndex,
-    baseUrl: `http://localhost:${mockPort}`,
-    protocol: 'openai',
+async function taskBody(mockPort, overrides = {}, base = '') {
+  // WIN-28 契约分化：Node 走 legacy apiKey/baseUrl；Spring 走目录 UUID + 账号池。
+  const common = {
     mode: 'text-to-image',
     prompt: 'a red apple on a table',
     outputSize: '1K',
     aspectRatio: '1:1',
     temperature: 1.0,
-    model: 'gpt-image-1',
     gptImageQuality: 'high',
     gptImageStyle: 'auto',
     gptImageBackground: 'auto',
     parallelCount: 1,
     images: [],
     ...overrides,
+  };
+  if (base === springBase) {
+    const modelId = await resolveCatalogModel();
+    return { ...common, model: modelId || crypto.randomUUID() };
+  }
+  return {
+    ...common,
+    apiKey: 'sk-ab-diff-' + runId + '-' + probeIndex,
+    baseUrl: `http://localhost:${mockPort}`,
+    protocol: 'openai',
+    model: 'gpt-image-1',
   };
 }
 
@@ -203,7 +259,7 @@ async function probeQueueStatus(base, _, ip) {
 }
 
 async function probeCreatePollImage(base, _, ip) {
-  const r = await req(base, 'POST', '/api/nova/tasks', await taskBody(mockPort), ip({}));
+  const r = await req(base, 'POST', '/api/nova/tasks', await taskBody(mockPort, {}, base), ip({}));
   const taskId = JSON.parse(r.text).taskId;
   // Q1 (M2): user-owned tasks are only readable by their owner — poll with the
   // caller's headers so Spring carries the ab-diff user's JWT (Node ignores it).
@@ -222,7 +278,7 @@ async function probeCreatePollImage(base, _, ip) {
 }
 
 async function probeCreateParallel(base, _, ip) {
-  const r = await req(base, 'POST', '/api/nova/tasks', await taskBody(mockPort, { parallelCount: 2 }), ip({}));
+  const r = await req(base, 'POST', '/api/nova/tasks', await taskBody(mockPort, { parallelCount: 2 }, base), ip({}));
   const taskId = JSON.parse(r.text).taskId;
   const done = await waitCompleted(base, taskId, ip({}));
   return { createStatus: r.status, images: (done.text.match(/URL:\/api\/nova\/images/g) || []).length };
@@ -239,26 +295,24 @@ async function probeAck(base, _, ip) {
 }
 
 async function probeTextProxy(base, _, ip) {
+  await ensureSpringAuth();
+  const modelId = await resolveTextCatalogModel() || crypto.randomUUID();
   const r = await req(base, 'POST', '/api/nova/proxy/text', {
-    protocol: 'openai-chat-completions',
-    baseUrl: `http://localhost:${mockPort}`,
-    apiKey: 'sk-x',
-    model: 'gpt-4o',
+    modelId,
     stream: false,
     messages: [{ role: 'user', content: 'hi' }],
-  });
+  }, ip({}));
   return { status: r.status, body: normalize(r.text) };
 }
 
 async function probeTextProxyStream(base, _, ip) {
+  await ensureSpringAuth();
+  const modelId = await resolveTextCatalogModel() || crypto.randomUUID();
   const r = await req(base, 'POST', '/api/nova/proxy/text', {
-    protocol: 'openai-chat-completions',
-    baseUrl: `http://localhost:${mockPort}`,
-    apiKey: 'sk-x',
-    model: 'gpt-4o',
+    modelId,
     stream: true,
     messages: [{ role: 'user', content: 'hi' }],
-  });
+  }, ip({}));
   return {
     status: r.status,
     contentType: r.headers.get('content-type'),
@@ -267,7 +321,16 @@ async function probeTextProxyStream(base, _, ip) {
 }
 
 async function probeModels(base, _, ip) {
-  const r = await req(base, 'GET', `/api/nova/proxy/models?baseUrl=http://localhost:${mockPort}&apiKey=sk-x&protocol=openai`, null, ip({}));
+  await ensureSpringAuth();
+  const modelId = await resolveCatalogModel() || crypto.randomUUID();
+  const r = await req(base, 'GET', `/api/nova/proxy/models?modelId=${modelId}`, null, ip({}));
+  return { status: r.status, body: normalize(r.text) };
+}
+
+async function probeUsagePrefix(base, _, ip) {
+  // WIN-28: /api/nova/admin/usage 与 /api/nova/usage 前缀收敛到 Spring；
+  // 非 admin 用户两端都应得到一致的 Spring 403/401（A1）。
+  const r = await req(base, 'GET', '/api/nova/admin/usage', null, ip({}));
   return { status: r.status, body: normalize(r.text) };
 }
 
@@ -302,7 +365,7 @@ async function probeRateLimit(base, _, ip) {
   // (validation runs before the rate limit, so invalid bodies return 400 first)
   let last = null;
   for (let i = 0; i < 24; i++) {
-    last = await req(base, 'POST', '/api/nova/tasks', await taskBody(mockPort), ip({}));
+    last = await req(base, 'POST', '/api/nova/tasks', await taskBody(mockPort, {}, base), ip({}));
     if (last.status === 429) break;
   }
   return { status: last.status, retryAfter: last.headers.get('retry-after'), body: normalize(last.text) };
@@ -331,12 +394,22 @@ async function probeWs(base) {
 }
 
 async function probeWsTaskPush(base, _, ip) {
+  // T12 (ADR-27): 限流维度改为 per-user —— 用独立用户，避免前序探针（限流 429 窗口 60s）污染本探针。
+  let localToken = null;
+  if (base === springBase) {
+    const username = 'abdiffws_' + runId + '_' + probeIndex;
+    try {
+      await req(base, 'POST', '/api/auth/register', { username, password: 'ab-diff-secret' });
+    } catch { /* may already exist */ }
+    const login = await req(base, 'POST', '/api/auth/login', { username, password: 'ab-diff-secret' });
+    localToken = JSON.parse(login.text).token;
+  }
   // subscribe to a task before creating it → watch queued → processing → completed
   const wsBase = base.replace(/^http/, 'ws') + '/api/nova/ws';
   // Q1 (M2): task pushes are owner-filtered — Spring's WS handshake takes
   // ?token= (browsers can't set WS headers); the Node backend ignores it.
-  const token = base === springBase && springAuth.token
-    ? `?token=${encodeURIComponent(springAuth.token)}` : '';
+  const token = base === springBase && localToken
+    ? `?token=${encodeURIComponent(localToken)}` : '';
   const ws = new WebSocket(wsBase + token);
   const opened = await Promise.race([once(ws, 'open'), sleep(8000).then(() => 'timeout')]);
   if (opened === 'timeout') {
@@ -345,7 +418,8 @@ async function probeWsTaskPush(base, _, ip) {
   }
   const messages = [];
   ws.onmessage = e => messages.push(e.data);
-  const r = await req(base, 'POST', '/api/nova/tasks', await taskBody(mockPort), ip({}));
+  const headers = localToken ? { Authorization: 'Bearer ' + localToken } : {};
+  const r = await req(base, 'POST', '/api/nova/tasks', await taskBody(mockPort, {}, base), { ...ip({}), ...headers });
   const taskId = JSON.parse(r.text).taskId;
   ws.send(JSON.stringify({ type: 'subscribeTasks', taskIds: [taskId] }));
   await sleep(2500);
@@ -422,26 +496,33 @@ console.log('spring auth ready (ab-diff user)');
   check('200 {ok:true}', a.status === 200 && b.status === 200 && a.body === b.body, `${a.status} ${a.body} vs ${b.status} ${b.body}`);
 }
 
-// 6. text proxy non-stream
+// 6. text proxy non-stream (ADR-32 收敛：两端均 Spring)
 {
-  const { a, b } = await diff('6 文本代理非流式', probeTextProxy);
-  check('200', a.status === 200 && b.status === 200, `${a.status} vs ${b.status}`);
+  const { a, b } = await diff('6 文本代理非流式（modelId/账号池）', probeTextProxy);
+  check('状态一致', a.status === b.status, `${a.status} vs ${b.status}`);
   check('body 一致', a.body === b.body, `node:${a.body} spring:${b.body}`);
 }
 
 // 7. text proxy stream
 {
-  const { a, b } = await diff('7 文本代理流式 SSE', probeTextProxyStream);
-  check('200', a.status === 200 && b.status === 200, `${a.status} vs ${b.status}`);
-  check('Content-Type text/event-stream', (a.contentType || '').includes('text/event-stream')
-    && (b.contentType || '').includes('text/event-stream'), `${a.contentType} vs ${b.contentType}`);
+  const { a, b } = await diff('7 文本代理流式 SSE（modelId/账号池）', probeTextProxyStream);
+  check('状态一致', a.status === b.status, `${a.status} vs ${b.status}`);
+  check('Content-Type 一致', (a.contentType || '') === (b.contentType || ''),
+    `${a.contentType} vs ${b.contentType}`);
   check('SSE body 一致', a.body === b.body, `node:[${a.body}] spring:[${b.body}]`);
 }
 
 // 8. model list proxy
 {
-  const { a, b } = await diff('8 模型列表代理', probeModels);
-  check('200', a.status === 200 && b.status === 200);
+  const { a, b } = await diff('8 模型列表代理（modelId/账号池）', probeModels);
+  check('状态一致', a.status === b.status, `${a.status} vs ${b.status}`);
+  check('body 一致', a.body === b.body, `node:${a.body} spring:${b.body}`);
+}
+
+// 8.5 usage prefix（WIN-28 新前缀：两端均 Spring，非 admin 403/401 一致）
+{
+  const { a, b } = await diff('8.5 审计接口前缀收敛 /api/nova/admin/usage', probeUsagePrefix);
+  check('状态一致', a.status === b.status, `${a.status} vs ${b.status}`);
   check('body 一致', a.body === b.body, `node:${a.body} spring:${b.body}`);
 }
 
@@ -467,9 +548,12 @@ console.log('spring auth ready (ab-diff user)');
 // 11. rate limit
 {
   const { a, b } = await diff('11 限流 429', probeRateLimit);
-  check('429 RATE_LIMITED', a.status === 429 && b.status === 429, `${a.status} vs ${b.status}`);
+  check('429 RATE_LIMITED / TOO_MANY_PENDING_TASKS', a.status === 429 && b.status === 429, `${a.status} vs ${b.status}`);
   check('Retry-After 头', !!a.retryAfter && !!b.retryAfter, `node:${a.retryAfter} spring:${b.retryAfter}`);
-  check('错误体一致', a.body === b.body, `node:${a.body} spring:${b.body}`);
+  // T12 (ADR-27): 限流维度重构为 per-user 后，两端可能先触发不同限（IP 速率 vs 每用户
+  // pending 数），但均为合法 429 语义 —— 校验错误码集合而非逐字节一致。
+  const okCode = t => t.includes('RATE_LIMITED') || t.includes('TOO_MANY_PENDING_TASKS');
+  check('429 错误码语义一致', okCode(a.body) && okCode(b.body), `node:${a.body} spring:${b.body}`);
 }
 
 // 12. WS protocol

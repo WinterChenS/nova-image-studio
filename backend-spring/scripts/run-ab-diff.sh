@@ -51,6 +51,14 @@ if [ "$node_ok" != 1 ] || [ "$spring_ok" != 1 ]; then
 fi
 
 echo "== running ab-diff via npm script (test:ab-diff) =="
+# WIN-28: 先播种目录模型 + 账号（Spring 账号池探针需要），再跑 A/B
+if command -v "$JAVA_HOME/bin/java" >/dev/null 2>&1; then :; fi
+echo "== seeding ab-diff catalog + account =="
+(cd backend-spring && mvn -q compile dependency:build-classpath -Dmdep.outputFile=target/abdiff-cp.txt)
+ABDIFF_IDS="$("$JAVA_HOME/bin/java" -cp "backend-spring/target/classes;$(cat backend-spring/target/abdiff-cp.txt)" com.nova.studio.integration.AbDiffSeed)"
+export ABDIFF_CATALOG_MODEL_ID="${ABDIFF_IDS%%,*}"
+export ABDIFF_TEXT_CATALOG_MODEL_ID="${ABDIFF_IDS##*,}"
+echo "ABDIFF_CATALOG_MODEL_ID=$ABDIFF_CATALOG_MODEL_ID ABDIFF_TEXT_CATALOG_MODEL_ID=$ABDIFF_TEXT_CATALOG_MODEL_ID"
 npm run test:ab-diff
 AB_EXIT=$?
 echo "ab-diff exit=$AB_EXIT"

@@ -99,6 +99,17 @@ jobs:
           for i in $(seq 1 90); do ok http://localhost:8080/api/nova/config && break; sleep 1; done
           ok http://localhost:8080/api/nova/config || { echo "SPRING NOT READY"; tail -80 /tmp/spring.log; exit 1; }
 
+      # WIN-28 (ADR-32 账号池): 双栈下 proxy/tasks 探针需要 Spring 侧目录模型 + 账号
+      # （AbDiffSeed 独立 main 直接写 PG，幂等）；模型 ID 经 env 传给 ab-diff 脚本。
+      # 必须在 Spring 就绪后运行（V5/V6 表已由 Flyway 建好）。
+      - name: Seed ab-diff catalog + account
+        working-directory: backend-spring
+        run: |
+          mvn -B -ntp -q compile dependency:build-classpath -Dmdep.outputFile=target/abdiff-cp.txt
+          ABDIFF_IDS="$(java -cp \"target/classes:$(cat target/abdiff-cp.txt)\" com.nova.studio.integration.AbDiffSeed)"
+          echo "ABDIFF_CATALOG_MODEL_ID=${ABDIFF_IDS%%,*}" >> "$GITHUB_ENV"
+          echo "ABDIFF_TEXT_CATALOG_MODEL_ID=${ABDIFF_IDS##*,}" >> "$GITHUB_ENV"
+
       - name: Run A/B diff (37 probes)
         run: node backend-spring/scripts/ab-diff/ab-diff.mjs --node http://localhost:3000 --spring http://localhost:8080
 
