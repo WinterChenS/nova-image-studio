@@ -63,7 +63,7 @@ public class AccountHealthService {
     public AccountHealthService(AccountService accountService,
                                 ObjectMapper objectMapper,
                                 @org.springframework.beans.factory.annotation.Value(
-                                        "${nova.account.broken-threshold:3}") int brokenThreshold) {
+                                        "${NOVA_ACCOUNT_BROKEN_THRESHOLD:3}") int brokenThreshold) {
         this.accountService = accountService;
         this.objectMapper = objectMapper;
         this.brokenThreshold = Math.max(1, brokenThreshold);

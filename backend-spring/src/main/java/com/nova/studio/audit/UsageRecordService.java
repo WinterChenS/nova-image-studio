@@ -38,7 +38,7 @@ public class UsageRecordService {
 
     public UsageRecordService(UsageRecordMapper mapper,
                               PricingService pricingService,
-                              @Value("${nova.audit.queue-capacity:10000}") int queueCapacity) {
+                              @Value("${NOVA_AUDIT_QUEUE_CAPACITY:10000}") int queueCapacity) {
         this.mapper = mapper;
         this.pricingService = pricingService;
         this.queue = new LinkedBlockingQueue<>(Math.max(1, queueCapacity));
