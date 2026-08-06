@@ -96,10 +96,10 @@ class TaskApiE2EIntegrationTest {
         upstream.start();
 
         // 自愈：清理上次失败运行遗留的测试种子（E2E-* / 无账号模型）
-        jdbcTemplate.update("DELETE FROM usage_records WHERE account_id IN (SELECT id FROM ai_accounts WHERE name LIKE 'E2E-%') OR ref_id IN ('audit-1','idem-task-1')");
+        jdbcTemplate.update("DELETE FROM usage_records WHERE account_id IN (SELECT id FROM ai_accounts WHERE name LIKE 'E2E-%' OR name LIKE 'ab-diff-%') OR ref_id IN ('audit-1','idem-task-1')");
         jdbcTemplate.update("DELETE FROM ai_model_pricing WHERE model_id IN (SELECT id FROM ai_models WHERE name LIKE 'E2E%')");
-        jdbcTemplate.update("DELETE FROM ai_accounts WHERE name LIKE 'E2E-%'");
-        jdbcTemplate.update("DELETE FROM ai_models WHERE name LIKE 'E2E%' OR name LIKE '无账号模型'");
+        jdbcTemplate.update("DELETE FROM ai_accounts WHERE name LIKE 'E2E-%' OR name LIKE 'ab-diff-%'");
+        jdbcTemplate.update("DELETE FROM ai_models WHERE name LIKE 'E2E%' OR name LIKE 'ab-diff-%' OR name LIKE '无账号模型'");
 
         // 注册普通用户
         String username = "e2e_" + UUID.randomUUID().toString().substring(0, 8);

@@ -80,10 +80,10 @@ class SettingsUsersIsolationE2EIntegrationTest {
                     .setBody("{\"data\":[{\"b64_json\":\"" + b64 + "\"}]}"));
         }
         // 自愈：清理上次失败运行遗留的测试种子（E2E-*）
-        jdbcTemplate.update("DELETE FROM usage_records WHERE account_id IN (SELECT id FROM ai_accounts WHERE name LIKE 'E2E-%')");
+        jdbcTemplate.update("DELETE FROM usage_records WHERE account_id IN (SELECT id FROM ai_accounts WHERE name LIKE 'E2E-%' OR name LIKE 'ab-diff-%')");
         jdbcTemplate.update("DELETE FROM ai_model_pricing WHERE model_id IN (SELECT id FROM ai_models WHERE name LIKE 'E2E%')");
-        jdbcTemplate.update("DELETE FROM ai_accounts WHERE name LIKE 'E2E-%'");
-        jdbcTemplate.update("DELETE FROM ai_models WHERE name LIKE 'E2E%'");
+        jdbcTemplate.update("DELETE FROM ai_accounts WHERE name LIKE 'E2E-%' OR name LIKE 'ab-diff-%'");
+        jdbcTemplate.update("DELETE FROM ai_models WHERE name LIKE 'E2E%' OR name LIKE 'ab-diff-%'");
         catalogModelId = catalogRepository.insert("image", "openai", "E2E 图片模型", "gpt-image-1",
                 upstream.url("/").toString(), "{}", null, true, null);
         accountId = accountRepository.insert("E2E-账号", "openai", upstream.url("/").toString(),
