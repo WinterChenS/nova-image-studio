@@ -132,6 +132,15 @@
       <artifactId>spring-boot-starter-actuator</artifactId>
     </dependency>
 
+    <!-- T3.3 (WIN-13): OpenAPI (F-18) — springdoc 3.1.0 is built against
+         Spring Boot 4.1.0 (verified against the parent POM). Exposes
+         /v3/api-docs + /swagger-ui. -->
+    <dependency>
+      <groupId>org.springdoc</groupId>
+      <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+      <version>3.1.0</version>
+    </dependency>
+
     <!-- Spring AI -->
     <dependency>
       <groupId>org.springframework.ai</groupId>
