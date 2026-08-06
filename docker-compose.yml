@@ -1,16 +1,80 @@
+# ============================================================================
+# Nova Image Studio — 应用 + PostgreSQL + Redis 自托管拓扑（T3.5 / WIN-13）
+#
+# 一键启动：cp .env.example .env（可选） && docker compose up -d --build
+#   - http://localhost:3000  应用（静态 + API + WS）
+#   - PostgreSQL/Redis 为 compose 内置服务（ARCH H6：自托管定位）
+#   - ./data 挂载图片目录；./prompts.json / ./blacklist.json 种子兜底（T3.1）
+#   - ./.env 只读挂载基础设施配置（PRD §10.2；AI Key 在 DB 中）
+#
+# 首次启动自动执行 Flyway 迁移（V1-V3）；旧 SQLite→PG 数据迁移为
+# 手动幂等脚本（docs/migrate-sqlite-to-pg.sh，H6 维护窗口执行）。
+# ============================================================================
+
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: nova-postgres
+    environment:
+      POSTGRES_DB: ${DB_NAME:-nova}
+      POSTGRES_USER: ${DB_USERNAME:-nova}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-nova}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-nova} -d ${DB_NAME:-nova}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: nova-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
   nova-image-studio:
-    image: tianjiangqiji/nova-image-studio:latest
+    build: .
+    image: nova-image-studio:latest
     container_name: nova-image-studio
     ports:
       - "3000:3000"
-    # 覆盖数据路径，确保落在挂载的 ./data（cwd=/app）
     environment:
-      NOVA_TASK_DB: backend/data/nova-tasks.sqlite
-      NOVA_IMAGE_DIR: backend/data/nova-images
+      # DB / Redis 指向 compose 内置服务
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USERNAME: ${DB_USERNAME:-nova}
+      DB_PASSWORD: ${DB_PASSWORD:-nova}
+      DB_NAME: ${DB_NAME:-nova}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      # 应用端口保持 3000（与旧 Node 部署一致）
+      PORT: "3000"
+      NOVA_IMAGE_DIR: /app/data/nova-images
+      NOVA_STATIC_DIR: /app/frontend/out
+      NOVA_PROMPTS_PATH: /app/backend/prompts.json
+      NOVA_BLACKLIST_PATH: /app/backend/blacklist.json
     volumes:
-      - ./data:/app/backend/data
-      - ./blacklist.json:/app/backend/blacklist.json
+      - ./data:/app/data
       - ./prompts.json:/app/backend/prompts.json
-      - ./.env:/app/.env
+      - ./blacklist.json:/app/backend/blacklist.json
+      - ./.env:/app/.env:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:
