@@ -407,7 +407,6 @@ export function WorkspaceShell() {
                 <AgentChatWorkspace
                   wideMode={wideMode}
                   disabled={!workspace.hasApiKey}
-                  onConfigureApiKey={() => setSettingsOpen(true)}
                 />
               </TabsContent>
 
@@ -464,7 +463,6 @@ export function WorkspaceShell() {
       <MissingApiKeyDialog
         open={missingApiKeyDialogOpen}
         onOpenChange={setMissingApiKeyDialogOpen}
-        onConfigure={() => setSettingsOpen(true)}
       />
 
       <PromptGalleryAccessDialog

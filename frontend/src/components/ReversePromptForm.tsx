@@ -626,7 +626,6 @@ export function ReversePromptForm({ wideMode = false, disabled = false, onConfig
       <MissingApiKeyDialog
         open={missingApiKeyDialogOpen}
         onOpenChange={setMissingApiKeyDialogOpen}
-        onConfigure={() => onConfigureApiKey?.()}
       />
     </div>
   );

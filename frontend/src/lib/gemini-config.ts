@@ -14,6 +14,8 @@ export type ModelId = string;
 export interface ModelOption {
   value: string;
   label: string;
+  /** WIN-25 (T18, A5): 目录模型无可用账号/enabled=false → 禁用不可选。 */
+  disabled?: boolean;
 }
 
 export interface ModelImageLimit {
@@ -40,6 +42,7 @@ export function getModelOptions(): ModelOption[] {
   return getRegistryImageModels().map((model) => ({
     value: model.id,
     label: model.name,
+    disabled: model.available === false,
   }));
 }
 

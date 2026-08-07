@@ -381,14 +381,17 @@ export function AgentProposalCard({
               <button
                 key={option.value}
                 type="button"
+                disabled={option.disabled}
                 onClick={() => {
                   handleModelChange(option.value);
                   setModelPopoverOpen(false);
                 }}
                 className={cn(
                   'w-full text-left px-2.5 py-1.5 rounded-md text-sm hover:bg-muted',
+                  option.disabled && 'pointer-events-none opacity-50',
                   imageModel === option.value && 'bg-muted font-medium'
                 )}
+                title={option.disabled ? '该模型暂无可用的账号（请联系管理员）' : undefined}
               >
                 {option.label}
               </button>

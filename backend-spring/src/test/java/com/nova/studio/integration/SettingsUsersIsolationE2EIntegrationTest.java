@@ -242,24 +242,32 @@ class SettingsUsersIsolationE2EIntegrationTest {
         String taskId = post("/api/nova/tasks", task, tokenA).get("taskId").asText();
         awaitTerminal(taskId, tokenA);
 
-        // anonymous GET → 404 (task is user-owned; do not leak existence)
+        // M2 T16 (A19): /api/nova/tasks/* 移入登录 —— anonymous GET → 401（不再区分归属）
         assertThatThrownBy(() -> rest.exchange(base() + "/api/nova/tasks/" + taskId,
                 HttpMethod.GET, new HttpEntity<>(bearer(null)), String.class))
                 .isInstanceOf(HttpClientErrorException.class)
-                .satisfies(e -> assertThat(((HttpClientErrorException) e).getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND));
+                .satisfies(e -> assertThat(((HttpClientErrorException) e).getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED));
     }
 
     @Test
     void anonymousCanReadLegacyNullTask() {
-        // N1 (WIN-12 复审): 匿名可读 NULL 归属（遗留/迁移）任务 — 直接插入一条
-        // user_id = NULL 的任务行，匿名 GET 应返回 200 排队中（Q1 匿名只读边界，M2 T16 收口）。
+        // N1 (WIN-12 复审) + M2 T16 (A19): NULL 归属（遗留/迁移）任务由「匿名可读」
+        // 改为「登录后可读」（D2 默认）——匿名 401，登录后 200。
         String legacyTaskId = "legacy-null-" + UUID.randomUUID().toString().substring(0, 8);
         taskRepository.insertTaskAndItems(legacyTaskId, null, null, com.nova.studio.task.TaskRepository.STATUS_QUEUED,
                 "text-to-image", "{\"mode\":\"text-to-image\",\"prompt\":\"legacy\"}",
                 java.time.Instant.now().toString(), 1);
         try {
+            // 匿名 → 401（门禁收口，A19）
+            assertThatThrownBy(() -> rest.exchange(base() + "/api/nova/tasks/" + legacyTaskId,
+                    HttpMethod.GET, new HttpEntity<>(bearer(null)), String.class))
+                    .isInstanceOf(HttpClientErrorException.class)
+                    .satisfies(e -> assertThat(((HttpClientErrorException) e).getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED));
+
+            // 登录后 → 200 可读（A19：NULL 任务登录后可读）
+            String token = registerAndLogin("legacy_" + UUID.randomUUID().toString().substring(0, 8));
             ResponseEntity<String> resp = rest.exchange(base() + "/api/nova/tasks/" + legacyTaskId,
-                    HttpMethod.GET, new HttpEntity<>(bearer(null)), String.class);
+                    HttpMethod.GET, new HttpEntity<>(bearer(token)), String.class);
             assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
             JsonNode task = parse(resp.getBody());
             assertThat(task.get("id").asText()).isEqualTo(legacyTaskId);

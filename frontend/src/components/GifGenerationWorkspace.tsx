@@ -565,7 +565,6 @@ export function GifGenerationWorkspace({ wideMode = false, hasApiKey, onConfigur
       <MissingApiKeyDialog
         open={missingKeyOpen}
         onOpenChange={setMissingKeyOpen}
-        onConfigure={onConfigureApiKey}
       />
 
       {modeChoiceOpen && createPortal(

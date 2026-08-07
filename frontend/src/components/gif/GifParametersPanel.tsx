@@ -72,10 +72,9 @@ export function GifParametersPanel(props: GifParametersPanelProps) {
         <div className="max-w-md">
           <p className="text-base font-medium text-foreground">需要先配置令牌</p>
           <p className="mt-2 text-sm text-muted-foreground">
-            请先在设置中配置 Nova API 密钥，才能使用动图生成功能。
+            模型账号由管理员统一配置（账号池）。如无可用模型，请联系管理员。
           </p>
         </div>
-        <Button onClick={props.onConfigureApiKey}>配置</Button>
       </div>
     );
   }
@@ -89,10 +88,10 @@ export function GifParametersPanel(props: GifParametersPanelProps) {
         <div className="max-w-md">
           <p className="text-base font-medium text-foreground">没有可用的 GIF 模型</p>
           <p className="mt-2 text-sm text-muted-foreground">
-            请先在设置中完成至少一个 image 系列的 4K 图片模型配置。banana 系列不支持这里需要的自定义分辨率，所以不会显示。
+            模型目录当前没有可用的 image 系列 4K 模型（banana 系列不支持自定义分辨率，不会显示）。
+            请联系管理员在「账号池管理 → 模型目录」中配置。
           </p>
         </div>
-        <Button onClick={props.onConfigureApiKey}>打开设置</Button>
       </div>
     );
   }

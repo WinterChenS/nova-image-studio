@@ -212,8 +212,15 @@ class TaskApiE2EIntegrationTest {
                 VALUES (?, ?, ?, 'openai', 'image', 'task', 'audit-1', 'success', 100, 200, 1, 0.8, 'CNY', 500, now())
                 """, userId(), imageAccountId, imageCatalogId);
 
-        // 提权为 admin（测试内直接改库；生产经 AdminBootstrap）
+        // 提权为 admin（测试内直接改库；生产经 AdminBootstrap —— M2 双写 user_roles + 缓存失效 A14）
         jdbcTemplate.update("UPDATE users SET role='admin' WHERE id=?", userId());
+        jdbcTemplate.update("""
+                INSERT INTO user_roles (user_id, role_id)
+                SELECT u.id, r.id FROM users u, roles r
+                WHERE u.id = ? AND r.code = 'admin'
+                ON CONFLICT DO NOTHING
+                """, userId());
+        Thread.sleep(1100); // ADR-29: 权限缓存 ≤1s 失效
         String adminToken = loginToken();
 
         ResponseEntity<String> resp = rest.exchange(

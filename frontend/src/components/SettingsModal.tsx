@@ -1,67 +1,27 @@
 'use client';
 
+/**
+ * WIN-25 (T19, A2) — 设置弹窗：移除模型 Key 编辑区（用户自维护 Key 已下线，
+ * 模型由管理员在「账号池管理 → 模型目录」统一配置）。保留：
+ * 默认模型（走全局目录，available 禁用）、备份、关于。
+ */
+
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  CheckCircle2,
-  Database,
-  Download,
-  ExternalLink,
-  Eye,
-  EyeOff,
-  ImageIcon,
-  Info,
-  Plus,
-  RefreshCw,
-  Save,
-  Settings,
-  Trash2,
-  Upload,
-  User,
-  Wand2,
-  XCircle,
+  CheckCircle2, Database, Download, ExternalLink, Info, Save, Settings, Upload, XCircle,
 } from 'lucide-react';
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
+  Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
-import { Switch } from '@/components/ui/switch';
 import { BackupProgress } from '@/components/BackupProgress';
-import {
-  BUILTIN_IMAGE_PRESETS,
-  BUILTIN_IMAGE_PRESET_OPTIONS,
-  DEFAULT_DEFAULTS,
-  DEFAULT_TEXT_MODEL_TEMPLATES,
-  generateModelId,
-  getDefaultTextModelTemplate,
-  getCompleteImageModels,
-  getCompleteTextModels,
-  getImageModelOutputSizes,
-  type DefaultModels,
-  type ImageModelConfig,
-  type ProviderProtocol,
-  type TextModelConfig,
-} from '@/lib/nova-models';
-import {
-  getTextProviderDescription,
-  getTextProviderLabel,
-  type TextProviderProtocol,
-} from '@/lib/nova-text-protocol';
-import { syncDynamicModelExports } from '@/lib/gemini-config';
-import { exportAllData, importAllData, downloadBlob, generateBackupFilename, type BackupProgress as BackupProgressType, LEGACY_SETTING_KEYS_TO_CLEAR } from '@/lib/backup-utils';
-import { checkModelsAvailability, type ModelStatus } from '@/lib/ccode-task-client';
-import { hasAnyApiKey } from '@/lib/settings-storage';
-import { loadRegistryFromApi, persistRegistryToApi, importSettings } from '@/lib/settings-api';
-import { setRegistryCache } from '@/lib/nova-models';
-import { isLoggedIn } from '@/lib/auth';
-import { BA_RANDOM_URL, BING_WALLPAPER_URL } from '@/lib/constants';
+import { exportAllData, importAllData, downloadBlob, generateBackupFilename, type BackupProgress as BackupProgressType } from '@/lib/backup-utils';
+import { loadRegistry, type DefaultModels } from '@/lib/nova-models';
+import { fetchSettings, saveSettings } from '@/lib/settings-api';
 import { PROMPT_DATA_SOURCES, getPromptSourceLabel } from '@/lib/prompt-gallery-data';
+import { BA_RANDOM_URL, BING_WALLPAPER_URL } from '@/lib/constants';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -71,95 +31,21 @@ interface SettingsModalProps {
   onRequireLogin?: () => void;
 }
 
-function cloneImageModel(model: ImageModelConfig): ImageModelConfig {
-  return { ...model };
-}
+const DEFAULT_DEFAULTS: DefaultModels = {
+  textToImage: '',
+  imageToImage: '',
+  reversePrompt: '',
+  agent: '',
+  promptOptimize: '',
+  imageDescribe: '',
+};
 
-function cloneTextModel(model: TextModelConfig): TextModelConfig {
-  return { ...model };
-}
-
-function createImageModelDraft(): ImageModelConfig {
-  const preset = BUILTIN_IMAGE_PRESETS['gpt-image-2'];
-  return {
-    id: generateModelId('img'),
-    protocol: preset.protocol,
-    name: '',
-    modelId: '',
-    apiKey: '',
-    baseUrl: preset.baseUrl,
-    builtinPreset: preset.id,
-    maxRefImages: preset.maxRefImages,
-    maxOutputSize: preset.maxOutputSize,
-    supportsAdvancedParams: preset.supportsAdvancedParams,
-  };
-}
-
-function createTextModelDraft(): TextModelConfig {
-  const template = getDefaultTextModelTemplate('openai-responses');
-  return {
-    id: generateModelId('txt'),
-    protocol: template.protocol,
-    name: '',
-    modelId: '',
-    apiKey: '',
-    baseUrl: template.baseUrl,
-    note: template.note,
-  };
-}
-
-function isCompleteImageModel(model: ImageModelConfig): boolean {
-  return Boolean(model.name.trim() && model.modelId.trim() && model.apiKey.trim() && model.baseUrl.trim());
-}
-
-function isCompleteTextModel(model: TextModelConfig): boolean {
-  return Boolean(model.name.trim() && model.modelId.trim() && model.apiKey.trim() && model.baseUrl.trim());
-}
-
-function getImageModelLabel(models: ImageModelConfig[], id: string): string | undefined {
-  return models.find((model) => model.id === id)?.name;
-}
-
-function getTextModelLabel(models: TextModelConfig[], id: string): string | undefined {
-  return models.find((model) => model.id === id)?.name;
-}
-
-function normalizeDefaults(
-  defaults: DefaultModels,
-  imageModels: ImageModelConfig[],
-  textModels: TextModelConfig[],
-): DefaultModels {
-  const completeImageModels = imageModels.filter(isCompleteImageModel);
-  const completeTextModels = textModels.filter(isCompleteTextModel);
-  const firstImageModelId = completeImageModels[0]?.id || '';
-  const firstTextModelId = completeTextModels[0]?.id || '';
-
-  return {
-    textToImage: completeImageModels.some((model) => model.id === defaults.textToImage) ? defaults.textToImage : firstImageModelId,
-    imageToImage: completeImageModels.some((model) => model.id === defaults.imageToImage) ? defaults.imageToImage : firstImageModelId,
-    reversePrompt: completeTextModels.some((model) => model.id === defaults.reversePrompt) ? defaults.reversePrompt : firstTextModelId,
-    agent: completeTextModels.some((model) => model.id === defaults.agent) ? defaults.agent : firstTextModelId,
-    promptOptimize: completeTextModels.some((model) => model.id === defaults.promptOptimize) ? defaults.promptOptimize : firstTextModelId,
-    imageDescribe: completeTextModels.some((model) => model.id === defaults.imageDescribe) ? defaults.imageDescribe : firstTextModelId,
-  };
-}
-
-export function SettingsModal({ isOpen, onClose, onApiKeyChange, isLoggedIn: loggedInProp, onRequireLogin }: SettingsModalProps) {
-  const loggedIn = loggedInProp ?? isLoggedIn();
+export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   const [loading, setLoading] = useState(false);
-  const prevRegistryRef = useRef<import('@/lib/nova-models').NovaModelRegistry | null>(null);
-  const [imageModels, setImageModels] = useState<ImageModelConfig[]>([]);
-  const [textModels, setTextModels] = useState<TextModelConfig[]>([]);
-  const [defaults, setDefaults] = useState<DefaultModels>(DEFAULT_DEFAULTS);
-  const [selectedImageModelId, setSelectedImageModelId] = useState('');
-  const [selectedTextModelId, setSelectedTextModelId] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
-  const [checkingModels, setCheckingModels] = useState(false);
-  const [modelStatuses, setModelStatuses] = useState<ModelStatus[] | null>(null);
-  const [modelCheckError, setModelCheckError] = useState<string | null>(null);
-  const [showImageApiKey, setShowImageApiKey] = useState(false);
-  const [showTextApiKey, setShowTextApiKey] = useState(false);
+  const [defaults, setDefaults] = useState<DefaultModels>(DEFAULT_DEFAULTS);
+  const [saving, setSaving] = useState(false);
 
   const [backupProgress, setBackupProgress] = useState<BackupProgressType>({ percent: 0, message: '' });
   const [isBackupActive, setIsBackupActive] = useState(false);
@@ -169,37 +55,18 @@ export function SettingsModal({ isOpen, onClose, onApiKeyChange, isLoggedIn: log
 
   useEffect(() => {
     if (!isOpen) return;
-    if (!loggedIn) {
-      setError('请先登录后再管理模型配置');
-      setImageModels([]);
-      setTextModels([]);
-      setDefaults(DEFAULT_DEFAULTS);
-      setLoading(false);
-      return;
-    }
     let cancelled = false;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- async settings load (repo pattern)
     setLoading(true);
     setError(null);
     setSuccess(null);
-    setModelStatuses(null);
-    setModelCheckError(null);
     setBackupError(null);
     setBackupSuccess(null);
-    // M2 (T2.3): 从设置 API 加载模型注册表（Key 脱敏）
-    loadRegistryFromApi()
-      .then((registry) => {
+    Promise.all([fetchSettings().catch((): Record<string, unknown> => ({})), Promise.resolve(loadRegistry())])
+      .then(([settings]) => {
         if (cancelled) return;
-        prevRegistryRef.current = registry;
-        setRegistryCache(registry);
-        setImageModels(registry.imageModels.map(cloneImageModel));
-        setTextModels(registry.textModels.map(cloneTextModel));
-        setDefaults(normalizeDefaults(registry.defaults, registry.imageModels, registry.textModels));
-        setSelectedImageModelId(registry.imageModels[0]?.id || '');
-        setSelectedTextModelId(registry.textModels[0]?.id || '');
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        setError(err instanceof Error ? `加载设置失败：${err.message}` : '加载设置失败');
+        const stored = (settings['registry.defaults'] || {}) as Partial<DefaultModels>;
+        setDefaults({ ...DEFAULT_DEFAULTS, ...stored });
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -207,166 +74,33 @@ export function SettingsModal({ isOpen, onClose, onApiKeyChange, isLoggedIn: log
     return () => {
       cancelled = true;
     };
-  }, [isOpen, loggedIn]);
+  }, [isOpen]);
 
-  useEffect(() => {
-    if (!isOpen) return;
-    setDefaults((prev) => {
-      const next = normalizeDefaults(prev, imageModels, textModels);
-      return JSON.stringify(next) === JSON.stringify(prev) ? prev : next;
-    });
-  }, [imageModels, isOpen, textModels]);
+  const registry = useMemo(() => loadRegistry(), []);
 
-  const selectedImageModel = useMemo(
-    () => imageModels.find((model) => model.id === selectedImageModelId) || null,
-    [imageModels, selectedImageModelId],
-  );
-  const selectedTextModel = useMemo(
-    () => textModels.find((model) => model.id === selectedTextModelId) || null,
-    [selectedTextModelId, textModels],
-  );
+  const imageOptions = registry.imageModels.map((m) => ({
+    value: m.id,
+    label: m.available === false ? `${m.name}（无可用账号）` : m.name,
+    disabled: m.available === false,
+  }));
+  const textOptions = registry.textModels.map((m) => ({
+    value: m.id,
+    label: m.available === false ? `${m.name}（无可用账号）` : m.name,
+    disabled: m.available === false,
+  }));
 
-  const handleAddImageModel = () => {
-    const draft = createImageModelDraft();
-    setImageModels((prev) => [...prev, draft]);
-    setSelectedImageModelId(draft.id);
-  };
-
-  const handleUpdateImageModel = (id: string, patch: Partial<ImageModelConfig>) => {
-    setImageModels((prev) => prev.map((model) => {
-      if (model.id !== id) return model;
-      const next = { ...model, ...patch };
-      if (patch.builtinPreset) {
-        const preset = BUILTIN_IMAGE_PRESETS[patch.builtinPreset];
-        next.protocol = preset.protocol;
-        next.name = preset.name;
-        next.modelId = preset.modelId;
-        next.baseUrl = preset.baseUrl;
-        next.maxRefImages = preset.maxRefImages;
-        next.maxOutputSize = preset.maxOutputSize;
-        next.supportsAdvancedParams = preset.supportsAdvancedParams;
-      }
-      if (patch.protocol === 'google' || patch.protocol === 'grok') {
-        next.supportsAdvancedParams = false;
-      }
-      return next;
-    }));
-  };
-
-  const handleDeleteImageModel = (id: string) => {
-    const nextModels = imageModels.filter((model) => model.id !== id);
-    setImageModels(nextModels);
-    setDefaults((prev) => ({
-      ...prev,
-      textToImage: prev.textToImage === id ? '' : prev.textToImage,
-      imageToImage: prev.imageToImage === id ? '' : prev.imageToImage,
-    }));
-    if (selectedImageModelId === id) {
-      setSelectedImageModelId(nextModels[0]?.id || '');
-    }
-  };
-
-  const handleAddTextModel = () => {
-    const draft = createTextModelDraft();
-    setTextModels((prev) => [...prev, draft]);
-    setSelectedTextModelId(draft.id);
-  };
-
-  const handleApplyTextTemplate = (id: string, protocol: TextProviderProtocol) => {
-    const template = getDefaultTextModelTemplate(protocol);
-    handleUpdateTextModel(id, {
-      protocol: template.protocol,
-      name: template.name,
-      modelId: template.modelId,
-      baseUrl: template.baseUrl,
-      note: template.note || getTextProviderDescription(template.protocol),
-    });
-  };
-
-  const handleUpdateTextModel = (id: string, patch: Partial<TextModelConfig>) => {
-    setTextModels((prev) => prev.map((model) => (model.id === id ? { ...model, ...patch } : model)));
-  };
-
-  const handleDeleteTextModel = (id: string) => {
-    const nextModels = textModels.filter((model) => model.id !== id);
-    setTextModels(nextModels);
-    setDefaults((prev) => ({
-      ...prev,
-      reversePrompt: prev.reversePrompt === id ? '' : prev.reversePrompt,
-      agent: prev.agent === id ? '' : prev.agent,
-      promptOptimize: prev.promptOptimize === id ? '' : prev.promptOptimize,
-      imageDescribe: prev.imageDescribe === id ? '' : prev.imageDescribe,
-    }));
-    if (selectedTextModelId === id) {
-      setSelectedTextModelId(nextModels[0]?.id || '');
-    }
-  };
-
-  const persistRegistry = async () => {
-    if (!loggedIn) {
-      onRequireLogin?.();
-      return;
-    }
-    if (imageModels.length === 0) {
-      setError('至少填写一个图片模型');
-      return;
-    }
-    if (textModels.length === 0) {
-      setError('至少填写一个文本模型');
-      return;
-    }
-    if (!imageModels.some(isCompleteImageModel)) {
-      setError('至少完成一个图片模型的全部信息');
-      return;
-    }
-    if (!textModels.some(isCompleteTextModel)) {
-      setError('至少完成一个文本模型的全部信息');
-      return;
-    }
-
-    const registry = {
-      imageModels,
-      textModels,
-      defaults: normalizeDefaults(defaults, imageModels, textModels),
-    };
-
+  const handleSave = async () => {
+    setSaving(true);
     setError(null);
+    setSuccess(null);
     try {
-      // M2 (T2.3): 写入设置 API（Key 加密落库，掩码 Key 保留旧密文）
-      await persistRegistryToApi(registry, prevRegistryRef.current || undefined);
-      prevRegistryRef.current = registry;
-      setRegistryCache(registry);
-      syncDynamicModelExports();
+      await saveSettings({ 'registry.defaults': defaults });
       window.dispatchEvent(new Event('nova-model-registry-updated'));
-      onApiKeyChange?.(hasAnyApiKey());
-      setSuccess('设置已保存');
-      setModelStatuses(null);
-      setModelCheckError(null);
+      setSuccess('默认模型已保存');
     } catch (err) {
       setError(err instanceof Error ? `保存失败：${err.message}` : '保存失败');
-    }
-  };
-
-  const handleCheckModels = async () => {
-    const configuredModels = [
-      ...imageModels.filter(isCompleteImageModel),
-      ...textModels.filter(isCompleteTextModel),
-    ];
-    if (configuredModels.length === 0) {
-      setModelCheckError('请先完成至少一个图片模型或文本模型配置');
-      return;
-    }
-
-    setCheckingModels(true);
-    setModelCheckError(null);
-    setModelStatuses(null);
-    try {
-      const statuses = await checkModelsAvailability(configuredModels.map((model) => model.id));
-      setModelStatuses(statuses);
-    } catch (err) {
-      setModelCheckError(err instanceof Error ? err.message : '检查模型失败');
     } finally {
-      setCheckingModels(false);
+      setSaving(false);
     }
   };
 
@@ -391,7 +125,6 @@ export function SettingsModal({ isOpen, onClose, onApiKeyChange, isLoggedIn: log
       setBackupError('请选择有效的备份文件（.zip 格式）');
       return;
     }
-
     setIsBackupActive(true);
     setBackupError(null);
     setBackupSuccess(null);
@@ -411,104 +144,31 @@ export function SettingsModal({ isOpen, onClose, onApiKeyChange, isLoggedIn: log
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
-  // ===== M2 T2.6: 本地配置一键迁移（localStorage → 设置 API） =====
-  const [migrating, setMigrating] = useState(false);
-  const [migrationDone, setMigrationDone] = useState(false);
-
-  const hasLegacySettings = () => {
-    if (typeof window === 'undefined') return false;
-    return LEGACY_SETTING_KEYS_TO_CLEAR.some((key) => window.localStorage.getItem(key) !== null);
-  };
-
-  const handleMigrate = async () => {
-    if (!loggedIn) {
-      onRequireLogin?.();
-      return;
-    }
-    setMigrating(true);
-    setError(null);
-    setSuccess(null);
-    try {
-      const legacy: Record<string, unknown> = {};
-      for (const key of LEGACY_SETTING_KEYS_TO_CLEAR) {
-        const raw = window.localStorage.getItem(key);
-        if (raw === null) continue;
-        try {
-          legacy[key] = JSON.parse(raw);
-        } catch {
-          legacy[key] = raw;
-        }
-      }
-      if (Object.keys(legacy).length === 0) {
-        setSuccess('没有发现可迁移的本地配置');
-        return;
-      }
-      const summary = await importSettings(legacy);
-      // 服务端导入成功后清除已迁移的 key
-      for (const key of LEGACY_SETTING_KEYS_TO_CLEAR) {
-        try {
-          window.localStorage.removeItem(key);
-        } catch {
-          // ignore
-        }
-      }
-      // 重新从 API 加载注册表
-      const registry = await loadRegistryFromApi();
-      prevRegistryRef.current = registry;
-      setRegistryCache(registry);
-      setImageModels(registry.imageModels.map(cloneImageModel));
-      setTextModels(registry.textModels.map(cloneTextModel));
-      setDefaults(normalizeDefaults(registry.defaults, registry.imageModels, registry.textModels));
-      setSelectedImageModelId(registry.imageModels[0]?.id || '');
-      setSelectedTextModelId(registry.textModels[0]?.id || '');
-      syncDynamicModelExports();
-      window.dispatchEvent(new Event('nova-model-registry-updated'));
-      onApiKeyChange?.(hasAnyApiKey());
-      setMigrationDone(true);
-      setSuccess(`迁移完成：模型 ${summary.modelsCreated} 个，设置 ${summary.settingsWritten} 项`);
-    } catch (err) {
-      setError(err instanceof Error ? `迁移失败：${err.message}` : '迁移失败');
-    } finally {
-      setMigrating(false);
-    }
-  };
-
-  const completeImageOptions = imageModels.filter(isCompleteImageModel).map((model) => ({ value: model.id, label: model.name }));
-  const completeTextOptions = textModels.filter(isCompleteTextModel).map((model) => ({ value: model.id, label: model.name }));
-  const selectedImageOutputSizes = selectedImageModel
-    ? getImageModelOutputSizes({
-        ...selectedImageModel,
-        maxOutputSize: BUILTIN_IMAGE_PRESETS[selectedImageModel.builtinPreset].maxOutputSize,
-      })
-    : ['1K'];
-
   return (
     <Dialog open={isOpen} onOpenChange={(open) => {
       if (!open && isBackupActive) return;
       if (!open) onClose();
     }}>
-      <DialogContent className="flex max-h-[92vh] flex-col overflow-hidden p-0 pt-0 gap-0 sm:max-w-5xl">
+      <DialogContent className="flex max-h-[92vh] flex-col overflow-hidden p-0 pt-0 gap-0 sm:max-w-2xl">
         <DialogHeader className="p-4 pb-3">
           <div className="flex items-center gap-2">
             <Settings className="w-5 h-5 text-muted-foreground" />
             <DialogTitle>设置</DialogTitle>
           </div>
-          <DialogDescription>按模型分别配置协议、URL 和 API Key。至少完成一个图片模型和一个文本模型后，外部功能才会解锁。</DialogDescription>
+          <DialogDescription>
+            模型账号由管理员统一配置（账号池）；此处仅设置各工作流的默认模型。
+          </DialogDescription>
         </DialogHeader>
 
-        <Tabs defaultValue="models" className="min-h-0 flex-1 gap-0">
+        <Tabs defaultValue="defaults" className="min-h-0 flex-1 gap-0">
           <TabsList className="w-full rounded-none border-b bg-transparent h-auto p-0">
-            <TabsTrigger value="models" className="gap-2 rounded-none border-b-2 border-transparent data-active:border-primary data-active:bg-transparent data-active:shadow-none px-4 py-3">
-              <ImageIcon className="w-4 h-4" />
-              模型配置
+            <TabsTrigger value="defaults" className="gap-2 rounded-none border-b-2 border-transparent data-active:border-primary data-active:bg-transparent data-active:shadow-none px-4 py-3">
+              <Settings className="w-4 h-4" />
+              默认模型
             </TabsTrigger>
             <TabsTrigger value="backup" className="gap-2 rounded-none border-b-2 border-transparent data-active:border-primary data-active:bg-transparent data-active:shadow-none px-4 py-3">
               <Database className="w-4 h-4" />
               备份
-            </TabsTrigger>
-            <TabsTrigger value="migrate" className="gap-2 rounded-none border-b-2 border-transparent data-active:border-primary data-active:bg-transparent data-active:shadow-none px-4 py-3">
-              <Upload className="w-4 h-4" />
-              迁移
             </TabsTrigger>
             <TabsTrigger value="about" className="gap-2 rounded-none border-b-2 border-transparent data-active:border-primary data-active:bg-transparent data-active:shadow-none px-4 py-3">
               <Info className="w-4 h-4" />
@@ -516,301 +176,50 @@ export function SettingsModal({ isOpen, onClose, onApiKeyChange, isLoggedIn: log
             </TabsTrigger>
           </TabsList>
 
-          <TabsContent value="models" className="min-h-0 overflow-y-auto p-4 sm:p-6 mt-0 space-y-6">
-            {!loggedIn && (
+          <TabsContent value="defaults" className="min-h-0 overflow-y-auto p-4 sm:p-6 space-y-4 mt-0">
+            {loading && <div className="rounded-lg bg-muted/50 p-4 text-sm text-muted-foreground">正在加载...</div>}
+            {!loading && registry.imageModels.length === 0 && registry.textModels.length === 0 && (
               <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm space-y-2">
-                <p className="text-amber-700 dark:text-amber-400">模型配置已迁移到服务器，需要登录后才能查看与管理。</p>
-                <Button size="sm" variant="outline" className="gap-2" onClick={() => onRequireLogin?.()}>
-                  <User className="w-4 h-4" />
-                  去登录
-                </Button>
+                <p className="text-amber-700 dark:text-amber-400">
+                  模型目录暂无可用模型。请联系管理员在「管理控制台 → 账号池管理 → 模型目录」中配置。
+                </p>
               </div>
             )}
-            {loading && <div className="rounded-lg bg-muted/50 p-4 text-sm text-muted-foreground">正在加载设置...</div>}
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="space-y-1">
-                <p className="text-sm font-medium">模型级独立配置</p>
-                <p className="text-xs text-muted-foreground">每个模型单独记录协议、Base URL、API Key。外部只显示配置完整的模型。</p>
-              </div>
-              <Button onClick={persistRegistry} className="gap-2">
-                <Save className="w-4 h-4" />
-                保存设置
-              </Button>
-            </div>
-
             {error && <div className="rounded-lg border border-destructive/20 bg-destructive/10 p-3 text-sm text-destructive">{error}</div>}
             {success && <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/10 p-3 text-sm text-emerald-700 dark:text-emerald-400">{success}</div>}
 
-            <div className="rounded-xl border p-4 space-y-4">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <p className="font-medium">图片模型</p>
-                  <p className="text-xs text-muted-foreground">无默认示范记录。请至少完成一个图片模型。</p>
-                </div>
-                <Button variant="outline" size="sm" className="gap-2" onClick={handleAddImageModel}>
-                  <Plus className="w-4 h-4" />
-                  新增图片模型
-                </Button>
+            <div className="grid gap-3 md:grid-cols-2">
+              <div className="space-y-2">
+                <label className="text-xs text-muted-foreground">文生图默认模型</label>
+                <Select value={defaults.textToImage} onValueChange={(v) => setDefaults((prev) => ({ ...prev, textToImage: v }))} options={imageOptions} placeholder="选择模型" />
               </div>
-
-              <div className="grid gap-4 xl:grid-cols-[220px_minmax(0,1fr)]">
-                <div className="space-y-2">
-                  {imageModels.map((model) => (
-                    <button
-                      key={model.id}
-                      type="button"
-                      onClick={() => setSelectedImageModelId(model.id)}
-                      className={`w-full rounded-lg border px-3 py-2 text-left text-sm ${selectedImageModelId === model.id ? 'border-primary bg-primary/5' : 'border-border hover:bg-muted/50'}`}
-                    >
-                      <div className="font-medium">{model.name || '未命名模型'}</div>
-                      <div className="text-xs text-muted-foreground">{isCompleteImageModel(model) ? '配置完成' : '待补全'}</div>
-                    </button>
-                  ))}
-                </div>
-
-                {selectedImageModel && (
-                  <div className="grid gap-3 md:grid-cols-2">
-                    <div className="space-y-2">
-                      <label className="text-xs text-muted-foreground">内置模板</label>
-                      <Select
-                        value={selectedImageModel.builtinPreset}
-                        onValueChange={(value) => handleUpdateImageModel(selectedImageModel.id, { builtinPreset: value as ImageModelConfig['builtinPreset'] })}
-                        options={BUILTIN_IMAGE_PRESET_OPTIONS}
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-xs text-muted-foreground">协议</label>
-                      <Select
-                        value={selectedImageModel.protocol}
-                        onValueChange={(value) => handleUpdateImageModel(selectedImageModel.id, { protocol: value as ProviderProtocol })}
-                        options={[
-                          { value: 'google', label: 'Google' },
-                          { value: 'openai', label: 'OpenAI Images' },
-                          { value: 'grok', label: 'Grok Images' },
-                        ]}
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-xs text-muted-foreground">显示名称</label>
-                      <Input value={selectedImageModel.name} onChange={(event) => handleUpdateImageModel(selectedImageModel.id, { name: event.target.value })} />
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-xs text-muted-foreground">模型 ID</label>
-                      <Input value={selectedImageModel.modelId} onChange={(event) => handleUpdateImageModel(selectedImageModel.id, { modelId: event.target.value })} />
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-xs text-muted-foreground">Base URL</label>
-                      <Input value={selectedImageModel.baseUrl} onChange={(event) => handleUpdateImageModel(selectedImageModel.id, { baseUrl: event.target.value })} />
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-xs text-muted-foreground">API Key</label>
-                      <div className="relative">
-                        <Input
-                          type={showImageApiKey ? "text" : "password"}
-                          value={selectedImageModel.apiKey}
-                          onChange={(event) => handleUpdateImageModel(selectedImageModel.id, { apiKey: event.target.value })}
-                          className="pr-8"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setShowImageApiKey(!showImageApiKey)}
-                          className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center justify-center w-6 h-6 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-                          tabIndex={-1}
-                        >
-                          {showImageApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                        </button>
-                      </div>
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-xs text-muted-foreground">最大参考图数量</label>
-                      <Input
-                        type="number"
-                        min={0}
-                        value={selectedImageModel.maxRefImages}
-                        onChange={(event) => {
-                          const next = Number(event.target.value);
-                          handleUpdateImageModel(selectedImageModel.id, {
-                            maxRefImages: Number.isFinite(next) && next >= 0 ? Math.floor(next) : 0,
-                          });
-                        }}
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-xs text-muted-foreground">最大分辨率</label>
-                      <Select
-                        value={selectedImageModel.maxOutputSize}
-                        onValueChange={(value) => handleUpdateImageModel(selectedImageModel.id, { maxOutputSize: value as ImageModelConfig['maxOutputSize'] })}
-                        options={selectedImageOutputSizes.map((size) => ({ value: size, label: size === '512' ? '0.5K' : size }))}
-                      />
-                    </div>
-                    {selectedImageModel.protocol === 'openai' && (
-                      <div className="flex items-center justify-between rounded-lg border px-3 py-2 md:col-span-2">
-                        <div>
-                          <p className="text-sm font-medium">Image 2 额外参数</p>
-                          <p className="text-xs text-muted-foreground">透明度、质量、风格控件默认开启，用户可手动关闭。</p>
-                        </div>
-                        <Switch
-                          checked={selectedImageModel.supportsAdvancedParams}
-                          onCheckedChange={(checked) => handleUpdateImageModel(selectedImageModel.id, { supportsAdvancedParams: checked })}
-                        />
-                      </div>
-                    )}
-                    <div className="md:col-span-2 flex justify-end">
-                      <Button variant="outline" size="sm" className="gap-2 text-destructive hover:text-destructive" onClick={() => handleDeleteImageModel(selectedImageModel.id)}>
-                        <Trash2 className="w-4 h-4" />
-                        删除模型
-                      </Button>
-                    </div>
-                  </div>
-                )}
+              <div className="space-y-2">
+                <label className="text-xs text-muted-foreground">图生图默认模型</label>
+                <Select value={defaults.imageToImage} onValueChange={(v) => setDefaults((prev) => ({ ...prev, imageToImage: v }))} options={imageOptions} placeholder="选择模型" />
+              </div>
+              <div className="space-y-2">
+                <label className="text-xs text-muted-foreground">反推提示词默认模型</label>
+                <Select value={defaults.reversePrompt} onValueChange={(v) => setDefaults((prev) => ({ ...prev, reversePrompt: v }))} options={textOptions} placeholder="选择模型" />
+              </div>
+              <div className="space-y-2">
+                <label className="text-xs text-muted-foreground">Agent 默认模型</label>
+                <Select value={defaults.agent} onValueChange={(v) => setDefaults((prev) => ({ ...prev, agent: v }))} options={textOptions} placeholder="选择模型" />
+              </div>
+              <div className="space-y-2">
+                <label className="text-xs text-muted-foreground">提示词优化默认模型</label>
+                <Select value={defaults.promptOptimize} onValueChange={(v) => setDefaults((prev) => ({ ...prev, promptOptimize: v }))} options={textOptions} placeholder="选择模型" />
+              </div>
+              <div className="space-y-2">
+                <label className="text-xs text-muted-foreground">图片描述默认模型</label>
+                <Select value={defaults.imageDescribe} onValueChange={(v) => setDefaults((prev) => ({ ...prev, imageDescribe: v }))} options={textOptions} placeholder="选择模型" />
               </div>
             </div>
 
-            <div className="rounded-xl border p-4 space-y-4">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <p className="font-medium">文本模型</p>
-                  <p className="text-xs text-muted-foreground">无默认示范记录。请至少完成一个文本模型。</p>
-                </div>
-                <Button variant="outline" size="sm" className="gap-2" onClick={handleAddTextModel}>
-                  <Plus className="w-4 h-4" />
-                  新增文本模型
-                </Button>
-              </div>
-
-              <div className="grid gap-4 xl:grid-cols-[220px_minmax(0,1fr)]">
-                <div className="space-y-2">
-                  {textModels.map((model) => (
-                    <button
-                      key={model.id}
-                      type="button"
-                      onClick={() => setSelectedTextModelId(model.id)}
-                      className={`w-full rounded-lg border px-3 py-2 text-left text-sm ${selectedTextModelId === model.id ? 'border-primary bg-primary/5' : 'border-border hover:bg-muted/50'}`}
-                    >
-                      <div className="font-medium">{model.name || '未命名模型'}</div>
-                      <div className="text-xs text-muted-foreground">{isCompleteTextModel(model) ? '配置完成' : '待补全'}</div>
-                    </button>
-                  ))}
-                </div>
-
-                {selectedTextModel && (
-                  <div className="grid gap-3 md:grid-cols-2">
-                    <div className="space-y-2">
-                      <label className="text-xs text-muted-foreground">协议</label>
-                      <Select
-                        value={selectedTextModel.protocol}
-                        onValueChange={(value) => {
-                          const protocol = value as TextProviderProtocol;
-                          handleUpdateTextModel(selectedTextModel.id, { protocol });
-                          handleApplyTextTemplate(selectedTextModel.id, protocol);
-                        }}
-                        options={[
-                          { value: 'openai-responses', label: getTextProviderLabel('openai-responses') },
-                          { value: 'openai-chat-completions', label: getTextProviderLabel('openai-chat-completions') },
-                          { value: 'anthropic-messages', label: getTextProviderLabel('anthropic-messages') },
-                          { value: 'google-gemini', label: getTextProviderLabel('google-gemini') },
-                        ]}
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-xs text-muted-foreground">显示名称</label>
-                      <Input value={selectedTextModel.name} onChange={(event) => handleUpdateTextModel(selectedTextModel.id, { name: event.target.value })} />
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-xs text-muted-foreground">模型 ID</label>
-                      <Input value={selectedTextModel.modelId} onChange={(event) => handleUpdateTextModel(selectedTextModel.id, { modelId: event.target.value })} />
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-xs text-muted-foreground">Base URL</label>
-                      <Input value={selectedTextModel.baseUrl} onChange={(event) => handleUpdateTextModel(selectedTextModel.id, { baseUrl: event.target.value })} />
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-xs text-muted-foreground">API Key</label>
-                      <div className="relative">
-                        <Input
-                          type={showTextApiKey ? "text" : "password"}
-                          value={selectedTextModel.apiKey}
-                          onChange={(event) => handleUpdateTextModel(selectedTextModel.id, { apiKey: event.target.value })}
-                          className="pr-8"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setShowTextApiKey(!showTextApiKey)}
-                          className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center justify-center w-6 h-6 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-                          tabIndex={-1}
-                        >
-                          {showTextApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                        </button>
-                      </div>
-                    </div>
-                    <div className="space-y-2 md:col-span-2">
-                      <label className="text-xs text-muted-foreground">协议描述</label>
-                      <Input value={selectedTextModel.note || ''} onChange={(event) => handleUpdateTextModel(selectedTextModel.id, { note: event.target.value })} />
-                    </div>
-                    <div className="md:col-span-2 flex justify-end">
-                      <Button variant="outline" size="sm" className="gap-2 text-destructive hover:text-destructive" onClick={() => handleDeleteTextModel(selectedTextModel.id)}>
-                        <Trash2 className="w-4 h-4" />
-                        删除模型
-                      </Button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <div className="rounded-xl border p-4 space-y-4">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <p className="font-medium">默认模型</p>
-                  <p className="text-xs text-muted-foreground">这里只会显示已经配置完整的模型。</p>
-                </div>
-                <Button variant="outline" size="sm" className="gap-2" onClick={handleCheckModels} disabled={checkingModels}>
-                  <RefreshCw className={`w-4 h-4 ${checkingModels ? 'animate-spin' : ''}`} />
-                  {checkingModels ? '检查中...' : '检查模型'}
-                </Button>
-              </div>
-
-              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                <div className="space-y-2">
-                  <label className="text-xs text-muted-foreground">文生图默认模型</label>
-                  <Select value={defaults.textToImage} onValueChange={(value) => setDefaults((prev) => ({ ...prev, textToImage: value }))} options={completeImageOptions} />
-                </div>
-                <div className="space-y-2">
-                  <label className="text-xs text-muted-foreground">图生图默认模型</label>
-                  <Select value={defaults.imageToImage} onValueChange={(value) => setDefaults((prev) => ({ ...prev, imageToImage: value }))} options={completeImageOptions} />
-                </div>
-                <div className="space-y-2">
-                  <label className="text-xs text-muted-foreground">反推提示词默认模型</label>
-                  <Select value={defaults.reversePrompt} onValueChange={(value) => setDefaults((prev) => ({ ...prev, reversePrompt: value }))} options={completeTextOptions} />
-                </div>
-                <div className="space-y-2">
-                  <label className="text-xs text-muted-foreground">Agent 默认模型</label>
-                  <Select value={defaults.agent} onValueChange={(value) => setDefaults((prev) => ({ ...prev, agent: value }))} options={completeTextOptions} />
-                </div>
-                <div className="space-y-2">
-                  <label className="text-xs text-muted-foreground">提示词优化默认模型</label>
-                  <Select value={defaults.promptOptimize} onValueChange={(value) => setDefaults((prev) => ({ ...prev, promptOptimize: value }))} options={completeTextOptions} />
-                </div>
-                <div className="space-y-2">
-                  <label className="text-xs text-muted-foreground">图片描述默认模型</label>
-                  <Select value={defaults.imageDescribe} onValueChange={(value) => setDefaults((prev) => ({ ...prev, imageDescribe: value }))} options={completeTextOptions} />
-                </div>
-              </div>
-
-              {modelCheckError && <div className="rounded-lg border border-destructive/20 bg-destructive/10 p-3 text-sm text-destructive">{modelCheckError}</div>}
-              {modelStatuses && (
-                <div className="grid gap-2 md:grid-cols-2">
-                  {modelStatuses.map((status) => (
-                    <div key={status.modelId} className="flex items-center justify-between rounded-lg bg-muted/50 px-3 py-2 text-sm">
-                      <div className="min-w-0">
-                        <div className="truncate font-medium">{getTextModelLabel(textModels, status.modelId) ?? getImageModelLabel(imageModels, status.modelId) ?? status.actualName ?? status.modelId}</div>
-                        <div className="truncate text-xs text-muted-foreground">{status.message || status.actualName || status.modelId}</div>
-                      </div>
-                      {status.available ? <CheckCircle2 className="w-4 h-4 text-emerald-600" /> : <XCircle className="w-4 h-4 text-destructive" />}
-                    </div>
-                  ))}
-                </div>
-              )}
+            <div className="flex justify-end">
+              <Button onClick={() => void handleSave()} disabled={saving || loading} className="gap-2">
+                <Save className="w-4 h-4" />
+                {saving ? '保存中...' : '保存默认模型'}
+              </Button>
             </div>
           </TabsContent>
 
@@ -818,7 +227,7 @@ export function SettingsModal({ isOpen, onClose, onApiKeyChange, isLoggedIn: log
             <div className="space-y-4">
               <div className="space-y-2">
                 <h3 className="text-base font-medium">数据备份与恢复</h3>
-                <p className="text-sm text-muted-foreground">导出所有数据（模型配置、任务历史、设置、图片）为 ZIP 压缩包，或从备份文件恢复数据。</p>
+                <p className="text-sm text-muted-foreground">导出任务历史、设置与图片为 ZIP 压缩包，或从备份文件恢复数据。</p>
               </div>
 
               <BackupProgress percent={backupProgress.percent} message={backupProgress.message} isActive={isBackupActive} />
@@ -829,7 +238,6 @@ export function SettingsModal({ isOpen, onClose, onApiKeyChange, isLoggedIn: log
                   <p className="text-sm text-emerald-900 dark:text-emerald-100">{backupSuccess}</p>
                 </div>
               )}
-
               {backupError && !isBackupActive && (
                 <div className="flex items-start gap-3 rounded-lg border border-destructive/20 bg-destructive/10 p-4">
                   <XCircle className="w-5 h-5 text-destructive flex-shrink-0 mt-0.5" />
@@ -842,8 +250,8 @@ export function SettingsModal({ isOpen, onClose, onApiKeyChange, isLoggedIn: log
                   <Download className="w-5 h-5 text-muted-foreground mt-0.5" />
                   <div className="flex-1 space-y-2">
                     <h4 className="font-medium">导出数据</h4>
-                    <p className="text-sm text-muted-foreground">将所有数据打包为 ZIP 文件下载到本地。备份文件包含模型配置和本地记录，请自行保管。</p>
-                    <Button onClick={handleExport} disabled={isBackupActive} className="gap-2">
+                    <p className="text-sm text-muted-foreground">将所有本地数据打包为 ZIP 文件下载。</p>
+                    <Button onClick={() => void handleExport()} disabled={isBackupActive} className="gap-2">
                       <Download className="w-4 h-4" />
                       全量备份
                     </Button>
@@ -856,60 +264,12 @@ export function SettingsModal({ isOpen, onClose, onApiKeyChange, isLoggedIn: log
                   <Upload className="w-5 h-5 text-muted-foreground mt-0.5" />
                   <div className="flex-1 space-y-2">
                     <h4 className="font-medium">导入数据</h4>
-                    <p className="text-sm text-muted-foreground">从备份文件恢复数据。<span className="font-medium text-destructive">警告：这会覆盖现有数据。</span></p>
+                    <p className="text-sm text-muted-foreground"><span className="font-medium text-destructive">警告：这会覆盖现有数据。</span></p>
                     <input ref={fileInputRef} type="file" accept=".zip" onChange={handleFileSelect} className="hidden" />
                     <Button onClick={() => fileInputRef.current?.click()} disabled={isBackupActive} variant="outline" className="gap-2">
                       <Upload className="w-4 h-4" />
                       选择备份文件
                     </Button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </TabsContent>
-
-          <TabsContent value="migrate" className="min-h-0 overflow-y-auto p-4 sm:p-6 space-y-6 mt-0">
-            <div className="space-y-4">
-              <div className="space-y-2">
-                <h3 className="text-base font-medium">本地配置一键迁移</h3>
-                <p className="text-sm text-muted-foreground">
-                  将旧版保存在浏览器 localStorage 中的模型配置、表单默认值与 Agent 开关一键导入到当前登录账号（服务器加密存储）。
-                  迁移成功后本地旧 key 会被清除，功能与迁移前一致。
-                </p>
-              </div>
-
-              {!loggedIn && (
-                <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm">
-                  迁移需要登录账号，请先登录。
-                </div>
-              )}
-
-              <div className="space-y-3 rounded-lg border p-4">
-                <div className="flex items-start gap-3">
-                  <Wand2 className="w-5 h-5 text-muted-foreground mt-0.5" />
-                  <div className="flex-1 space-y-2">
-                    <h4 className="font-medium">导入本地配置</h4>
-                    <p className="text-sm text-muted-foreground">
-                      {hasLegacySettings()
-                        ? '检测到浏览器中存在旧版本地配置，可一键迁移到服务器。'
-                        : '未检测到旧版本地配置。'}
-                    </p>
-                    <Button onClick={() => void handleMigrate()} disabled={migrating || !loggedIn} className="gap-2">
-                      <Wand2 className="w-4 h-4" />
-                      {migrating ? '迁移中...' : '开始迁移'}
-                    </Button>
-                  </div>
-                </div>
-              </div>
-
-              <div className="space-y-3 rounded-lg border p-4">
-                <div className="flex items-start gap-3">
-                  <Download className="w-5 h-5 text-muted-foreground mt-0.5" />
-                  <div className="flex-1 space-y-2">
-                    <h4 className="font-medium">先导出再导入（手动）</h4>
-                    <p className="text-sm text-muted-foreground">
-                      旧备份 ZIP（localStorage.json 含 nova-model-registry）可在“备份”页导入，系统会自动识别并迁移到服务器。
-                    </p>
                   </div>
                 </div>
               </div>
@@ -922,28 +282,21 @@ export function SettingsModal({ isOpen, onClose, onApiKeyChange, isLoggedIn: log
               <p className="text-sm text-muted-foreground">
                 项目地址：
                 {' '}
-                <a
-                  href="https://github.com/tianjiangqiji/nova-image-studio"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1 text-primary hover:underline"
-                >
+                <a href="https://github.com/tianjiangqiji/nova-image-studio" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-primary hover:underline">
                   tianjiangqiji/nova-image-studio <ExternalLink className="w-3 h-3" />
                 </a>
               </p>
-
               <details className="group rounded-lg bg-muted/50 p-3">
                 <summary className="flex cursor-pointer select-none items-center gap-2 font-medium">
                   <span className="text-[10px] opacity-60 transition-transform group-open:rotate-90">▶</span>
                   使用方法
                 </summary>
                 <ol className="mt-3 list-decimal list-inside space-y-2 text-muted-foreground">
-                  <li>先完成至少一个图片模型和一个文本模型的全部信息。</li>
-                  <li>保存后，外部工作区只会显示这些配置完整的模型。</li>
-                  <li>再为各工作流指定默认模型，即可开始生图、反推或 Agent 工作流。</li>
+                  <li>模型账号由管理员在「账号池管理」中统一配置。</li>
+                  <li>在「默认模型」中为各工作流选择默认模型（无可用账号的模型不可选）。</li>
+                  <li>即可开始生图、反推或 Agent 工作流。</li>
                 </ol>
               </details>
-
               <details className="group rounded-lg bg-muted/50 p-3">
                 <summary className="flex cursor-pointer select-none items-center gap-2 font-medium">
                   <span className="text-[10px] opacity-60 transition-transform group-open:rotate-90">▶</span>
@@ -973,52 +326,6 @@ export function SettingsModal({ isOpen, onClose, onApiKeyChange, isLoggedIn: log
                     <a href={BING_WALLPAPER_URL} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-primary hover:underline">
                       bing.img.run <ExternalLink className="w-3 h-3" />
                     </a>
-                  </li>
-                </ul>
-              </details>
-
-              <details className="group rounded-lg bg-muted/50 p-3">
-                <summary className="flex cursor-pointer select-none items-center gap-2 font-medium">
-                  <span className="text-[10px] opacity-60 transition-transform group-open:rotate-90">▶</span>
-                  隐私条款
-                </summary>
-                <ul className="mt-3 list-disc list-inside space-y-2 text-muted-foreground">
-                  <li>本站为本地优先应用：模型配置、任务历史、设置与生成图片默认保存在你的浏览器本地。</li>
-                  <li>每个模型的 API Key 和 Base URL 仅用于调用你自己配置的上游服务。</li>
-                  <li>生图、反推、Agent、提示词优化等功能会把你当前选择的提示词、参考图或对话内容发送到对应模型配置的上游接口。</li>
-                  <li>备份文件可能包含模型配置、本地任务记录与图片数据，请自行妥善保管。</li>
-                </ul>
-              </details>
-
-              <details className="group rounded-lg bg-muted/50 p-3">
-                <summary className="flex cursor-pointer select-none items-center gap-2 font-medium">
-                  <span className="text-[10px] opacity-60 transition-transform group-open:rotate-90">▶</span>
-                  参考项目
-                </summary>
-                <ul className="mt-3 list-disc list-inside space-y-2 text-muted-foreground">
-                  <li>
-                    项目仓库：
-                    {' '}
-                    <a href="https://github.com/tianjiangqiji/nova-image-studio" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-primary hover:underline">
-                      tianjiangqiji/nova-image-studio <ExternalLink className="w-3 h-3" />
-                    </a>
-                  </li>
-                  <li>
-                    基于
-                    {' '}
-                    <a href="https://github.com/aaronkwhite/nanobanana-studio-web" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-primary hover:underline">
-                      aaronkwhite/nanobanana-studio-web <ExternalLink className="w-3 h-3" />
-                    </a>
-                    {' '}
-                    修改而来。
-                  </li>
-                  <li>
-                    无限画布工作区参考
-                    {' '}
-                    <a href="https://github.com/basketikun/infinite-canvas" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-primary hover:underline">
-                      basketikun/infinite-canvas <ExternalLink className="w-3 h-3" />
-                    </a>
-                    。
                   </li>
                 </ul>
               </details>

@@ -971,7 +971,6 @@ export function ImageToImageForm({
       <MissingApiKeyDialog
         open={missingApiKeyDialogOpen}
         onOpenChange={setMissingApiKeyDialogOpen}
-        onConfigure={() => onConfigureApiKey?.()}
       />
       <QuickPromptDialog
         open={quickPromptOpen}

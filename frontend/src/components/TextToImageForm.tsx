@@ -416,7 +416,6 @@ export function TextToImageForm({ onSubmit, disabled = false, onDraftConsumed, o
       <MissingApiKeyDialog
         open={missingApiKeyDialogOpen}
         onOpenChange={setMissingApiKeyDialogOpen}
-        onConfigure={() => onConfigureApiKey?.()}
       />
       <QuickPromptDialog
         open={quickPromptOpen}

@@ -13,10 +13,17 @@
 const TOKEN_KEY = 'nova-auth-token';
 const AUTH_CHANGED_EVENT = 'nova-auth-changed';
 
+/** WIN-25 (T22): 任意 401 触发 → AuthGate 引导登录页（A17 双收口）。 */
+const AUTH_REQUIRED_EVENT = 'nova-auth-required';
+
 export interface AuthUser {
   id: string;
   username: string;
   role: string;
+  /** WIN-25 (T14, G.3): /api/auth/me 扩展字段。 */
+  roles?: string[];
+  permissions?: string[];
+  status?: string;
 }
 
 let cachedUser: AuthUser | null | undefined; // undefined = 未请求过
@@ -40,13 +47,23 @@ export function isLoggedIn(): boolean {
   return Boolean(getToken());
 }
 
-/** 带鉴权的 fetch：已登录时自动附加 Bearer token。 */
+/** 带鉴权的 fetch：已登录时自动附加 Bearer token；401 全局引导登录（T22）。 */
 export async function authFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
   const headers = new Headers(init.headers || {});
   for (const [k, v] of Object.entries(getAuthHeaders())) {
     headers.set(k, v);
   }
-  return fetch(input, { ...init, headers });
+  const response = await fetch(input, { ...init, headers });
+  if (response.status === 401 && isLoggedIn()) {
+    // WIN-25 (T22, A17): 接口 401 → 清 token + 广播登录门禁（AuthGate 切登录页）
+    clearToken();
+    cachedUser = null;
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new Event(AUTH_REQUIRED_EVENT));
+      window.dispatchEvent(new Event(AUTH_CHANGED_EVENT));
+    }
+  }
+  return response;
 }
 
 /** 当前登录态的 Authorization 头（未登录返回空对象）——供裸 fetch 路径统一注入。 */
@@ -79,6 +96,18 @@ export async function register(username: string, password: string): Promise<Auth
   if (!response.ok) throw await readApiError(response);
   const data = (await response.json()) as AuthUser;
   return data;
+}
+
+/** WIN-25 (D3): 基础忘记密码 —— 提交申请 → 引导联系管理员重置。 */
+export async function forgotPassword(username: string): Promise<string> {
+  const response = await fetch('/api/auth/forgot-password', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username }),
+  });
+  if (!response.ok) throw await readApiError(response);
+  const data = (await response.json()) as { message?: string };
+  return data?.message || '已收到申请，请联系管理员重置密码';
 }
 
 export async function login(username: string, password: string): Promise<AuthUser> {
@@ -136,6 +165,12 @@ export function getCachedUser(): AuthUser | null | undefined {
 export function onAuthChange(listener: () => void): () => void {
   window.addEventListener(AUTH_CHANGED_EVENT, listener);
   return () => window.removeEventListener(AUTH_CHANGED_EVENT, listener);
+}
+
+/** WIN-25 (T22): 订阅「401 要求重新登录」事件（AuthGate 据此切登录页）。 */
+export function onAuthRequired(listener: () => void): () => void {
+  window.addEventListener(AUTH_REQUIRED_EVENT, listener);
+  return () => window.removeEventListener(AUTH_REQUIRED_EVENT, listener);
 }
 
 /** 供测试/重置使用。 */
