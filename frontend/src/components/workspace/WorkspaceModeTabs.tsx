@@ -1,12 +1,13 @@
 'use client';
 
 import { useRef } from 'react';
-import { Bot, Film, Frame, Images, LibraryBig, ScanSearch, Sparkles } from 'lucide-react';
+import { BarChart3, Bot, Film, Frame, Images, LibraryBig, ScanSearch, Sparkles } from 'lucide-react';
 import { TabsList, TabsTrigger } from '@/components/ui/tabs';
 
 interface WorkspaceModeTabsProps {
   wideMode?: boolean;
   showPromptGallery?: boolean;
+  showUsageMe?: boolean; // WIN-29 (T24): 我的用量（usage.me 权限）
 }
 
 const horizontalTriggerClass =
@@ -24,10 +25,12 @@ const tabs = [
 ] as const;
 
 const galleryTab = { value: 'prompt-gallery', icon: LibraryBig, label: '提示词广场' } as const;
+const usageMeTab = { value: 'usage-me', icon: BarChart3, label: '我的用量' } as const;
 
-export function WorkspaceModeTabs({ wideMode = false, showPromptGallery = false }: WorkspaceModeTabsProps) {
-  const gridCols = showPromptGallery ? 'sm:grid-cols-7' : 'sm:grid-cols-6';
-  const allTabs = showPromptGallery ? [...tabs, galleryTab] : tabs;
+export function WorkspaceModeTabs({ wideMode = false, showPromptGallery = false, showUsageMe = false }: WorkspaceModeTabsProps) {
+  const extraTabs = [...(showPromptGallery ? [galleryTab] : []), ...(showUsageMe ? [usageMeTab] : [])];
+  const gridCols = `sm:grid-cols-${6 + extraTabs.length}`;
+  const allTabs = [...tabs, ...extraTabs];
   const dragStateRef = useRef({
     pointerId: -1,
     startX: 0,

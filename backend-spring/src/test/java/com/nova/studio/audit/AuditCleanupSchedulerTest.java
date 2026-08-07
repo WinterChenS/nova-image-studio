@@ -18,12 +18,14 @@ import static org.mockito.Mockito.when;
 class AuditCleanupSchedulerTest {
 
     private UsageRecordRepository repository;
+    private AuditLogRepository auditLogRepository;
     private AuditCleanupScheduler scheduler;
 
     @BeforeEach
     void setUp() {
         repository = mock(UsageRecordRepository.class);
-        scheduler = new AuditCleanupScheduler(repository, 180);
+        auditLogRepository = mock(AuditLogRepository.class);
+        scheduler = new AuditCleanupScheduler(repository, auditLogRepository, 180);
     }
 
     @Test
@@ -39,6 +41,16 @@ class AuditCleanupSchedulerTest {
         scheduler.cleanup();
         var captor = org.mockito.ArgumentCaptor.forClass(Instant.class);
         verify(repository).deleteBefore(captor.capture());
+        long diffDays = java.time.Duration.between(captor.getValue(), Instant.now()).toDays();
+        assertThat(diffDays).isBetween(179L, 180L);
+    }
+
+    @Test
+    void cleanupAlsoSweepsAuditLogSameRetention() {
+        when(repository.deleteBefore(any())).thenReturn(0);
+        scheduler.cleanup();
+        var captor = org.mockito.ArgumentCaptor.forClass(Instant.class);
+        verify(auditLogRepository).deleteBefore(captor.capture());
         long diffDays = java.time.Duration.between(captor.getValue(), Instant.now()).toDays();
         assertThat(diffDays).isBetween(179L, 180L);
     }

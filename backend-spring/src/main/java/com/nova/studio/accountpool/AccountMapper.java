@@ -39,4 +39,11 @@ public interface AccountMapper extends BaseMapper<AccountEntity> {
 
     @Update("UPDATE ai_accounts SET model_scope = #{modelScopeJson}::jsonb, updated_at = #{updatedAt} WHERE id = #{id}")
     int updateScope(@Param("id") UUID id, @Param("modelScopeJson") String modelScopeJson, @Param("updatedAt") Instant updatedAt);
+
+    /** T26: 当前自然月该账号累计费用（快照 cost 求和）。 */
+    @org.apache.ibatis.annotations.Select("""
+            SELECT COALESCE(SUM(cost), 0) FROM usage_records
+            WHERE account_id = #{accountId} AND created_at >= date_trunc('month', now())
+            """)
+    java.math.BigDecimal monthlyCost(@Param("accountId") UUID accountId);
 }

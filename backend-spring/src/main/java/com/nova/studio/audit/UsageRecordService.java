@@ -1,5 +1,6 @@
 package com.nova.studio.audit;
 
+import com.nova.studio.accountpool.MonthlyCapService;
 import com.nova.studio.accountpool.PricingService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -32,15 +33,18 @@ public class UsageRecordService {
 
     private final UsageRecordMapper mapper;
     private final PricingService pricingService;
+    private final MonthlyCapService monthlyCapService;
     private final LinkedBlockingQueue<Runnable> queue;
     private final Thread consumer;
     private final AtomicBoolean consumerBusy = new AtomicBoolean(false);
 
     public UsageRecordService(UsageRecordMapper mapper,
                               PricingService pricingService,
+                              MonthlyCapService monthlyCapService,
                               @Value("${NOVA_AUDIT_QUEUE_CAPACITY:10000}") int queueCapacity) {
         this.mapper = mapper;
         this.pricingService = pricingService;
+        this.monthlyCapService = monthlyCapService;
         this.queue = new LinkedBlockingQueue<>(Math.max(1, queueCapacity));
         this.consumer = new Thread(this::drainLoop, "usage-record-writer");
         this.consumer.setDaemon(true);
@@ -58,9 +62,14 @@ public class UsageRecordService {
     public int recordSync(UsageRecord rec) {
         String currency = rec.currency() == null || rec.currency().isBlank() ? "CNY" : rec.currency();
         BigDecimal cost = pricingService.computeCost(rec.modelId(), rec.inputTokens(), rec.outputTokens(), currency);
-        return mapper.insertIgnore(rec.userId(), rec.accountId(), rec.modelId(), rec.protocol(), rec.reqType(),
+        int inserted = mapper.insertIgnore(rec.userId(), rec.accountId(), rec.modelId(), rec.protocol(), rec.reqType(),
                 rec.refType(), rec.refId(), rec.status(), rec.inputTokens(), rec.outputTokens(), rec.images(),
                 cost, currency, rec.durationMs(), Instant.now());
+        // T26 (F-31): 达限自动 paused（不删除）—— 写入后检查当前自然月累计费用
+        if (inserted > 0) {
+            monthlyCapService.enforceAfterUsage(rec.accountId());
+        }
+        return inserted;
     }
 
     /** Drains the pending queue and waits for in-flight consumer work (tests / shutdown). */

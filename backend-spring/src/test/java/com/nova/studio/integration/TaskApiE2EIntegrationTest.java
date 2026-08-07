@@ -119,9 +119,9 @@ class TaskApiE2EIntegrationTest {
         textCatalogId = catalogRepository.insert("text", "openai-chat-completions", "E2E 文本模型", "gpt-4o",
                 upstream.url("/").toString(), "{}", null, true, null);
         imageAccountId = accountRepository.insert("E2E-账号", "openai", upstream.url("/").toString(),
-                cryptoService.encrypt("sk-e2e-image-key"), "[]", 100, null, null);
+                cryptoService.encrypt("sk-e2e-image-key"), "[]", 100, null, null, null);
         textAccountId = accountRepository.insert("E2E-文本账号", "openai-chat-completions", upstream.url("/").toString(),
-                cryptoService.encrypt("sk-e2e-text-key"), "[]", 100, null, null);
+                cryptoService.encrypt("sk-e2e-text-key"), "[]", 100, null, null, null);
         accountService.invalidateCaches();
     }
 
@@ -214,6 +214,8 @@ class TaskApiE2EIntegrationTest {
 
         // 提权为 admin（测试内直接改库；生产经 AdminBootstrap —— M2 双写 user_roles + 缓存失效 A14）
         jdbcTemplate.update("UPDATE users SET role='admin' WHERE id=?", userId());
+        // 先删后插（替换角色而非追加，避免 user_roles 双角色残留破坏种子幂等断言）
+        jdbcTemplate.update("DELETE FROM user_roles WHERE user_id = ?", userId());
         jdbcTemplate.update("""
                 INSERT INTO user_roles (user_id, role_id)
                 SELECT u.id, r.id FROM users u, roles r

@@ -20,11 +20,14 @@ public class AuditCleanupScheduler {
     private static final Logger log = LoggerFactory.getLogger(AuditCleanupScheduler.class);
 
     private final UsageRecordRepository repository;
+    private final AuditLogRepository auditLogRepository;
     private final long retentionDays;
 
     public AuditCleanupScheduler(UsageRecordRepository repository,
+                                 AuditLogRepository auditLogRepository,
                                  @Value("${NOVA_AUDIT_RETENTION_DAYS:180}") long retentionDays) {
         this.repository = repository;
+        this.auditLogRepository = auditLogRepository;
         this.retentionDays = Math.max(1, retentionDays);
     }
 
@@ -35,6 +38,11 @@ public class AuditCleanupScheduler {
         int deleted = repository.deleteBefore(cutoff);
         if (deleted > 0) {
             log.info("[audit-cleanup] 清理 {} 条过期用量明细（保留 {} 天）", deleted, retentionDays);
+        }
+        // T29 (A16): audit_log 与 usage 同保留期
+        int auditDeleted = auditLogRepository.deleteBefore(cutoff);
+        if (auditDeleted > 0) {
+            log.info("[audit-cleanup] 清理 {} 条过期变更审计日志（保留 {} 天）", auditDeleted, retentionDays);
         }
     }
 }

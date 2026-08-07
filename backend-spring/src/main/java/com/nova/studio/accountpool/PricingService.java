@@ -2,6 +2,7 @@ package com.nova.studio.accountpool;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import com.nova.studio.audit.AuditLogService;
 import com.nova.studio.infra.HttpErrorException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -22,7 +23,8 @@ import java.util.UUID;
  * T9 (WIN-28) — model price table service ({@code ai_model_pricing}, dual
  * rate B3: per_request_price + price_per_token). Cost is snapshotted at usage
  * write time via {@link #computeCost} — later price edits never change
- * historical usage records (A8).
+ * historical usage records (A8). WIN-29 (T29/A16) — upsert/delete are written
+ * to {@code audit_log}.
  */
 @Service
 public class PricingService {
@@ -35,14 +37,17 @@ public class PricingService {
     private final PricingRepository repository;
     private final CatalogModelRepository catalogRepository;
     private final ObjectMapper objectMapper;
+    private final AuditLogService auditLog;
     private final Cache<PricingKey, Optional<PricingRepository.Row>> cache;
 
     public PricingService(PricingRepository repository,
                           CatalogModelRepository catalogRepository,
-                          ObjectMapper objectMapper) {
+                          ObjectMapper objectMapper,
+                          AuditLogService auditLog) {
         this.repository = repository;
         this.catalogRepository = catalogRepository;
         this.objectMapper = objectMapper;
+        this.auditLog = auditLog;
         this.cache = Caffeine.newBuilder()
                 .expireAfterWrite(Duration.ofSeconds(1)).maximumSize(10_000).build();
     }
@@ -88,6 +93,10 @@ public class PricingService {
         }
         repository.upsert(modelId, currency, perRequest, perToken, adminId);
         cache.invalidate(new PricingKey(modelId, currency));
+        auditLog.record(adminId, "pricing.upsert", "ai_model_pricing", modelId.toString(), Map.of(
+                "currency", currency,
+                "perRequestPrice", perRequest == null ? "" : perRequest.toPlainString(),
+                "pricePerToken", perToken == null ? "" : perToken.toPlainString()));
         return Map.of("modelId", modelId.toString(), "currency", currency,
                 "perRequestPrice", perRequest, "pricePerToken", perToken);
     }
@@ -98,6 +107,8 @@ public class PricingService {
             throw new HttpErrorException(404, "NOT_FOUND", "价格配置不存在");
         }
         cache.invalidate(new PricingKey(modelId, cur));
+        auditLog.record(adminId, "pricing.delete", "ai_model_pricing", modelId.toString(),
+                Map.of("currency", cur));
     }
 
     // ===== cost snapshot (B3 / A8) =====

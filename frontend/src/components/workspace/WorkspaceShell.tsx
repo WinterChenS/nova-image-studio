@@ -25,6 +25,8 @@ import { WorkspaceModeTabs } from '@/components/workspace/WorkspaceModeTabs';
 import { HistoryJobList, type GenerationHistoryFilter, type HistoryClearScope } from '@/components/workspace/results/HistoryJobList';
 import { PromptGalleryAccessDialog, usePromptGalleryAccess } from '@/components/workspace/PromptGalleryAccess';
 import { usePromptGalleryConfig } from '@/hooks/usePromptGalleryConfig';
+import { UsageMePanel } from '@/components/console/UsageMePanel';
+import { hasPerm } from '@/lib/permissions';
 import { ConfirmDialog } from '@/components/workspace/dialogs/ConfirmDialog';
 import { Toast, type ToastData } from '@/components/workspace/Toast';
 import { Button, buttonVariants } from '@/components/ui/button';
@@ -59,13 +61,15 @@ export function WorkspaceShell() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [missingApiKeyDialogOpen, setMissingApiKeyDialogOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'image-generation' | 'agent' | 'canvas' | 'reverse-prompt' | 'gif' | 'prompt-gallery'>('agent');
+  const [activeTab, setActiveTab] = useState<'image-generation' | 'agent' | 'canvas' | 'reverse-prompt' | 'gif' | 'prompt-gallery' | 'usage-me'>('agent');
   const [generationHistoryFilter, setGenerationHistoryFilter] = useState<GenerationHistoryFilter>('all');
   const [generationClearScope, setGenerationClearScope] = useState<HistoryClearScope | null>(null);
   const [referenceDraft, setReferenceDraft] = useState<{ id: number; refImages: RefImageData[]; prompt?: string } | null>(null);
   const workspace = useWorkspaceJobs();
   const galleryConfig = usePromptGalleryConfig();
   const promptGallery = usePromptGalleryAccess(galleryConfig.mode, galleryConfig.passwordEnabled, setError, () => setActiveTab('prompt-gallery'));
+  // T24 (A11): 我的用量 Tab —— usage.me 权限（user 默认角色内置）
+  const showUsageMe = hasPerm('usage.me', user);
 
   // Toast state
   const [toasts, setToasts] = useState<ToastData[]>([]);
@@ -281,7 +285,7 @@ export function WorkspaceShell() {
                 </button>
               )}
               <div className={cn(wideMode ? 'flex flex-col py-4 flex-1' : 'flex flex-col py-1')}>
-                <WorkspaceModeTabs wideMode={wideMode} showPromptGallery={promptGallery.showPromptGallery} />
+                <WorkspaceModeTabs wideMode={wideMode} showPromptGallery={promptGallery.showPromptGallery} showUsageMe={showUsageMe} />
               </div>
 
               {wideMode && (
@@ -442,6 +446,14 @@ export function WorkspaceShell() {
                 <TabsContent value="prompt-gallery" keepMounted>
                   <div className={cn('bg-transparent p-0 shadow-none sm:rounded-2xl sm:bg-card sm:p-4 sm:shadow-sm sm:border sm:border-border', wideMode && 'sm:p-5')}>
                     <PromptGallery wideMode={wideMode} />
+                  </div>
+                </TabsContent>
+              )}
+
+              {showUsageMe && (
+                <TabsContent value="usage-me" keepMounted>
+                  <div className="mx-auto max-w-4xl">
+                    <UsageMePanel />
                   </div>
                 </TabsContent>
               )}

@@ -1,5 +1,6 @@
 package com.nova.studio.accountpool;
 
+import com.nova.studio.audit.AuditLogService;
 import com.nova.studio.infra.HttpErrorException;
 import com.nova.studio.settings.CryptoService;
 import org.junit.jupiter.api.BeforeEach;
@@ -51,7 +52,8 @@ class AccountServiceTest {
             String enc = inv.getArgument(0);
             return enc == null ? null : enc.replaceFirst("^v1:iv:", "");
         });
-        service = new AccountService(repository, catalogRepository, crypto, MAPPER, null);
+        service = new AccountService(repository, catalogRepository, crypto, MAPPER, null,
+                mock(AuditLogService.class));
     }
 
     private AccountRepository.Row row(String status, String protocol, String scopeJson, String healthJson) {
@@ -73,7 +75,7 @@ class AccountServiceTest {
 
     @Test
     void createEncryptsKeyAndReturnsMasked() {
-        when(repository.insert(anyString(), anyString(), anyString(), anyString(), anyString(), any(), any(), any()))
+        when(repository.insert(anyString(), anyString(), anyString(), anyString(), anyString(), any(), any(), any(), any()))
                 .thenReturn(ACCOUNT_ID);
         when(repository.findById(ACCOUNT_ID)).thenReturn(Optional.of(row("active", "openai", "[]", "{}")));
 
@@ -116,7 +118,7 @@ class AccountServiceTest {
 
     @Test
     void createAcceptsEmptyScope() {
-        when(repository.insert(anyString(), anyString(), anyString(), anyString(), anyString(), any(), any(), any()))
+        when(repository.insert(anyString(), anyString(), anyString(), anyString(), anyString(), any(), any(), any(), any()))
                 .thenReturn(ACCOUNT_ID);
         when(repository.findById(ACCOUNT_ID)).thenReturn(Optional.of(row("active", "openai", "[]", "{}")));
 

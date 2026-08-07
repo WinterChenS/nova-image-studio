@@ -522,6 +522,10 @@ export function AccountPoolPanel() {
               <label className="text-xs text-muted-foreground">优先级</label>
               <Input type="number" value={form.priority || '100'} onChange={(e) => setForm((f) => ({ ...f, priority: e.target.value }))} />
             </div>
+            <div className="space-y-1.5">
+              <label className="text-xs text-muted-foreground">月度费用上限（留空不限）</label>
+              <Input type="number" value={form.monthlyCap || ''} onChange={(e) => setForm((f) => ({ ...f, monthlyCap: e.target.value }))} placeholder="如 100（达限自动暂停）" />
+            </div>
             <div className="space-y-1.5 sm:col-span-2">
               <label className="text-xs text-muted-foreground">模型作用域（逗号分隔的目录模型 UUID；留空 = 全部）</label>
               <Input value={form.modelScope || ''} onChange={(e) => setForm((f) => ({ ...f, modelScope: e.target.value }))} placeholder="全部模型" />

@@ -37,4 +37,13 @@ public interface UserRoleMapper extends BaseMapper<UserRoleEntity> {
     /** Role id for a code (admin|user). */
     @Select("SELECT id FROM roles WHERE code = #{code}")
     UUID roleIdByCode(@Param("code") String code);
+
+    /** Permission codes granted to a role (matrix UI, T28). */
+    @Select("""
+            SELECT p.code FROM role_permissions rp
+            JOIN permissions p ON p.id = rp.permission_id
+            WHERE rp.role_id = #{roleId}
+            ORDER BY p.sort_order
+            """)
+    List<String> permissionCodesByRoleId(@Param("roleId") UUID roleId);
 }

@@ -1,5 +1,6 @@
 package com.nova.studio.auth;
 
+import com.nova.studio.audit.AuditLogService;
 import com.nova.studio.infra.HttpErrorException;
 import com.nova.studio.rbac.UserPermissionService;
 import com.nova.studio.rbac.UserRoleRepository;
@@ -31,12 +32,14 @@ public class AdminUserService {
     private final UserRepository repository;
     private final UserRoleRepository userRoleRepository;
     private final UserPermissionService permissionService;
+    private final AuditLogService auditLog;
 
     public AdminUserService(UserRepository repository, UserRoleRepository userRoleRepository,
-                            UserPermissionService permissionService) {
+                            UserPermissionService permissionService, AuditLogService auditLog) {
         this.repository = repository;
         this.userRoleRepository = userRoleRepository;
         this.permissionService = permissionService;
+        this.auditLog = auditLog;
     }
 
     /** All users (id/username/role/status/createdAt/lastLoginAt), newest first. */
@@ -79,6 +82,9 @@ public class AdminUserService {
             // T15 (R4): 双写 user_roles + 失效权限缓存（A14 即时生效）
             userRoleRepository.assignRole(targetId, role);
             permissionService.invalidate(targetId);
+            // T29 (A16): 角色变更落审计日志
+            auditLog.record(operatorId, "user_roles.update", "user_roles", targetId.toString(),
+                    Map.of("username", target.username(), "role", role));
         }
         if (status != null) {
             if (!"active".equals(status) && !"disabled".equals(status)) {

@@ -1,5 +1,6 @@
 package com.nova.studio.accountpool;
 
+import com.nova.studio.audit.AuditLogService;
 import com.nova.studio.infra.HttpErrorException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -39,7 +40,7 @@ class PricingServiceTest {
     void setUp() {
         repository = mock(PricingRepository.class);
         catalogRepository = mock(CatalogModelRepository.class);
-        service = new PricingService(repository, catalogRepository, MAPPER);
+        service = new PricingService(repository, catalogRepository, MAPPER, mock(AuditLogService.class));
     }
 
     private ObjectNode body(String perRequest, String perToken) {

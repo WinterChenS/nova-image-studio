@@ -10,7 +10,7 @@
 
 import { useEffect, useState } from 'react';
 import {
-  ArrowLeft, CreditCard, FolderKanban, Images, Settings, Users, Wallet,
+  ArrowLeft, CreditCard, FolderKanban, Images, Settings, Shield, Users, Wallet,
 } from 'lucide-react';
 import { useAppShell } from '@/components/console/AppShell';
 import { ProjectsPanel } from '@/components/console/ProjectsPanel';
@@ -19,12 +19,13 @@ import { UsersPanel } from '@/components/console/UsersPanel';
 import { SettingsPanel } from '@/components/console/SettingsPanel';
 import { AccountPoolPanel } from '@/components/console/AccountPoolPanel';
 import { AuditPanel } from '@/components/console/AuditPanel';
+import { RbacPanel } from '@/components/console/RbacPanel';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { getCachedUser, getMe, type AuthUser } from '@/lib/auth';
 import { hasPerm } from '@/lib/permissions';
 
-type ConsoleTab = 'projects' | 'assets' | 'users' | 'accounts' | 'audit' | 'settings';
+type ConsoleTab = 'projects' | 'assets' | 'users' | 'accounts' | 'audit' | 'rbac' | 'settings';
 
 const TABS: Array<{
   value: ConsoleTab;
@@ -37,6 +38,7 @@ const TABS: Array<{
   { value: 'users', label: '用户管理', icon: Users, perm: 'user.manage' },
   { value: 'accounts', label: '账号池管理', icon: Wallet, perm: 'account.manage' },
   { value: 'audit', label: '审计与费用', icon: CreditCard, perm: 'audit.view' },
+  { value: 'rbac', label: '角色与权限', icon: Shield, perm: 'rbac.manage' },
   { value: 'settings', label: '设置', icon: Settings, perm: '' }, // 所有登录用户可见
 ];
 
@@ -96,6 +98,7 @@ export function AdminConsole() {
           {effectiveTab === 'users' && <UsersPanel />}
           {effectiveTab === 'accounts' && <AccountPoolPanel />}
           {effectiveTab === 'audit' && <AuditPanel />}
+          {effectiveTab === 'rbac' && <RbacPanel />}
           {effectiveTab === 'settings' && <SettingsPanel />}
         </div>
       </div>

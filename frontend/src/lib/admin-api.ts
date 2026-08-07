@@ -17,6 +17,7 @@ export interface AdminAccount {
   modelScope: string[];
   status: 'active' | 'paused' | 'broken' | 'deleted';
   priority?: number;
+  monthlyCapCost?: number | null; // T26 月度费用上限（达限自动 paused）
   health: {
     consecutiveFailures?: number;
     cooldownUntil?: string | null;
@@ -232,4 +233,77 @@ export async function exportUsageCsv(filters: UsageFilters = {}): Promise<Blob> 
   const response = await authFetch(`/api/nova/admin/usage/export${qs ? `?${qs}` : ''}`);
   if (!response.ok) throw await readApiError(response);
   return await response.blob();
+}
+
+// ===== 我的用量（T24/A11，仅本人数据） =====
+
+export interface UsageMeResult extends UsageQueryResult {
+  daily: Array<{
+    date: string;
+    modelId?: string | null;
+    accountId?: string | null;
+    reqType?: string;
+    requestCount: number;
+    successCount: number;
+    inputTokens: number;
+    outputTokens: number;
+    cost: number;
+    currency: string;
+  }>;
+}
+
+/** 用户自助查询本人用量（后端恒绑定当前登录用户，不接受 userId 参数）。 */
+export async function queryUsageMe(filters: UsageFilters = {}): Promise<UsageMeResult> {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(filters)) {
+    if (value !== undefined && value !== null && value !== '') params.set(key, String(value));
+  }
+  const qs = params.toString();
+  const response = await authFetch(`/api/nova/usage/me${qs ? `?${qs}` : ''}`, { cache: 'no-store' });
+  if (!response.ok) throw await readApiError(response);
+  return (await response.json()) as UsageMeResult;
+}
+
+// ===== RBAC 角色与权限（T28/A16） =====
+
+export interface RbacRole {
+  id: string;
+  code: string;
+  name: string;
+  builtin: boolean;
+  permissions: string[];
+}
+
+export interface RbacPermission {
+  id: string;
+  code: string;
+  type: 'menu' | 'button';
+  parentCode?: string | null;
+  label: string;
+  apiPath?: string | null;
+  sortOrder?: number;
+}
+
+export async function fetchRbacRoles(): Promise<RbacRole[]> {
+  const response = await authFetch('/api/nova/admin/roles', { cache: 'no-store' });
+  if (!response.ok) throw await readApiError(response);
+  return (await response.json()) as RbacRole[];
+}
+
+/** 权限码清单（矩阵列 + 前端清单来源）。 */
+export async function fetchRbacPermissions(): Promise<RbacPermission[]> {
+  const response = await authFetch('/api/nova/admin/permissions', { cache: 'no-store' });
+  if (!response.ok) throw await readApiError(response);
+  return (await response.json()) as RbacPermission[];
+}
+
+/** 保存角色权限集（服务端写 audit_log + 缓存失效 ≤1s）。 */
+export async function saveRolePermissions(roleId: string, permissionCodes: string[]): Promise<{ ok: boolean }> {
+  const response = await authFetch(`/api/nova/admin/roles/${encodeURIComponent(roleId)}/permissions`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ permissionCodes }),
+  });
+  if (!response.ok) throw await readApiError(response);
+  return (await response.json()) as { ok: boolean };
 }

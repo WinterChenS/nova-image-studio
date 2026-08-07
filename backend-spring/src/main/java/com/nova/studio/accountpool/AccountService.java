@@ -2,6 +2,7 @@ package com.nova.studio.accountpool;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import com.nova.studio.audit.AuditLogService;
 import com.nova.studio.imagegen.ImageGenService;
 import com.nova.studio.infra.HttpErrorException;
 import com.nova.studio.infra.NormalizedError;
@@ -29,8 +30,12 @@ import java.util.UUID;
  * AES-GCM key encryption (reused {@link CryptoService}) and masked responses,
  * status transitions (active/paused/broken/deleted — soft delete ADR-28),
  * model_scope existence validation (R1), lightweight connectivity test
- * (success clears failure state), and candidate checks for the catalog
- * availability flag / task pre-check (A1/A4/A5).
+ * (success clears failure state), monthly cost cap field (T26), candidate
+ * checks for the catalog availability flag / task pre-check (A1/A4/A5), and
+ * the T27 active probe entry point.
+ *
+ * <p>WIN-29 (T29/A16) — every admin mutation is written to {@code audit_log}
+ * (actor + before/after summary; never keys).
  */
 @Service
 public class AccountService {
@@ -49,18 +54,21 @@ public class AccountService {
     private final CryptoService crypto;
     private final ObjectMapper objectMapper;
     private final WebClient.Builder webClientBuilder;
+    private final AuditLogService auditLog;
     private final Cache<String, List<AccountRepository.Row>> byStatusCache;
 
     public AccountService(AccountRepository repository,
                           CatalogModelRepository catalogRepository,
                           CryptoService crypto,
                           ObjectMapper objectMapper,
-                          WebClient.Builder webClientBuilder) {
+                          WebClient.Builder webClientBuilder,
+                          AuditLogService auditLog) {
         this.repository = repository;
         this.catalogRepository = catalogRepository;
         this.crypto = crypto;
         this.objectMapper = objectMapper;
         this.webClientBuilder = webClientBuilder;
+        this.auditLog = auditLog;
         this.byStatusCache = Caffeine.newBuilder()
                 .expireAfterWrite(Duration.ofSeconds(1)).maximumSize(10).build();
     }
@@ -78,8 +86,11 @@ public class AccountService {
     public Map<String, Object> create(UUID adminId, JsonNode body) {
         Validated valid = validate(body);
         UUID id = repository.insert(valid.name(), valid.protocol(), valid.baseUrl(),
-                crypto.encrypt(valid.apiKey()), valid.modelScopeJson(), valid.priority(), valid.remark(), adminId);
+                crypto.encrypt(valid.apiKey()), valid.modelScopeJson(), valid.priority(),
+                valid.monthlyCapCost(), valid.remark(), adminId);
         invalidate();
+        auditLog.record(adminId, "account.create", "ai_accounts", id.toString(),
+                Map.of("name", valid.name(), "protocol", valid.protocol(), "monthlyCapCost", safe(valid.monthlyCapCost())));
         return repository.findById(id).map(this::toDto)
                 .orElseThrow(() -> new IllegalStateException("账号创建后读取失败"));
     }
@@ -89,17 +100,24 @@ public class AccountService {
         Validated valid = validate(body);
         String keyEnc = resolveKeyEnc(existing, body);
         repository.update(id, valid.name(), valid.protocol(), valid.baseUrl(), keyEnc,
-                valid.modelScopeJson(), valid.priority(), existing.monthlyCapCost(), valid.remark());
+                valid.modelScopeJson(), valid.priority(), valid.monthlyCapCost(), valid.remark());
         invalidate();
+        auditLog.record(adminId, "account.update", "ai_accounts", id.toString(), Map.of(
+                "name", valid.name(),
+                "protocol", valid.protocol(),
+                "monthlyCapCost", safe(valid.monthlyCapCost()),
+                "previousStatus", existing.status()));
         return repository.findById(id).map(this::toDto)
                 .orElseThrow(() -> new IllegalStateException("账号更新后读取失败"));
     }
 
     /** Soft delete (ADR-28) — keeps usage_records FK integrity; never schedulable. */
     public void delete(UUID adminId, UUID id) {
-        require(id);
+        AccountRepository.Row row = require(id);
         repository.updateStatus(id, STATUS_DELETED);
         invalidate();
+        auditLog.record(adminId, "account.delete", "ai_accounts", id.toString(),
+                Map.of("name", row.name(), "status", STATUS_DELETED));
     }
 
     public Map<String, Object> pause(UUID id) {
@@ -109,6 +127,8 @@ public class AccountService {
         }
         repository.updateStatus(id, STATUS_PAUSED);
         invalidate();
+        auditLog.record(null, "account.pause", "ai_accounts", id.toString(),
+                Map.of("name", row.name(), "status", STATUS_PAUSED));
         return toDto(require(id));
     }
 
@@ -119,6 +139,8 @@ public class AccountService {
         }
         repository.updateStatus(id, STATUS_ACTIVE);
         invalidate();
+        auditLog.record(null, "account.resume", "ai_accounts", id.toString(),
+                Map.of("name", row.name(), "status", STATUS_ACTIVE));
         return toDto(require(id));
     }
 
@@ -131,21 +153,23 @@ public class AccountService {
         repository.updateStatus(id, STATUS_ACTIVE);
         repository.updateHealth(id, AccountHealth.EMPTY.toJson(objectMapper));
         invalidate();
+        auditLog.record(null, "account.recover", "ai_accounts", id.toString(),
+                Map.of("name", row.name(), "status", STATUS_ACTIVE));
         return toDto(require(id));
     }
 
-    // ===== connectivity test (account.test) =====
+    // ===== connectivity test (account.test) + T27 active probe =====
 
     /**
      * Lightweight upstream probe (per-protocol model list call, same shape as
-     * the proxy/models handler). Success clears the failure/cooldown state
-     * (A4: 测试连通成功清失败计数). Never throws — returns {@code {ok, message}}.
+     * the proxy/models handler). Returns {@code {ok, message}} — never throws.
+     * Used by the admin connectivity test (success clears failure state) and
+     * by {@link AccountProbeScheduler} (T27).
      */
-    public Map<String, Object> testConnection(UUID id) {
-        AccountRepository.Row row = require(id);
+    public Map<String, Object> probe(AccountRepository.Row row) {
         String apiKey = crypto.decrypt(row.apiKeyEnc());
         if (apiKey == null || apiKey.isBlank()) {
-            throw new HttpErrorException(400, "NO_API_KEY", "账号未配置 API Key");
+            return Map.of("ok", false, "message", "账号未配置 API Key");
         }
         try {
             String normalizedBaseUrl = ImageGenService.normalizeProtocolBaseUrl(row.protocol(), row.baseUrl());
@@ -174,12 +198,21 @@ public class AccountService {
             if (result == null || result.status() >= 300) {
                 return Map.of("ok", false, "message", "上游返回 " + (result == null ? "无响应" : result.status()));
             }
-            repository.updateHealth(id, AccountHealth.EMPTY.toJson(objectMapper));   // 成功清失败计数
-            invalidate();
             return Map.of("ok", true, "message", "连接成功");
         } catch (Exception e) {
             return Map.of("ok", false, "message", NormalizedError.normalize(e, TEST_TIMEOUT.toMillis()));
         }
+    }
+
+    /** Connectivity test (account.test) — success clears the failure/cooldown state (A4). */
+    public Map<String, Object> testConnection(UUID id) {
+        AccountRepository.Row row = require(id);
+        Map<String, Object> result = probe(row);
+        if (Boolean.TRUE.equals(result.get("ok"))) {
+            repository.updateHealth(id, AccountHealth.EMPTY.toJson(objectMapper));   // 成功清失败计数
+            invalidate();
+        }
+        return result;
     }
 
     // ===== scheduler / catalog integration =====
@@ -259,6 +292,11 @@ public class AccountService {
         invalidate();
     }
 
+    /** Raw rows for the T27 active probe (needs id/status/apiKeyEnc). */
+    public List<AccountRepository.Row> listRows() {
+        return repository.listAll();
+    }
+
     // ===== helpers =====
 
     private AccountRepository.Row require(UUID id) {
@@ -267,7 +305,7 @@ public class AccountService {
     }
 
     private record Validated(String name, String protocol, String baseUrl, String apiKey,
-                             String modelScopeJson, Integer priority, String remark) {
+                             String modelScopeJson, Integer priority, BigDecimal monthlyCapCost, String remark) {
     }
 
     private Validated validate(JsonNode body) {
@@ -313,9 +351,25 @@ public class AccountService {
             scopeJson = array.toString();
         }
         Integer priority = body.hasNonNull("priority") ? body.get("priority").asInt(100) : 100;
+        // T26: 月度费用上限（可空；非负）
+        BigDecimal monthlyCapCost = null;
+        if (body.hasNonNull("monthlyCapCost") && !body.get("monthlyCapCost").isNull()) {
+            JsonNode capNode = body.get("monthlyCapCost");
+            if (!capNode.isNumber() && !capNode.isTextual()) {
+                throw new IllegalArgumentException("monthlyCapCost 必须为数字");
+            }
+            try {
+                monthlyCapCost = new BigDecimal(capNode.asText());
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException("monthlyCapCost 必须为数字");
+            }
+            if (monthlyCapCost.signum() < 0) {
+                throw new IllegalArgumentException("monthlyCapCost 不能为负");
+            }
+        }
         String remark = text(body, "remark");
         return new Validated(name.trim(), protocol, baseUrl.trim(), apiKey.trim(),
-                scopeJson, priority, remark);
+                scopeJson, priority, monthlyCapCost, remark);
     }
 
     private String resolveKeyEnc(AccountRepository.Row existing, JsonNode body) {
@@ -363,6 +417,7 @@ public class AccountService {
         dto.put("modelScope", scopeStrings);
         dto.put("status", row.status());
         dto.put("priority", row.priority());
+        dto.put("monthlyCapCost", row.monthlyCapCost());
         dto.put("health", parseHealth(row.healthJson()));
         dto.put("remark", row.remark());
         dto.put("createdAt", row.createdAt() == null ? null : row.createdAt().toString());
@@ -397,4 +452,7 @@ public class AccountService {
         return value != null && value.isTextual() ? value.asText() : null;
     }
 
+    private static BigDecimal safe(BigDecimal value) {
+        return value == null ? BigDecimal.ZERO : value;
+    }
 }

@@ -1,5 +1,6 @@
 package com.nova.studio.auth;
 
+import com.nova.studio.audit.AuditLogService;
 import com.nova.studio.infra.HttpErrorException;
 import com.nova.studio.rbac.UserPermissionService;
 import com.nova.studio.rbac.UserRoleRepository;
@@ -44,7 +45,7 @@ class AdminUserServiceTest {
         repository = mock(UserRepository.class);
         userRoleRepository = mock(UserRoleRepository.class);
         permissionService = mock(UserPermissionService.class);
-        service = new AdminUserService(repository, userRoleRepository, permissionService);
+        service = new AdminUserService(repository, userRoleRepository, permissionService, mock(AuditLogService.class));
     }
 
     @Test

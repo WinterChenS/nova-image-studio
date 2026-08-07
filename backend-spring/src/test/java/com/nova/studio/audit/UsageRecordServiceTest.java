@@ -1,5 +1,6 @@
 package com.nova.studio.audit;
 
+import com.nova.studio.accountpool.MonthlyCapService;
 import com.nova.studio.accountpool.PricingService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -22,6 +23,7 @@ class UsageRecordServiceTest {
 
     private UsageRecordMapper mapper;
     private PricingService pricingService;
+    private MonthlyCapService monthlyCapService;
     private UsageRecordService service;
 
     private static final UUID USER = UUID.fromString("11111111-1111-1111-1111-111111111111");
@@ -32,8 +34,9 @@ class UsageRecordServiceTest {
     void setUp() {
         mapper = mock(UsageRecordMapper.class);
         pricingService = mock(PricingService.class);
+        monthlyCapService = mock(MonthlyCapService.class);
         when(pricingService.computeCost(any(), any(), any(), any())).thenReturn(new BigDecimal("0.8"));
-        service = new UsageRecordService(mapper, pricingService, 10_000);
+        service = new UsageRecordService(mapper, pricingService, monthlyCapService, 10_000);
     }
 
     private UsageRecordService.UsageRecord rec() {
@@ -55,6 +58,23 @@ class UsageRecordServiceTest {
         service.flush();
         verify(mapper).insertIgnore(any(), any(), any(), any(), any(), any(), any(), any(), any(),
                 any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void recordSyncInsertsThenEnforcesMonthlyCap() {
+        when(mapper.insertIgnore(any(), any(), any(), any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any(), any(), any())).thenReturn(1);
+        service.recordSync(rec());
+        // T26: 写入成功后才触发月度上限检查（达限自动 paused）
+        verify(monthlyCapService).enforceAfterUsage(ACCOUNT);
+    }
+
+    @Test
+    void recordSyncSkipsCapEnforcementWhenInsertIgnored() {
+        when(mapper.insertIgnore(any(), any(), any(), any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any(), any(), any())).thenReturn(0);
+        service.recordSync(rec());
+        verify(monthlyCapService, org.mockito.Mockito.never()).enforceAfterUsage(any());
     }
 
     @Test

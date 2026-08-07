@@ -47,7 +47,7 @@ public class AccountRepository {
     }
 
     public UUID insert(String name, String protocol, String baseUrl, String apiKeyEnc,
-                       String modelScopeJson, Integer priority, String remark, UUID createdBy) {
+                       String modelScopeJson, Integer priority, BigDecimal monthlyCapCost, String remark, UUID createdBy) {
         UUID id = UUID.randomUUID();
         Instant now = Instant.now();
         AccountEntity e = new AccountEntity();
@@ -59,6 +59,7 @@ public class AccountRepository {
         e.setModelScopeJson(modelScopeJson == null ? "[]" : modelScopeJson);
         e.setStatus("active");
         e.setPriority(priority == null ? 100 : priority);
+        e.setMonthlyCapCost(monthlyCapCost);
         e.setHealthJson("{}");
         e.setRemark(remark);
         e.setCreatedBy(createdBy);
@@ -84,6 +85,12 @@ public class AccountRepository {
 
     public int updateScope(UUID id, String modelScopeJson) {
         return mapper.updateScope(id, modelScopeJson, Instant.now());
+    }
+
+    /** 当前自然月内该账号的累计费用（快照 cost 求和，T26 月度上限判定）。 */
+    public BigDecimal monthlyCost(UUID accountId) {
+        java.math.BigDecimal value = mapper.monthlyCost(accountId);
+        return value == null ? BigDecimal.ZERO : value;
     }
 
     private static Row toRow(AccountEntity e) {
