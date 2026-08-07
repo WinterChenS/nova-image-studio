@@ -64,10 +64,10 @@ class AssetControllerMultipartTest {
     void multipartUploadSucceedsEvenWithCharsetParameter() throws Exception {
         loginAsUser();
         AssetRepository.AssetRow row = imageRow();
-        // 可空字段（note/sourceLabel/sourceRef/prompt）为 null —— any() 匹配，anyString() 不匹配
+        // 可空字段（note/sourceLabel/sourceRef/prompt/extra）为 null —— any() 匹配，anyString() 不匹配
         when(assetService.createImage(any(), any(), any(), any(), any(),
                 any(), any(), any(), any(), any(), any(),
-                any(), any(), any())).thenReturn(row);
+                any(), any(), any(), any())).thenReturn(row);
 
         MockMultipartFile file = new MockMultipartFile("file", "a.png", "image/png", new byte[]{1, 2, 3});
 
@@ -82,7 +82,7 @@ class AssetControllerMultipartTest {
                 .andReturn();
 
         verify(assetService).createImage(any(), eq("p1"), eq("测试图"), any(), any(),
-                eq("upload"), any(), any(), any(), any(), any(), any(), any(), any());
+                eq("upload"), any(), any(), any(), any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -91,6 +91,7 @@ class AssetControllerMultipartTest {
         AssetRepository.AssetRow row = new AssetRepository.AssetRow(
                 "t1", USER.id().toString(), "p1", "text", "提示词", null, 10L, null, null,
                 "[]", null, "manual", "手动导入", null, null, null, "text-abc",
+                "{}", null, 0L,
                 Instant.parse("2026-08-01T00:00:00Z"),
                 Instant.parse("2026-08-01T00:00:00Z"), null);
         when(assetService.createText(any(), any(), any(), any(), any(), any(),
@@ -116,6 +117,7 @@ class AssetControllerMultipartTest {
         return new AssetRepository.AssetRow(
                 "a1", USER.id().toString(), "p1", "image", "测试图", "image/png", 3L, 1, 1,
                 "[]", null, "upload", "用户上传", null, null, "assets/u1/a1.png", "abc",
+                "{}", null, 0L,
                 Instant.parse("2026-08-01T00:00:00Z"),
                 Instant.parse("2026-08-01T00:00:00Z"), null);
     }

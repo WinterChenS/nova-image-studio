@@ -52,6 +52,12 @@ public class AssetEntity {
     private String storageKey;
     @TableField("hash")
     private String hash;
+    @TableField(value = "extra", typeHandler = JsonbTypeHandler.class)
+    private String extra;                 // WIN-39: JSONB 类型扩展字段（目录描述/缩略图/子类型等）
+    @TableField("deleted_at")
+    private Instant deletedAt;            // WIN-39: 软删回收站（C8）
+    @TableField("ref_count")
+    private Long refCount;                // WIN-39: 引用计数（画布/会话引用中的素材不可硬删）
     @TableField("created_at")
     private Instant createdAt;
     @TableField("updated_at")
@@ -193,6 +199,30 @@ public class AssetEntity {
 
     public void setHash(String hash) {
         this.hash = hash;
+    }
+
+    public String getExtra() {
+        return extra;
+    }
+
+    public void setExtra(String extra) {
+        this.extra = extra;
+    }
+
+    public Instant getDeletedAt() {
+        return deletedAt;
+    }
+
+    public void setDeletedAt(Instant deletedAt) {
+        this.deletedAt = deletedAt;
+    }
+
+    public Long getRefCount() {
+        return refCount;
+    }
+
+    public void setRefCount(Long refCount) {
+        this.refCount = refCount;
     }
 
     public Instant getCreatedAt() {

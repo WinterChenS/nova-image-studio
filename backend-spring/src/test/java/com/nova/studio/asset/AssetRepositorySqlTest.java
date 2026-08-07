@@ -84,4 +84,43 @@ class AssetRepositorySqlTest {
         assertThat(sql).contains("tags");
         assertThat(sql).contains("?");
     }
+
+    // ===== WIN-39 (T2): 素材库默认排除工作态类型 + 软删过滤 =====
+
+    @Test
+    void excludeWorkingRendersNotInForWorkingSourceKinds() {
+        LambdaQueryWrapper<AssetEntity> wrapper = new LambdaQueryWrapper<>();
+        AssetRepository.applySearchFilters(wrapper, UUID.randomUUID(), null, null, null, null,
+                true, false);
+        String sql = wrapper.getCustomSqlSegment();
+        assertThat(sql).contains("NOT IN");
+        assertThat(sql).doesNotContain("source_kind =");
+        // 4 个工作态类型 → 4 个绑定参数占位符
+        assertThat(sql).contains("MPGENVAL2", "MPGENVAL3", "MPGENVAL4", "MPGENVAL5");
+    }
+
+    @Test
+    void explicitSourceOverridesExcludeWorking() {
+        LambdaQueryWrapper<AssetEntity> wrapper = new LambdaQueryWrapper<>();
+        AssetRepository.applySearchFilters(wrapper, UUID.randomUUID(), null, "conversation", null, null,
+                true, false);
+        String sql = wrapper.getCustomSqlSegment();
+        assertThat(sql).doesNotContain("NOT IN").contains("source_kind =");
+    }
+
+    @Test
+    void defaultSearchExcludesSoftDeleted() {
+        LambdaQueryWrapper<AssetEntity> wrapper = new LambdaQueryWrapper<>();
+        AssetRepository.applySearchFilters(wrapper, UUID.randomUUID(), null, null, null, null,
+                false, false);
+        assertThat(wrapper.getCustomSqlSegment()).contains("IS NULL");
+    }
+
+    @Test
+    void includeDeletedSkipsDeletedAtFilter() {
+        LambdaQueryWrapper<AssetEntity> wrapper = new LambdaQueryWrapper<>();
+        AssetRepository.applySearchFilters(wrapper, UUID.randomUUID(), null, null, null, null,
+                false, true);
+        assertThat(wrapper.getCustomSqlSegment()).doesNotContain("deleted_at");
+    }
 }
