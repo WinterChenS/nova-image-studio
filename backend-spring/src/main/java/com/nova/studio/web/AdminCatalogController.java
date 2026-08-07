@@ -5,6 +5,7 @@ import com.nova.studio.auth.AuthSupport;
 import com.nova.studio.auth.AuthUser;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -26,6 +27,7 @@ import java.util.UUID;
  * M2 T14 升级为权限码 {@code PERM_model.catalog.manage}).
  */
 @RestController
+@PreAuthorize("hasAuthority('PERM_model.catalog.manage')")
 @RequestMapping("/api/nova/admin/models")
 public class AdminCatalogController {
 

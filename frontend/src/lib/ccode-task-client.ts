@@ -285,13 +285,15 @@ export function resolveImageTaskProvider(modelId: string): { protocol: ProviderP
 }
 
 /**
- * 已配置（含 Key）的图片模型；未配置返回 null。M2 起 apiKey 为服务端掩码值，
- * 非空即表示已配置。
+ * 已配置图片模型；未配置/不可用返回 null。WIN-25 (T18)：目录模型以
+ * {@code available} 为判定（apiKey 由服务端账号池持有，不再前端判定）。
  */
 export function getConfiguredImageModel(modelId: string): import('@/lib/nova-models').ImageModelConfig | null {
   const registry = loadRegistry();
   const model = getImageModelById(registry, modelId);
-  return model && model.apiKey ? model : null;
+  if (!model) return null;
+  if (model.available === false) return null;   // A5: 无可用账号/enabled=false 不可选
+  return model.apiKey ? model : null;
 }
 
 export function resolveTextTaskProvider(modelId: string): { protocol: TextProviderProtocol } {

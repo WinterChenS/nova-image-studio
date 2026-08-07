@@ -2,21 +2,27 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { getMe, logout, onAuthChange, type AuthUser } from '@/lib/auth';
-import { loadRegistryFromApi } from '@/lib/settings-api';
-import { clearRegistryCache, setRegistryCache } from '@/lib/nova-models';
+import { fetchCatalog } from '@/lib/catalog-api';
+import { fetchSettings } from '@/lib/settings-api';
+import {
+  clearCatalogCache,
+  ensureDefaults,
+  setCatalogCache,
+  setRegistryCache,
+  type DefaultModels,
+} from '@/lib/nova-models';
 import { syncDynamicModelExports } from '@/lib/gemini-config';
 
 /**
- * M2 T2.5 — 登录态 + 数据层水合：
+ * WIN-25 (T18/T22) — 登录态 + 数据层水合：
  *
- * - 挂载时校验 token（/api/auth/me），订阅 nova-auth-changed；
- * - 登录后从 API 拉取模型注册表灌入内存缓存（loadRegistry() 同步读取方
- *   立即拿到最新数据）并刷新动态模型导出；登出则清缓存回退 localStorage
- *   （匿名只读边界 Q1）。
+ * - 挂载时校验 token（/api/auth/me），订阅 nova-auth-changed（登录/登出）；
+ * - 登录后从 API 拉取**全局模型目录**（GET /api/nova/models → catalogCache，
+ *   T18：模型下拉/默认模型走目录，available 禁用）与用户默认模型设置
+ *   （settings['registry.defaults']）；登出则清缓存回退本地。
  *
  * eslint 注：react-hooks/set-state-in-effect 对本文件的水合 setState 是误报
- * （setState 都发生在异步回调内，非同步 effect 体）；仓库内既有同类模式
- * （WorkspaceShell/ImageGenerationWorkbench 等）同样保留。
+ * （setState 都发生在异步回调内，非同步 effect 体）；仓库内既有同类模式保留。
  */
 export function useAuthHydration() {
   const [user, setUser] = useState<AuthUser | null | undefined>(undefined);
@@ -37,22 +43,32 @@ export function useAuthHydration() {
   useEffect(() => {
     let cancelled = false;
     if (!user) {
-      clearRegistryCache();
+      clearCatalogCache();
       syncDynamicModelExports();
       // eslint-disable-next-line react-hooks/set-state-in-effect -- hydration completion
       setHydrated(true);
       return;
     }
-    loadRegistryFromApi()
-      .then((registry) => {
+    Promise.all([
+      fetchCatalog().catch(() => []),
+      fetchSettings().catch((): Record<string, unknown> => ({})),
+    ])
+      .then(([catalog, settings]) => {
         if (cancelled) return;
-        setRegistryCache(registry);
+        // T18: 目录为唯一模型源；defaults 沿用用户设置（无效则回退第一个可用）
+        setCatalogCache(catalog);
+        const defaults = settings['registry.defaults'] as Partial<DefaultModels> | undefined;
+        setRegistryCache({
+          imageModels: [],
+          textModels: [],
+          defaults: ensureDefaults(defaults || {}, [], []),
+        });
         syncDynamicModelExports();
         window.dispatchEvent(new Event('nova-model-registry-updated'));
       })
       .catch(() => {
         if (cancelled) return;
-        clearRegistryCache();
+        clearCatalogCache();
         syncDynamicModelExports();
       })
       .finally(() => {

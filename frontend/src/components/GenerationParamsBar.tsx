@@ -116,11 +116,15 @@ export function GenerationParamsBar({ value, onChange, size = 'xs', className }:
           {MODEL_OPTIONS.map((option) => (
             <button
               key={option.value}
+              disabled={option.disabled}
               onClick={() => {
                 handleModelChange(option.value);
                 setModelPopoverOpen(false);
               }}
-              className={cn('w-full text-left px-2.5 py-1.5 rounded-md text-sm hover:bg-muted', model === option.value && 'bg-muted font-medium')}
+              className={cn('w-full text-left px-2.5 py-1.5 rounded-md text-sm hover:bg-muted',
+                option.disabled && 'pointer-events-none opacity-50',
+                model === option.value && 'bg-muted font-medium')}
+              title={option.disabled ? '该模型暂无可用的账号（请联系管理员）' : undefined}
             >
               {option.label}
             </button>

@@ -29,6 +29,8 @@ export interface ImageModelConfig {
   maxRefImages: number;
   maxOutputSize: ImageOutputSize;
   supportsAdvancedParams: boolean;
+  /** WIN-25 (T18): 目录模型标记（A5 — 无可用账号/enabled=false → false 禁用不可选）。 */
+  available?: boolean;
 }
 
 export interface TextModelConfig {
@@ -39,6 +41,8 @@ export interface TextModelConfig {
   apiKey: string;
   baseUrl: string;
   note?: string;
+  /** WIN-25 (T18): 目录模型标记（A5）。 */
+  available?: boolean;
 }
 
 export interface BuiltinImagePreset {
@@ -73,8 +77,12 @@ const REGISTRY_KEY = 'nova-model-registry';
  * 内存注册表缓存（M2 T2.3）：应用登录后由 API 灌入（hydrateRegistry），
  * 所有同步读取方（表单/客户端）经 loadRegistry() 拿到最新数据，
  * 无需逐处改造成 async。未灌入时回退 localStorage（迁移期/匿名只读）。
+ *
+ * WIN-25 (T18)：目录缓存（GET /api/nova/models）灌入后，loadRegistry()
+ * 以目录为唯一模型源（用户自维护 Key 已移除，A2）；available 标记随模型。
  */
 let registryCache: NovaModelRegistry | null = null;
+let catalogCache: import('@/lib/catalog-api').CatalogModel[] | null = null;
 
 export function setRegistryCache(registry: NovaModelRegistry): void {
   registryCache = registry;
@@ -86,6 +94,23 @@ export function clearRegistryCache(): void {
 
 export function getRegistryCache(): NovaModelRegistry | null {
   return registryCache;
+}
+
+/** WIN-25 (T18): 灌入/读取全局目录缓存（登录后由 AuthGate/hydration 调用）。 */
+export function setCatalogCache(catalog: import('@/lib/catalog-api').CatalogModel[] | null): void {
+  catalogCache = catalog;
+  if (catalog === null) {
+    registryCache = null;
+  }
+}
+
+export function getCatalogCache(): import('@/lib/catalog-api').CatalogModel[] | null {
+  return catalogCache;
+}
+
+export function clearCatalogCache(): void {
+  catalogCache = null;
+  registryCache = null;
 }
 
 export const BUILTIN_IMAGE_PRESETS: Record<BuiltinImagePresetId, BuiltinImagePreset> = {
@@ -346,10 +371,73 @@ function getInitialRegistry(): NovaModelRegistry {
 }
 
 export function loadRegistry(): NovaModelRegistry {
+  if (catalogCache) {
+    return buildRegistryFromCatalog(catalogCache);
+  }
   if (registryCache) {
     return registryCache;
   }
   return loadRegistryFromLocalStorage();
+}
+
+/**
+ * WIN-25 (T18)：目录 → 注册表（apiKey 标记为 'catalog'，判定「已配置」只看
+ * available；defaults 沿用用户设置注册表/本地缓存中的默认模型，无效则回退第一个
+ * 可用目录模型）。
+ */
+function buildRegistryFromCatalog(catalog: import('@/lib/catalog-api').CatalogModel[]): NovaModelRegistry {
+  const enabled = catalog.filter((m) => m.enabled !== false);
+  const imageModels = enabled
+    .filter((m) => m.type === 'image')
+    .map((m) => catalogToImageConfig(m))
+    .filter((m): m is ImageModelConfig => Boolean(m));
+  const textModels = enabled
+    .filter((m) => m.type === 'text')
+    .map((m) => catalogToTextConfig(m))
+    .filter((m): m is TextModelConfig => Boolean(m));
+  const fallback = registryCache ?? loadRegistryFromLocalStorage();
+  const defaults = ensureDefaults(fallback.defaults, imageModels, textModels);
+  return { imageModels, textModels, defaults };
+}
+
+function catalogToImageConfig(m: import('@/lib/catalog-api').CatalogModel): ImageModelConfig | null {
+  const preset = inferBuiltinPresetId({
+    builtinPreset: m.builtinPreset as BuiltinImagePresetId,
+    protocol: m.protocol as ProviderProtocol,
+    modelId: m.modelId,
+  });
+  const presetConfig = BUILTIN_IMAGE_PRESETS[preset];
+  return {
+    id: m.id,
+    protocol: isProviderProtocol(m.protocol) ? m.protocol : presetConfig.protocol,
+    name: m.name || presetConfig.name,
+    modelId: m.modelId,
+    apiKey: 'catalog',
+    baseUrl: m.baseUrl || presetConfig.baseUrl,
+    builtinPreset: preset,
+    maxRefImages: typeof m.maxRefImages === 'number' ? Math.max(0, Math.floor(m.maxRefImages)) : presetConfig.maxRefImages,
+    maxOutputSize: normalizeImageOutputSize(m.maxOutputSize, presetConfig.maxOutputSize),
+    supportsAdvancedParams: m.protocol === 'openai'
+      ? Boolean(m.supportsAdvancedParams)
+      : false,
+    available: m.available !== false,
+  };
+}
+
+function catalogToTextConfig(m: import('@/lib/catalog-api').CatalogModel): TextModelConfig | null {
+  const template = isTextProviderProtocol(m.protocol)
+    ? getDefaultTextModelTemplate(m.protocol)
+    : getDefaultTextModelTemplate('openai-responses');
+  return {
+    id: m.id,
+    protocol: isTextProviderProtocol(m.protocol) ? m.protocol : 'openai-responses',
+    name: m.name || template.name,
+    modelId: m.modelId,
+    apiKey: 'catalog',
+    baseUrl: m.baseUrl || template.baseUrl,
+    note: m.note || template.note || '',
+    available: m.available !== false,
+  };
 }
 
 /** 直接从 localStorage 读取（迁移向导/导出用，绕过缓存）。 */

@@ -25,7 +25,7 @@ import java.util.Properties;
  *       cast; JSON columns with {@code ::jsonb} (invalid JSON falls back to
  *       {@code {}} and is reported);</li>
  *   <li>{@code user_id} is left NULL — migrated tasks are legacy/system-owned
- *       and stay anonymously readable per Q1;</li>
+ *       and stay readable by any logged-in user (D2 登录收口后匿名不再可达);</li>
  *   <li>idempotent: {@code ON CONFLICT DO NOTHING}, so re-running only inserts
  *       rows that are still missing. Safe to run any number of times.</li>
  * </ul>

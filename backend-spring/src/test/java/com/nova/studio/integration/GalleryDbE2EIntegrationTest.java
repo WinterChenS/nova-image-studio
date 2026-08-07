@@ -45,16 +45,24 @@ class GalleryDbE2EIntegrationTest {
 
     @Autowired
     private UserMapper userMapper;
+    @Autowired
+    private org.springframework.jdbc.core.JdbcTemplate jdbcTemplate;
 
     private final RestTemplate rest = new RestTemplate();
     private final ObjectMapper mapper = new ObjectMapper();
-    private String promotedUsername;
+    private final java.util.List<String> createdUsernames = new java.util.ArrayList<>();
 
     @AfterEach
     void cleanup() {
-        if (promotedUsername != null) {
-            userMapper.delete(new UpdateWrapper<UserEntity>().eq("username", promotedUsername));
+        // 清理本次创建的全部测试用户（多角色行会触发 schema 一致性检查）
+        for (String username : createdUsernames) {
+            try {
+                userMapper.delete(new UpdateWrapper<UserEntity>().eq("username", username));
+            } catch (Exception ignored) {
+                // 尽力清理（级联删除 user_roles）
+            }
         }
+        createdUsernames.clear();
     }
 
     private String base() {
@@ -87,6 +95,7 @@ class GalleryDbE2EIntegrationTest {
         reg.put("username", username);
         reg.put("password", "secret123");
         exchange("/api/auth/register", HttpMethod.POST, reg, null);
+        createdUsernames.add(username);
         JsonNode body = exchange("/api/auth/login", HttpMethod.POST, reg, null);
         return body.get("token").asText();
     }
@@ -97,18 +106,34 @@ class GalleryDbE2EIntegrationTest {
         reg.put("password", "secret123");
         exchange("/api/auth/register", HttpMethod.POST, reg, null);
         // promote to admin directly (AdminBootstrap covers the env-driven path)
+        // M2 (T15/R4): 双写 user_roles（权限判定依据）+ 等待 ≤1s 缓存失效（A14）
         userMapper.update(null, new UpdateWrapper<UserEntity>()
                 .eq("username", username).set("role", "admin").set("updated_at", Instant.now()));
-        promotedUsername = username;
+        jdbcTemplate.update("""
+                DELETE FROM user_roles WHERE user_id = (SELECT id FROM users WHERE username = ?)
+                """, username);
+        jdbcTemplate.update("""
+                INSERT INTO user_roles (user_id, role_id)
+                SELECT u.id, r.id FROM users u, roles r
+                WHERE u.username = ? AND r.code = 'admin'
+                ON CONFLICT DO NOTHING
+                """, username);
+        try {
+            Thread.sleep(1100);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        createdUsernames.add(username);
         JsonNode body = exchange("/api/auth/login", HttpMethod.POST, reg, null);
         return body.get("token").asText();
     }
 
-    // ===== public endpoints serve DB data =====
+    // ===== 登录后可访问（D2 默认收口，T16/A19）=====
 
     @Test
-    void publicPromptsAndBlacklistServeDb() {
-        JsonNode prompts = exchange("/api/nova/prompts", HttpMethod.GET, null, null);
+    void promptsAndBlacklistServeDbAfterLogin() {
+        String token = registerAndLogin("gallery_" + UUID.randomUUID().toString().substring(0, 8));
+        JsonNode prompts = exchange("/api/nova/prompts", HttpMethod.GET, null, token);
         assertThat(prompts.isArray()).isTrue();
         assertThat(prompts.size()).isGreaterThan(0);
         JsonNode first = prompts.get(0);
@@ -116,9 +141,22 @@ class GalleryDbE2EIntegrationTest {
         assertThat(first.has("content")).isTrue();
         assertThat(first.get("type").asInt()).isIn(1, 2);
 
-        JsonNode blacklist = exchange("/api/nova/blacklist", HttpMethod.GET, null, null);
+        JsonNode blacklist = exchange("/api/nova/blacklist", HttpMethod.GET, null, token);
         assertThat(blacklist.has("keywords")).isTrue();
         assertThat(blacklist.get("keywords").isArray()).isTrue();
+    }
+
+    @Test
+    void anonymousCannotReadPromptsOrBlacklistAnymore() {
+        // T16 (D2 默认): 原匿名只读端点收口 → 401
+        assertThatThrownBy(() -> exchange("/api/nova/prompts", HttpMethod.GET, null, null))
+                .isInstanceOf(HttpClientErrorException.class)
+                .satisfies(e -> assertThat(((HttpClientErrorException) e).getStatusCode())
+                        .isEqualTo(HttpStatus.UNAUTHORIZED));
+        assertThatThrownBy(() -> exchange("/api/nova/blacklist", HttpMethod.GET, null, null))
+                .isInstanceOf(HttpClientErrorException.class)
+                .satisfies(e -> assertThat(((HttpClientErrorException) e).getStatusCode())
+                        .isEqualTo(HttpStatus.UNAUTHORIZED));
     }
 
     // ===== admin authorization =====
@@ -155,8 +193,8 @@ class GalleryDbE2EIntegrationTest {
         assertThat(created.get("title").asText()).isEqualTo(createdTitle);
         String promptId = created.get("id").asText();
 
-        // public endpoint reflects the DB row
-        JsonNode publicPrompts = exchange("/api/nova/prompts", HttpMethod.GET, null, null);
+        // 登录后只读端点反映 DB 行（T16 收口后 prompts 需登录）
+        JsonNode publicPrompts = exchange("/api/nova/prompts", HttpMethod.GET, null, adminToken);
         boolean visible = false;
         var it = publicPrompts.iterator();
         while (it.hasNext()) {
@@ -179,7 +217,7 @@ class GalleryDbE2EIntegrationTest {
         // delete
         JsonNode deleted = exchange("/api/nova/admin/prompts/" + promptId, HttpMethod.DELETE, null, adminToken);
         assertThat(deleted.get("ok").asBoolean()).isTrue();
-        var deleteIt = exchange("/api/nova/prompts", HttpMethod.GET, null, null).iterator();
+        var deleteIt = exchange("/api/nova/prompts", HttpMethod.GET, null, adminToken).iterator();
         while (deleteIt.hasNext()) {
             JsonNode p = deleteIt.next();
             assertThat(p.get("title").asText()).isNotEqualTo(createdTitle);
@@ -196,8 +234,8 @@ class GalleryDbE2EIntegrationTest {
         JsonNode created = exchange("/api/nova/admin/blacklist", HttpMethod.POST, add, adminToken);
         assertThat(created.get("keyword").asText()).isEqualTo(keyword);
 
-        // public blacklist reflects it
-        JsonNode publicBlacklist = exchange("/api/nova/blacklist", HttpMethod.GET, null, null);
+        // 登录后 blacklist 反映 DB 行（T16 收口）
+        JsonNode publicBlacklist = exchange("/api/nova/blacklist", HttpMethod.GET, null, adminToken);
         boolean visible = false;
         var it = publicBlacklist.get("keywords").iterator();
         while (it.hasNext()) {
@@ -217,7 +255,7 @@ class GalleryDbE2EIntegrationTest {
         // delete by keyword
         JsonNode deleted = exchange("/api/nova/admin/blacklist/" + keyword, HttpMethod.DELETE, null, adminToken);
         assertThat(deleted.get("ok").asBoolean()).isTrue();
-        var delIt = exchange("/api/nova/blacklist", HttpMethod.GET, null, null).get("keywords").iterator();
+        var delIt = exchange("/api/nova/blacklist", HttpMethod.GET, null, adminToken).get("keywords").iterator();
         while (delIt.hasNext()) {
             JsonNode k = delIt.next();
             assertThat(k.asText()).isNotEqualTo(keyword);

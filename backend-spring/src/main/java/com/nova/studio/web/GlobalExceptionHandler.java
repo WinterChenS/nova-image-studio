@@ -6,6 +6,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
@@ -69,6 +70,12 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(HttpMessageNotReadableException.class)
     public ResponseEntity<Map<String, Object>> unreadableBody() {
         return ResponseEntity.badRequest().body(Map.of("error", "请求 JSON 格式无效"));
+    }
+
+    @ExceptionHandler(AccessDeniedException.class)
+    public ResponseEntity<Map<String, Object>> accessDenied() {
+        // M2 (T14): @PreAuthorize 方法级鉴权拒绝 → 403（Node 风格 envelope，A13）
+        return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("error", "无权访问该资源", "code", "FORBIDDEN"));
     }
 
     @ExceptionHandler(IllegalArgumentException.class)

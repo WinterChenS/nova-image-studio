@@ -747,7 +747,6 @@ export function ImageGenerationWorkbench({
       <MissingApiKeyDialog
         open={missingApiKeyDialogOpen}
         onOpenChange={setMissingApiKeyDialogOpen}
-        onConfigure={() => onConfigureApiKey?.()}
       />
       <QuickPromptDialog
         open={quickPromptOpen}

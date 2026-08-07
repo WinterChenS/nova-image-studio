@@ -72,12 +72,14 @@ export interface PendingUpload {
 
 const PREVIEW_MAX_SIDE = 512;
 
-/** 构建当前可用的图像模型目录，供 Agent 选择模型 */
+/** 构建当前可用的图像模型目录，供 Agent 选择模型（A5: 无可用账号不可选） */
 function buildModelCatalog(): AgentModelCatalogEntry[] {
-  return getCompleteImageModels(loadRegistry()).map(m => ({
-    id: m.id,
-    name: m.name,
-    maxOutputSize: m.maxOutputSize,
+  return getCompleteImageModels(loadRegistry())
+    .filter((m) => m.available !== false)
+    .map(m => ({
+      id: m.id,
+      name: m.name,
+      maxOutputSize: m.maxOutputSize,
   }));
 }
 

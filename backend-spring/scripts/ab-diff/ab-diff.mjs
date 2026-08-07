@@ -12,6 +12,10 @@
  *   - M2 (WIN-12) Q1 用户隔离：任务创建需登录；Spring 端轮询任务状态/
  *     图片拉取/WS 订阅均携带 ab-diff 用户的 JWT（匿名只读仅限 NULL 归属
  *     遗留任务，Node 无用户体系忽略该头）——WIN-17 探针适配，保持 A/B 1:1。
+ *   - WIN-36 (D2 登录边界)：queue-status/prompts/blacklist/config 已移入
+ *     Spring 登录（匿名 401）。本脚本对全部 Spring 探针携带注册用户 JWT
+ *     （token 对比，clientIpFor 注入），并新增 9.5 探针显式断言「Spring
+ *     匿名 401 vs Node 匿名 200」这一 D2 有意边界差异，防门禁与登录边界漂移。
  *   - 对比前对时间戳/任务ID/图片URL做归一化（两端 UUID/时间必然不同）。
  *   - 输出 PASS/FAIL 逐项结果；任何 FAIL 以非 0 退出。
  */
@@ -347,9 +351,29 @@ async function probeGallery(base, _, ip) {
   };
 }
 
-async function probeStatic(base) {
+// WIN-36 (S1, D2): 登录边界显式断言 — D2 后 Spring 将 queue-status/prompts/
+// blacklist/config 移入登录（匿名 401），Node 无用户体系仍匿名 200。这是 D2
+// 设计的**有意边界差异**；其余探针均携带注册用户 JWT 做 token 对比（9.5 之外
+// 的探针），本探针显式锁定「Spring 匿名 401 vs Node 匿名 200」边界，防止
+// SecurityConfig 白名单/登录收口与 A/B 门禁互相漂移。XFF 仅用于 IP 限流隔离，
+// 不带 Authorization —— 认证语义为匿名。
+async function probeD2LoginBoundary() {
+  const paths = ['/api/nova/queue-status', '/api/nova/prompts', '/api/nova/blacklist', '/api/nova/config'];
+  const results = {};
+  for (const p of paths) {
+    const nodeR = await req(nodeBase, 'GET', p, null, { 'X-Forwarded-For': `10.99.${probeIndex}.1` });
+    const springR = await req(springBase, 'GET', p, null, { 'X-Forwarded-For': `10.99.${probeIndex}.2` });
+    results[p] = { node: nodeR.status, spring: springR.status };
+  }
+  return results;
+}
+
+async function probeStatic(base, _, ip) {
   const root = await fetch(base + '/');
-  const deepLink = await fetch(base + '/some/client/route');
+  // WIN-36 (D2): 深链路由非白名单路径，Spring 匿名 401（登录收口），Node 匿名 404
+  // （无用户体系）—— D2 有意边界。本探针携带注册用户 JWT 做 token 对比：
+  // 登录后两端对未知客户端路由均返回 SPA 404 兜底（契约一致）。
+  const deepLink = await fetch(base + '/some/client/route', { headers: ip({}) });
   const missing = await fetch(base + '/_next/static/css/definitely-missing.css');
   return {
     rootStatus: root.status,
@@ -534,6 +558,17 @@ console.log('spring auth ready (ab-diff user)');
   check('blacklist keywords 键', JSON.stringify(a.blacklist.keys) === JSON.stringify(b.blacklist.keys));
   check('config 键一致', JSON.stringify(a.configKeys) === JSON.stringify(b.configKeys), `node:${a.configKeys} spring:${b.configKeys}`);
   check('verify 结果一致', a.verify.body === b.verify.body, `node:${a.verify.body} spring:${b.verify.body}`);
+}
+
+// 9.5 WIN-36 (S1, D2): 登录边界 — Spring 匿名 401 vs Node 匿名 200（有意差异）
+{
+  nextProbe();
+  console.log('\n[9.5 D2 登录边界（Spring 匿名 401 vs Node 匿名 200）]');
+  const boundary = await probeD2LoginBoundary();
+  for (const [path, r] of Object.entries(boundary)) {
+    check(`${path} Spring 匿名 401 / Node 匿名 200`, r.spring === 401 && r.node === 200,
+      `node:${r.node} spring:${r.spring}`);
+  }
 }
 
 // 10. static hosting

@@ -7,13 +7,13 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.web.servlet.MockMvc;
 
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
  * T3.3 (WIN-13) — springdoc OpenAPI (F-18): the generated spec
- * ({@code /v3/api-docs}) is reachable anonymously and documents the settings /
- * tasks surface; the Swagger UI is served at {@code /swagger-ui/index.html}.
+ * ({@code /v3/api-docs}) and Swagger UI are <b>gated behind login</b> since
+ * M2 (ADR-30 门禁收口 — the public whitelist contains only health + static
+ * assets; docs are not business data but are not whitelisted either).
  */
 @SpringBootTest
 @AutoConfigureMockMvc
@@ -23,18 +23,14 @@ class OpenApiDocsTest {
     private MockMvc mockMvc;
 
     @Test
-    void apiDocsReachableAndCoverSettingsTasks() throws Exception {
+    void apiDocsGatedBehindLogin() throws Exception {
         mockMvc.perform(get("/v3/api-docs"))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.openapi").exists())
-                .andExpect(jsonPath("$.paths['/api/nova/settings']").exists())
-                .andExpect(jsonPath("$.paths['/api/nova/tasks']").exists())
-                .andExpect(jsonPath("$.paths['/api/nova/admin/prompts']").exists());
+                .andExpect(status().isUnauthorized());
     }
 
     @Test
-    void swaggerUiReachable() throws Exception {
+    void swaggerUiGatedBehindLogin() throws Exception {
         mockMvc.perform(get("/swagger-ui/index.html"))
-                .andExpect(status().isOk());
+                .andExpect(status().isUnauthorized());
     }
 }

@@ -124,6 +124,7 @@ export function needsOverwriteConfirm(job: ActiveGifJob | null): boolean {
 export function getGifCompatibleModels(): { value: GifModel; label: string }[] {
   const registry = loadRegistry();
   return getCompleteImageModels(registry)
+    .filter((model) => model.available !== false) // A5: 无可用账号不可选
     .filter((model) => isGptImageModel(model.id) && supportsCustomSize(model.id) && model.maxOutputSize === '4K')
     .map((model) => ({ value: model.id, label: model.name }));
 }

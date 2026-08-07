@@ -10,6 +10,7 @@ import com.nova.studio.infra.HttpErrorException;
 import com.nova.studio.infra.NormalizedError;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -30,6 +31,7 @@ import java.util.UUID;
  * Legacy baseUrl/apiKey query params are removed (Q1 直接移除).
  */
 @RestController
+@PreAuthorize("hasAuthority('PERM_account.test')")
 @RequestMapping("/api/nova/proxy/models")
 public class ModelListController {
 

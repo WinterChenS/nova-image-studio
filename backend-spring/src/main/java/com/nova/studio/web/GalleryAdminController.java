@@ -5,6 +5,7 @@ import com.nova.studio.auth.AuthUser;
 import com.nova.studio.gallery.GalleryDataService;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -36,6 +37,7 @@ import java.util.UUID;
  * {@code /api/nova/admin/**} first, see {@code SecurityConfig}).
  */
 @RestController
+@PreAuthorize("hasAuthority('PERM_admin.console.view')")
 @RequestMapping("/api/nova/admin")
 public class GalleryAdminController {
 

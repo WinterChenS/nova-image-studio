@@ -90,7 +90,6 @@ interface AgentParamsSettings {
 interface AgentChatWorkspaceProps {
   wideMode?: boolean;
   disabled?: boolean;
-  onConfigureApiKey?: () => void;
 }
 
 function phaseLabel(phase: AgentPhase): string | null {
@@ -103,7 +102,7 @@ function phaseLabel(phase: AgentPhase): string | null {
   }
 }
 
-export function AgentChatWorkspace({ wideMode = false, disabled = false, onConfigureApiKey }: AgentChatWorkspaceProps) {
+export function AgentChatWorkspace({ wideMode = false, disabled = false }: AgentChatWorkspaceProps) {
   const agent = useAgentChat();
   const [uploads, setUploads] = useState<PendingUpload[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -958,14 +957,17 @@ export function AgentChatWorkspace({ wideMode = false, disabled = false, onConfi
                     <button
                       key={option.value}
                       type="button"
+                      disabled={option.disabled}
                       onClick={() => {
                         applyUserModel(option.value);
                         setModelPopoverOpen(false);
                       }}
                       className={cn(
                         'w-full text-left px-2.5 py-1.5 rounded-md text-sm hover:bg-muted',
+                        option.disabled && 'pointer-events-none opacity-50',
                         userModel === option.value && 'bg-muted font-medium'
                       )}
+                      title={option.disabled ? '该模型暂无可用的账号（请联系管理员）' : undefined}
                     >
                       {option.label}
                     </button>
@@ -1124,7 +1126,6 @@ export function AgentChatWorkspace({ wideMode = false, disabled = false, onConfi
       <MissingApiKeyDialog
         open={missingApiKeyDialogOpen}
         onOpenChange={setMissingApiKeyDialogOpen}
-        onConfigure={() => onConfigureApiKey?.()}
       />
 
       <AgentAssetPickerDialog

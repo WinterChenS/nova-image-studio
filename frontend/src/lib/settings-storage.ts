@@ -28,7 +28,9 @@ export function getApiKeyFromStorage(): string {
 
 export function hasAnyApiKey(): boolean {
   const registry = loadRegistry();
-  return getCompleteImageModels(registry).length > 0 && getCompleteTextModels(registry).length > 0;
+  // WIN-25 (T18): 目录模型 apiKey 为 'catalog' 标记 —— 只要存在任一可用模型即解锁
+  const models = [...getCompleteImageModels(registry), ...getCompleteTextModels(registry)];
+  return models.some((m) => m.available !== false);
 }
 
 export function loadJsonFromStorage<T>(key: string): Partial<T> {
