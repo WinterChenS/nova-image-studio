@@ -34,7 +34,8 @@ import java.util.Map;
  *       projectId/status filters + pagination (Q1 — the generation-history
  *       filter carrier);</li>
  *   <li>{@code GET /api/nova/tasks/:id} → task object (owner-only for
- *       user-owned tasks, NULL-owner legacy tasks stay anonymously readable);</li>
+ *       user-owned tasks; NULL-owner legacy tasks readable by any logged-in
+ *       user — D2 登录收口后匿名不再可达);</li>
  *   <li>{@code POST /api/nova/tasks/:id/ack} → TTL renewal (2min grace);</li>
  *   <li>{@code PATCH /api/nova/tasks/:id/project} — WIN-22 (F-5): one-click
  *       assign to a project (owner-only; NULL-owner legacy rows stay 未分类).</li>

@@ -3,8 +3,9 @@ import { hasPerm } from '@/lib/permissions';
 import type { AuthUser } from '@/lib/auth';
 
 /**
- * WIN-30 (T23, A13) — 前端权限码判定：permissions 数组优先；旧响应（无
- * permissions 字段）按 admin 角色放行兜底；未登录/普通用户 → false。
+ * WIN-30 (T23, A13) + WIN-36 (A1) — 前端权限码判定：以 /me 注入的
+ * permissions 数组为唯一判定源（V6 回填 + 服务端恒注入后 admin 角色兜底
+ * 已不可达，WIN-36 移除）；缺失数组（旧缓存）→ false；未登录 → false。
  */
 describe('hasPerm', () => {
   const adminUser: AuthUser = {
@@ -37,12 +38,12 @@ describe('hasPerm', () => {
     expect(hasPerm('workbench.view', undefined)).toBe(false);
   });
 
-  it('falls back to admin role when permissions field is missing (legacy response)', () => {
+  it('admin without permissions field gets nothing (WIN-36 A1: no role fallback)', () => {
     const legacyAdmin: AuthUser = { id: '3', username: 'old-boss', role: 'admin' };
-    expect(hasPerm('account.manage', legacyAdmin)).toBe(true);
+    expect(hasPerm('account.manage', legacyAdmin)).toBe(false);
   });
 
-  it('legacy user without permissions gets nothing', () => {
+  it('user without permissions field gets nothing', () => {
     const legacyUser: AuthUser = { id: '4', username: 'old-user', role: 'user' };
     expect(hasPerm('account.manage', legacyUser)).toBe(false);
   });

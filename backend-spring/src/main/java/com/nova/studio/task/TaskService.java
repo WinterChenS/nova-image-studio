@@ -301,8 +301,9 @@ public class TaskService {
         if (task == null) {
             return null;
         }
-        // Isolation (T2.2): a user-owned task is only visible to its owner;
-        // NULL-owner tasks (legacy/migrated) stay anonymously readable (Q1).
+        // Isolation (T2.2) + D2 (ADR-30): a user-owned task is only visible to
+        // its owner; NULL-owner tasks (legacy/migrated) are readable by any
+        // logged-in user (登录收口后匿名不再可达).
         UUID owner = taskLookupService.findOwner(taskId);
         if (owner != null && (authUser == null || !owner.equals(authUser.id()))) {
             return null;
