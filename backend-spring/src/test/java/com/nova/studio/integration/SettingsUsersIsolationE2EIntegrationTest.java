@@ -282,7 +282,7 @@ class SettingsUsersIsolationE2EIntegrationTest {
         // N1 (WIN-12 复审): 匿名可读 NULL 归属（遗留/迁移）任务 — 直接插入一条
         // user_id = NULL 的任务行，匿名 GET 应返回 200 排队中（Q1 匿名只读边界）。
         String legacyTaskId = "legacy-null-" + UUID.randomUUID().toString().substring(0, 8);
-        taskRepository.insertTaskAndItems(legacyTaskId, null, com.nova.studio.task.TaskRepository.STATUS_QUEUED,
+        taskRepository.insertTaskAndItems(legacyTaskId, null, null, com.nova.studio.task.TaskRepository.STATUS_QUEUED,
                 "text-to-image", "{\"mode\":\"text-to-image\",\"prompt\":\"legacy\"}",
                 java.time.Instant.now().toString(), 1);
         try {

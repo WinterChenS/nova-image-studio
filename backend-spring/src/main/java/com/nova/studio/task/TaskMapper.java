@@ -25,10 +25,11 @@ import java.util.UUID;
 public interface TaskMapper extends BaseMapper<TaskEntity> {
 
     @Insert("""
-            INSERT INTO tasks (id, user_id, status, mode, request_json, created_at)
-            VALUES (#{id}, #{userId}, #{status}, #{mode}, #{requestJson}::jsonb, #{createdAt})
+            INSERT INTO tasks (id, user_id, project_id, status, mode, request_json, created_at)
+            VALUES (#{id}, #{userId}, #{projectId}, #{status}, #{mode}, #{requestJson}::jsonb, #{createdAt})
             """)
     void insertTask(@Param("id") String id, @Param("userId") UUID userId,
+                    @Param("projectId") String projectId,
                     @Param("status") String status, @Param("mode") String mode,
                     @Param("requestJson") String requestJson, @Param("createdAt") Instant createdAt);
 

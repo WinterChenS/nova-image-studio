@@ -26,6 +26,10 @@ public class UserEntity {
     private String passwordHash;
     @TableField("role")
     private String role;
+    @TableField("status")
+    private String status;
+    @TableField("last_login_at")
+    private Instant lastLoginAt;
     @TableField("created_at")
     private Instant createdAt;
     @TableField("updated_at")
@@ -61,6 +65,22 @@ public class UserEntity {
 
     public void setRole(String role) {
         this.role = role;
+    }
+
+    public String getStatus() {
+        return status;
+    }
+
+    public void setStatus(String status) {
+        this.status = status;
+    }
+
+    public Instant getLastLoginAt() {
+        return lastLoginAt;
+    }
+
+    public void setLastLoginAt(Instant lastLoginAt) {
+        this.lastLoginAt = lastLoginAt;
     }
 
     public Instant getCreatedAt() {

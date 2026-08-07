@@ -55,8 +55,9 @@ function startMockSpring(requests) {
       const chunks = [];
       req.on('data', c => chunks.push(c));
       req.on('end', () => {
-        const body = Buffer.concat(chunks).toString('utf8');
-        requests.push({ method: req.method, url: req.url, headers: req.headers, body });
+        const rawBody = Buffer.concat(chunks);
+        const body = rawBody.toString('utf8');
+        requests.push({ method: req.method, url: req.url, headers: req.headers, body, rawBody });
 
         const url = new URL(req.url, 'http://mock');
         const pathname = url.pathname.replace(/\/+$/, '');
@@ -84,6 +85,37 @@ function startMockSpring(requests) {
         if (req.method === 'GET' && pathname === '/api/nova/settings') {
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(JSON.stringify({ 'registry.defaults': {} }));
+          return;
+        }
+        // ---- WIN-22 新前缀（mock Spring 侧实现，仅验证代理透传） ----
+        if (req.method === 'GET' && pathname === '/api/nova/projects') {
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify([{ id: 'p1', name: '默认项目' }]));
+          return;
+        }
+        if (req.method === 'GET' && pathname === '/api/nova/storage/health') {
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ mode: 'disk', minioConfigured: false, bucket: null, bucketExists: false }));
+          return;
+        }
+        if (req.method === 'GET' && pathname === '/api/nova/admin/users') {
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify([{ id: 'u1', username: 'admin', role: 'admin', status: 'active' }]));
+          return;
+        }
+        if (req.method === 'GET' && pathname === '/api/nova/tasks') {
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ items: [], total: 0, page: 1, size: 20 }));
+          return;
+        }
+        if (req.method === 'PATCH' && /^\/api\/nova\/tasks\/[^/]+\/project$/.test(pathname)) {
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: true }));
+          return;
+        }
+        if (req.method === 'POST' && pathname === '/api/nova/assets') {
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ id: 'a1', ok: true }));
           return;
         }
         res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -226,4 +258,157 @@ test('WIN-21: Spring 不可达时返回 502 JSON，node 进程不崩', async t =
   // 进程仍存活，node 自有路由正常
   const queueResponse = await fetch(`${backendUrl}/api/nova/queue-status`);
   assert.equal(queueResponse.status, 200, getOutput());
+});
+
+test('WIN-22: 新前缀 projects/assets/storage/admin 透传到 Spring', async t => {
+  const requests = [];
+  const { port: springPort, server: mockServer } = await startMockSpring(requests);
+  const { child, backendUrl, tempDir, getOutput } = await startNodeBackend({
+    NOVA_SPRING_API_TARGET: `http://127.0.0.1:${springPort}`,
+  });
+  t.after(async () => {
+    await stopBackend(child);
+    mockServer.closeAllConnections?.();
+    await new Promise(resolve => mockServer.close(resolve));
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  // GET /api/nova/projects → Spring JSON
+  const projects = await fetch(`${backendUrl}/api/nova/projects`, { headers: { Authorization: 'Bearer t' } });
+  assert.equal(projects.status, 200, getOutput());
+  assert.ok(Array.isArray(await projects.json()), 'projects 应返回数组');
+
+  // GET /api/nova/storage/health → Spring JSON
+  const health = await fetch(`${backendUrl}/api/nova/storage/health`, { headers: { Authorization: 'Bearer t' } });
+  assert.equal(health.status, 200, getOutput());
+  const healthBody = await health.json();
+  assert.equal(healthBody.mode, 'disk');
+
+  // GET /api/nova/admin/users → Spring JSON
+  const users = await fetch(`${backendUrl}/api/nova/admin/users`, { headers: { Authorization: 'Bearer t' } });
+  assert.equal(users.status, 200, getOutput());
+  assert.ok(Array.isArray(await users.json()), 'users 应返回数组');
+
+  // 确认真实转发到了 mock Spring
+  assert.ok(requests.some(r => r.url.startsWith('/api/nova/projects')), 'projects 应转发');
+  assert.ok(requests.some(r => r.url.startsWith('/api/nova/storage/health')), 'storage/health 应转发');
+  assert.ok(requests.some(r => r.url.startsWith('/api/nova/admin/users')), 'admin/users 应转发');
+});
+
+test('WIN-22: GET /api/nova/tasks（列表）与 PATCH /project 透传 Spring；POST/单查仍走 Node', async t => {
+  const requests = [];
+  const { port: springPort, server: mockServer } = await startMockSpring(requests);
+  const { child, backendUrl, tempDir, getOutput } = await startNodeBackend({
+    NOVA_SPRING_API_TARGET: `http://127.0.0.1:${springPort}`,
+  });
+  t.after(async () => {
+    await stopBackend(child);
+    mockServer.closeAllConnections?.();
+    await new Promise(resolve => mockServer.close(resolve));
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  // 1. GET 列表 → 转发 Spring（node 无列表路由，透传安全）
+  const listResp = await fetch(`${backendUrl}/api/nova/tasks?projectId=p1&page=1`, {
+    headers: { Authorization: 'Bearer t' },
+  });
+  assert.equal(listResp.status, 200, getOutput());
+  assert.ok(requests.some(r => r.method === 'GET' && r.url.startsWith('/api/nova/tasks?')), 'GET 列表应转发 Spring');
+
+  // 2. PATCH 归入 → 转发 Spring
+  const patchResp = await fetch(`${backendUrl}/api/nova/tasks/t1/project`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer t' },
+    body: JSON.stringify({ projectId: 'p1' }),
+  });
+  assert.equal(patchResp.status, 200, getOutput());
+  assert.ok(requests.some(r => r.method === 'PATCH' && r.url === '/api/nova/tasks/t1/project'), 'PATCH 归入应转发 Spring');
+
+  // 3. POST 创建仍走 Node 自有 SQLite 链路（不得转发 Spring）
+  const createResp = await fetch(`${backendUrl}/api/nova/tasks`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      projectId: 'p1', mode: 'text-to-image', prompt: 'x', model: 'm', parallelCount: 1,
+      protocol: 'openai', apiKey: 'sk-test', baseUrl: 'https://api.openai.com/v1',
+    }),
+  });
+  assert.equal(createResp.status, 202, getOutput());
+  assert.equal(requests.some(r => r.method === 'POST' && r.url === '/api/nova/tasks'), false, 'POST 创建不得转发 Spring');
+  const created = await createResp.json();
+  assert.ok(created.taskId, '应返回 node 侧 taskId');
+
+  // 4. GET 单查仍走 Node（SQLite 中能查到刚创建的任务）
+  const single = await fetch(`${backendUrl}/api/nova/tasks/${created.taskId}`);
+  assert.equal(single.status, 200, getOutput());
+  const singleBody = await single.json();
+  assert.equal(singleBody.id, created.taskId);
+});
+
+test('WIN-22: multipart 二进制请求经代理往返字节一致（Buffer 修复回归）', async t => {
+  const requests = [];
+  const { port: springPort, server: mockServer } = await startMockSpring(requests);
+  const { child, backendUrl, tempDir, getOutput } = await startNodeBackend({
+    NOVA_SPRING_API_TARGET: `http://127.0.0.1:${springPort}`,
+  });
+  t.after(async () => {
+    await stopBackend(child);
+    mockServer.closeAllConnections?.();
+    await new Promise(resolve => mockServer.close(resolve));
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  // 构造一段含非 UTF-8 字节的二进制负载（模拟 PNG 图片 multipart）
+  const binary = Buffer.from([
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xd8, 0xff, 0xe0,
+    0x00, 0x10, 0x8a, 0x9b, 0x01, 0x02, 0x03, 0xfe, 0xfd, 0xfc, 0x00, 0x80, 0x7f,
+  ]);
+  const boundary = '----win22-test-boundary';
+  const prefix = Buffer.from(
+    `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="a.png"\r\nContent-Type: image/png\r\n\r\n`,
+    'utf8',
+  );
+  const suffix = Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8');
+  const body = Buffer.concat([prefix, binary, suffix]);
+
+  const resp = await fetch(`${backendUrl}/api/nova/assets`, {
+    method: 'POST',
+    headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
+    body,
+  });
+  assert.equal(resp.status, 200, getOutput());
+
+  // mock Spring 记录原始 Buffer，断言二进制部分逐字节一致（utf8 字符串方案会损坏）
+  const forwarded = requests.find(r => r.method === 'POST' && r.url === '/api/nova/assets');
+  assert.ok(forwarded, '应转发到 /api/nova/assets');
+  const forwardedBuf = forwarded.rawBody;
+  const start = forwardedBuf.indexOf(binary.subarray(0, 8));
+  assert.ok(start >= 0, '二进制负载应原样到达上游');
+  assert.ok(binary.equals(forwardedBuf.subarray(start, start + binary.length)),
+    `二进制字节应逐字节一致: ${forwardedBuf.subarray(start, start + binary.length).toString('hex')}`);
+});
+
+test('WIN-22: 超过 10MB 的请求体可经代理透传（body 上限调升至 21MB）', async t => {
+  const requests = [];
+  const { port: springPort, server: mockServer } = await startMockSpring(requests);
+  const { child, backendUrl, tempDir, getOutput } = await startNodeBackend({
+    NOVA_SPRING_API_TARGET: `http://127.0.0.1:${springPort}`,
+  });
+  t.after(async () => {
+    await stopBackend(child);
+    mockServer.closeAllConnections?.();
+    await new Promise(resolve => mockServer.close(resolve));
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const bigPayload = JSON.stringify({ blob: 'x'.repeat(11 * 1024 * 1024) }); // ~11MB > 旧 10MB
+  const resp = await fetch(`${backendUrl}/api/nova/assets`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: bigPayload,
+  });
+  assert.equal(resp.status, 200, getOutput());
+  const forwarded = requests.find(r => r.url === '/api/nova/assets');
+  assert.ok(forwarded, '应转发到上游');
+  assert.ok(forwarded.body.length > 10 * 1024 * 1024, `上游应收到 >10MB body（实际 ${forwarded.body.length}）`);
 });

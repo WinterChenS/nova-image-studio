@@ -1,8 +1,7 @@
 package com.nova.studio.web;
 
 import com.nova.studio.storage.ImageStorageService;
-import org.springframework.core.io.FileSystemResource;
-import org.springframework.core.io.Resource;
+import com.nova.studio.storage.ImageStorageService.StoredImage;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -12,15 +11,15 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
-import java.nio.file.Path;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * Image hosting (T1.4) — {@code GET /api/nova/images/{taskId}/{index} }.
  * Port of the Node handler: taskId validated against {@code [a-zA-Z0-9-]},
- * common {@code {taskId}-{index}-0.{ext}} candidates tried first (no directory
- * scan), prefix scan fallback for multi-subimage tasks, {@code Cache-Control:
- * private, max-age=3600} and content type by extension.
+ * {@code Cache-Control: private, max-age=3600} and content type by extension.
+ * WIN-22 (ADR-13): reads route through {@link ImageStorageService#resolveTaskImage}
+ * — disk files or MinIO objects (contract unchanged, F-31/N-3).
  */
 @RestController
 @RequestMapping("/api/nova/images")
@@ -40,52 +39,20 @@ public class ImageController {
         if (!TASK_ID_PATTERN.matcher(taskId).matches()) {
             return ResponseEntity.badRequest().body(Map.of("error", "Invalid taskId"));
         }
-        Path file = imageStorageService.resolveItemImage(taskId, index);
-        if (file == null) {
+        Optional<StoredImage> image = imageStorageService.resolveTaskImage(taskId, index);
+        if (image.isEmpty()) {
             return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", "Not Found"));
         }
-        Resource resource = new FileSystemResource(file.toFile());
-        String contentType = contentTypeFor(file);
+        StoredImage stored = image.get();
         // exact header string to match the Node backend byte-for-byte
         return ResponseEntity.ok()
-                .contentType(MediaType.parseMediaType(contentType))
+                .contentType(MediaType.parseMediaType(stored.contentType()))
                 .header(HttpHeaders.CACHE_CONTROL, "private, max-age=3600")
-                .body(resource);
+                .body(stored.data());
     }
 
-    /** Node getContentType — extension-based content type map. */
-    public static String contentTypeFor(Path file) {
-        String name = file.getFileName().toString().toLowerCase();
-        if (name.endsWith(".html")) {
-            return "text/html; charset=utf-8";
-        }
-        if (name.endsWith(".js")) {
-            return "application/javascript; charset=utf-8";
-        }
-        if (name.endsWith(".css")) {
-            return "text/css; charset=utf-8";
-        }
-        if (name.endsWith(".json")) {
-            return "application/json; charset=utf-8";
-        }
-        if (name.endsWith(".png")) {
-            return "image/png";
-        }
-        if (name.endsWith(".jpg") || name.endsWith(".jpeg")) {
-            return "image/jpeg";
-        }
-        if (name.endsWith(".webp")) {
-            return "image/webp";
-        }
-        if (name.endsWith(".svg")) {
-            return "image/svg+xml";
-        }
-        if (name.endsWith(".ico")) {
-            return "image/x-icon";
-        }
-        if (name.endsWith(".txt")) {
-            return "text/plain; charset=utf-8";
-        }
-        return "application/octet-stream";
+    /** Node getContentType — extension-based content type map (kept for compat). */
+    public static String contentTypeFor(java.nio.file.Path file) {
+        return ImageStorageService.contentTypeFor(file);
     }
 }

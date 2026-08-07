@@ -46,7 +46,7 @@ class TaskQueueServiceTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private TaskRepository.TaskRow row(String id, String status, int parallelCount) {
-        return new TaskRepository.TaskRow(id, null, status, "text-to-image",
+        return new TaskRepository.TaskRow(id, null, null, status, "text-to-image",
                 "{\"mode\":\"text-to-image\",\"protocol\":\"openai\",\"baseUrl\":\"http://upstream\","
                         + "\"prompt\":\"a cat\",\"model\":\"gpt-image-1\",\"parallelCount\":" + parallelCount
                         + ",\"images\":[]}",

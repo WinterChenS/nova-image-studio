@@ -1,10 +1,11 @@
 'use client';
 
-import { addImageAsset, findImageAssetByBlob, getAssetBlob, getAssetFileExtension, touchImageAsset, type AssetSourceKind, type ImageAsset } from '@/lib/asset-store';
+import { getAssetBlob, getAssetFileExtension, touchImageAsset, type AssetSourceKind } from '@/lib/asset-store';
 import { getAgentImageBytes } from '@/lib/agent-context-store';
 import { getImageSrc, type RefImageData } from '@/lib/job-store';
 import { getStoredBlob } from '@/lib/image-downloader';
 import { getOptimizationBadge, prepareUploadImage } from '@/lib/upload-image-cache';
+import { createImageAsset, type ServerAsset } from '@/lib/assets-api';
 
 export interface ImageActionPayload {
   id?: string;
@@ -26,6 +27,7 @@ export interface ImageActionPayload {
   sourceRef?: string;
   prompt?: string;
   note?: string;
+  projectId?: string; // WIN-22 (F-13): 保存到素材的目标项目（缺省服务端兜底默认项目）
 }
 
 export interface ImageActionToastDetail {
@@ -222,23 +224,28 @@ export async function copyImagePayload(payload: ImageActionPayload): Promise<voi
   touchAssetSilently(payload.assetId);
 }
 
-export async function addImagePayloadToAssets(payload: ImageActionPayload): Promise<{ asset: ImageAsset; alreadyExists: boolean }> {
+export async function addImagePayloadToAssets(payload: ImageActionPayload): Promise<{ asset: ServerAsset; alreadyExists: boolean }> {
   const blob = await resolveImagePayloadToBlob(payload);
-  const existingAsset = await findImageAssetByBlob(blob);
-  if (existingAsset) {
-    await touchImageAsset(existingAsset.id);
-    return { asset: existingAsset, alreadyExists: true };
+  try {
+    const asset = await createImageAsset({
+      file: blob,
+      projectId: payload.projectId ?? '',
+      name: payload.name,
+      sourceKind: payload.sourceKind,
+      sourceLabel: payload.sourceLabel,
+      sourceRef: payload.sourceRef || payload.id || payload.assetId || payload.agentImageId,
+      prompt: payload.prompt,
+      note: payload.note,
+    });
+    return { asset, alreadyExists: false };
+  } catch (error) {
+    // R-5：同项目同图去重 → 服务端 409 ASSET_ALREADY_EXISTS，提示「已存在」
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes('已存在')) {
+      return { asset: { id: '', kind: 'image', projectId: null, tags: [], sourceKind: payload.sourceKind, createdAt: '', updatedAt: '' } as ServerAsset, alreadyExists: true };
+    }
+    throw error;
   }
-  const asset = await addImageAsset({
-    blob,
-    name: payload.name,
-    sourceKind: payload.sourceKind,
-    sourceLabel: payload.sourceLabel,
-    sourceRef: payload.sourceRef || payload.id || payload.assetId || payload.agentImageId,
-    prompt: payload.prompt,
-    note: payload.note,
-  });
-  return { asset, alreadyExists: false };
 }
 
 export async function applyImagePayloadAsReference(payload: ImageActionPayload): Promise<void> {

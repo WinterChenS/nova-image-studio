@@ -45,6 +45,7 @@ export interface CreateNovaTaskInput {
   gptImageBackground?: GptImageBackground;
   parallelCount: number;
   images: ImageReference[];
+  projectId?: string; // WIN-22 (F-4): 当前项目上下文（生成任务归属）
 }
 
 export interface NovaTaskResponse {
@@ -57,6 +58,7 @@ export interface NovaTaskResponse {
   createdAt?: string;
   completedAt?: string;
   expiresAt?: string;
+  projectId?: string; // WIN-22 (F-4)
 }
 
 export interface NovaQueueStatus {

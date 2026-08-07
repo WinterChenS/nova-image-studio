@@ -27,9 +27,10 @@ spring:
 server:
   port: ${PORT:8080}
   shutdown: graceful
-  # Matches the Node backend's 10MB request body cap (readJsonBody). Oversized
-  # bodies surface as a 413 PAYLOAD_TOO_LARGE via GlobalExceptionHandler.
-  max-http-request-size: 10MB
+  # WIN-22 (Q2): raised to ≥21MB so 20MB asset uploads survive the proxy/body caps
+  # (matches the Node backend's MAX_REQUEST_BODY_BYTES). Oversized bodies surface
+  # as a 413 PAYLOAD_TOO_LARGE via GlobalExceptionHandler.
+  max-http-request-size: 21MB
 
 management:
   endpoints:
@@ -63,4 +64,6 @@ nova:
     static-dir: ${NOVA_STATIC_DIR:../frontend/out}
     prompts-path: ${NOVA_PROMPTS_PATH:../backend/prompts.json}
     blacklist-path: ${NOVA_BLACKLIST_PATH:../backend/blacklist.json}
+    # WIN-22 (N-7): single-asset upload ceiling (business limit, default 20MB)
+    max-upload-bytes: ${NOVA_MAX_UPLOAD_BYTES:20971520}
   env-file: ${NOVA_ENV_FILE:.env}

@@ -36,6 +36,9 @@ public class TaskLookupService implements WsTaskLookup {
         }
         map.put("id", task.id());
         map.put("status", task.status());
+        if (task.projectId() != null) {
+            map.put("projectId", task.projectId());
+        }
         if (task.mode() != null) {
             map.put("mode", task.mode());
         }

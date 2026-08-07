@@ -1,9 +1,7 @@
 package com.nova.studio.storage;
 
-import com.nova.studio.infra.RuntimeEnv;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
@@ -13,28 +11,34 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Optional;
 
 /**
- * Disk image storage + hosting lookup (T1.4) — port of the Node backend's
- * {@code saveImageToDisk} / {@code getTaskImageFiles} / {@code deleteTaskImageFiles}.
- * File naming stays exactly {@code {taskId}-{itemIndex}-{subIndex}.{ext}} with
- * extension derived from the mime type (jpeg/jpg → jpg, webp → webp, else png).
- * The directory is {@code NOVA_IMAGE_DIR} (runtime-hot, A.5-Q8/H8: disk + interface
- * so an object store can be added in P2).
+ * Task-image facade (T1.4 + WIN-22 ADR-13). Keeps the Node-backend contract
+ * ({@code {taskId}-{itemIndex}-{subIndex}.{ext}} flat naming on disk,
+ * {@code GET /api/nova/images/{taskId}/{index}} unchanged) while routing the
+ * actual bytes through {@link ObjectStorageManager}:
+ * <ul>
+ *   <li>disk mode → existing flat files under {@code NOVA_IMAGE_DIR};</li>
+ *   <li>minio mode → keys {@code tasks/{taskId}/{itemIndex}-{subIndex}.{ext}}.</li>
+ * </ul>
+ * Degraded writes land on disk only (no dual-write, ARCH E.4).
  */
 @Service
 public class ImageStorageService {
 
     private static final Logger log = LoggerFactory.getLogger(ImageStorageService.class);
 
-    private final RuntimeEnv runtimeEnv;
+    private final ObjectStorageManager storageManager;
 
-    public ImageStorageService(RuntimeEnv runtimeEnv) {
-        this.runtimeEnv = runtimeEnv;
+    public ImageStorageService(ObjectStorageManager storageManager) {
+        this.storageManager = storageManager;
     }
 
     public Path imageDir() {
-        return Path.of(runtimeEnv.getString("NOVA_IMAGE_DIR", "./data/nova-images"));
+        return storageManager.active() instanceof DiskStorageService disk
+                ? disk.rootDir()
+                : Path.of("./data/nova-images");
     }
 
     public static String getImageExtension(String mimeType) {
@@ -47,9 +51,20 @@ public class ImageStorageService {
         return "png";
     }
 
-    /** Writes an image buffer to disk; returns the public http URL. */
+    /** MinIO object key for a task image (mode-aware naming, F-31). */
+    public static String taskImageKey(String taskId, int itemIndex, int subIndex, String ext) {
+        return "tasks/" + taskId + "/" + itemIndex + "-" + subIndex + "." + ext;
+    }
+
+    /** Writes an image buffer (MinIO when active, else disk); returns the public http URL. */
     public String saveImageToDisk(String taskId, int itemIndex, int subIndex, byte[] imageBuffer, String mimeType) {
         String ext = getImageExtension(mimeType);
+        if (storageManager.isMinioActive()) {
+            String key = taskImageKey(taskId, itemIndex, subIndex, ext);
+            storageManager.active().put(key, imageBuffer, mimeType);
+            log.debug("[image-storage] saved {} (minio)", key);
+            return "/api/nova/images/" + taskId + "/" + itemIndex;
+        }
         String fileName = taskId + "-" + itemIndex + "-" + subIndex + "." + ext;
         Path filePath = imageDir().resolve(fileName);
         try {
@@ -62,7 +77,7 @@ public class ImageStorageService {
         return "/api/nova/images/" + taskId + "/" + itemIndex;
     }
 
-    /** Downloads a remote image URL to disk. */
+    /** Downloads a remote image URL and stores it (same routing as saveImageToDisk). */
     public String downloadUrlToDisk(String taskId, int itemIndex, int subIndex, String imageUrl) {
         java.net.http.HttpClient client = java.net.http.HttpClient.newBuilder()
                 .connectTimeout(java.time.Duration.ofSeconds(30)).build();
@@ -115,8 +130,19 @@ public class ImageStorageService {
         }
     }
 
-    /** Deletes all image files belonging to a task. */
+    /** Deletes all images of a task — disk prefix scan or MinIO prefix list. */
     public int deleteTaskImageFiles(String taskId) {
+        if (storageManager.isMinioActive()) {
+            List<String> keys = storageManager.active().listByPrefix("tasks/" + taskId + "/");
+            int deleted = 0;
+            for (String key : keys) {
+                if (storageManager.active().delete(key)) {
+                    deleted++;
+                }
+            }
+            log.info("[image-lifecycle] 任务图片清理完成(minio): taskId={}, total={}, deleted={}", taskId, keys.size(), deleted);
+            return deleted;
+        }
         List<Path> files = getTaskImageFiles(taskId);
         int deleted = 0;
         for (Path file : files) {
@@ -131,7 +157,8 @@ public class ImageStorageService {
     /**
      * Resolves the file for GET /api/nova/images/{taskId}/{index}: tries the
      * common {taskId}-{index}-0.{png,jpg,webp} candidates first (no directory
-     * scan), then falls back to a prefix scan — port of the Node handler.
+     * scan), then falls back to a prefix scan — port of the Node handler
+     * (disk mode only; MinIO mode is handled by {@link #resolveTaskImage}).
      */
     public Path resolveItemImage(String taskId, int index) {
         Path dir = imageDir();
@@ -157,5 +184,78 @@ public class ImageStorageService {
         }
         files.sort(Comparator.comparing(p -> p.getFileName().toString()));
         return files.isEmpty() ? null : files.get(0);
+    }
+
+    /** Mode-aware byte resolution for the image controller. */
+    public Optional<StoredImage> resolveTaskImage(String taskId, int index) {
+        if (storageManager.isMinioActive()) {
+            for (String ext : new String[]{"png", "jpg", "webp"}) {
+                String key = taskImageKey(taskId, index, 0, ext);
+                Optional<byte[]> bytes = storageManager.active().get(key);
+                if (bytes.isPresent()) {
+                    return Optional.of(new StoredImage(bytes.get(), contentTypeForExt(ext)));
+                }
+            }
+            return Optional.empty();
+        }
+        Path file = resolveItemImage(taskId, index);
+        if (file == null) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(new StoredImage(Files.readAllBytes(file), contentTypeFor(file)));
+        } catch (IOException e) {
+            log.warn("[image-storage] 读取失败: {}", file, e);
+            return Optional.empty();
+        }
+    }
+
+    public record StoredImage(byte[] data, String contentType) {
+    }
+
+    /** Extension → content type (mirrors the Node map used by ImageController). */
+    public static String contentTypeForExt(String ext) {
+        return switch (ext.toLowerCase()) {
+            case "png" -> "image/png";
+            case "jpg", "jpeg" -> "image/jpeg";
+            case "webp" -> "image/webp";
+            default -> "application/octet-stream";
+        };
+    }
+
+    /** Node getContentType — extension-based content type map. */
+    public static String contentTypeFor(Path file) {
+        String name = file.getFileName().toString().toLowerCase();
+        if (name.endsWith(".html")) {
+            return "text/html; charset=utf-8";
+        }
+        if (name.endsWith(".js")) {
+            return "application/javascript; charset=utf-8";
+        }
+        if (name.endsWith(".css")) {
+            return "text/css; charset=utf-8";
+        }
+        if (name.endsWith(".json")) {
+            return "application/json; charset=utf-8";
+        }
+        if (name.endsWith(".png")) {
+            return "image/png";
+        }
+        if (name.endsWith(".jpg") || name.endsWith(".jpeg")) {
+            return "image/jpeg";
+        }
+        if (name.endsWith(".webp")) {
+            return "image/webp";
+        }
+        if (name.endsWith(".svg")) {
+            return "image/svg+xml";
+        }
+        if (name.endsWith(".ico")) {
+            return "image/x-icon";
+        }
+        if (name.endsWith(".txt")) {
+            return "text/plain; charset=utf-8";
+        }
+        return "application/octet-stream";
     }
 }

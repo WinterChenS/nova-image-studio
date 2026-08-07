@@ -32,7 +32,7 @@ public class TaskRepository {
     public static final String STATUS_EXPIRED = "expired";
 
     /** Public row shape (service/test contract, unchanged). */
-    public record TaskRow(String id, String userId, String status, String mode,
+    public record TaskRow(String id, String userId, String projectId, String status, String mode,
                           String requestJson, String resultJson, String error, String warning,
                           Instant createdAt, Instant completedAt, Instant expiresAt) {
     }
@@ -52,10 +52,10 @@ public class TaskRepository {
     }
 
     @Transactional
-    public void insertTaskAndItems(String id, UUID userId, String status, String mode,
+    public void insertTaskAndItems(String id, UUID userId, String projectId, String status, String mode,
                                    String requestJson, String createdAt, int itemCount) {
         Instant created = Instant.parse(createdAt);
-        mapper.insertTask(id, userId, status, mode, requestJson, created);
+        mapper.insertTask(id, userId, projectId, status, mode, requestJson, created);
         for (int i = 0; i < itemCount; i++) {
             mapper.insertItem(id, i, status, created);
         }
@@ -136,6 +136,77 @@ public class TaskRepository {
         return mapper.findExpired(now);
     }
 
+    /** WIN-22: count a user's tasks in a project (project stats F-6).
+     *  B-1: tasks.user_id 为 UUID 列（V2），必须 {0}::uuid 绑定，否则 PG 报
+     *  operator does not exist: uuid = character varying。 */
+    public long countByUserAndProject(UUID userId, String projectId) {
+        return mapper.selectCount(new LambdaQueryWrapper<TaskEntity>()
+                .apply("user_id = {0}::uuid", userId.toString())
+                .eq(TaskEntity::getProjectId, projectId));
+    }
+
+    /** WIN-22: last task activity in a project (max created_at). */
+    public Instant lastActivityByProject(UUID userId, String projectId) {
+        List<TaskEntity> rows = mapper.selectList(new LambdaQueryWrapper<TaskEntity>()
+                .apply("user_id = {0}::uuid", userId.toString())
+                .eq(TaskEntity::getProjectId, projectId)
+                .orderByDesc(TaskEntity::getCreatedAt)
+                .last("LIMIT 1"));
+        return rows.isEmpty() ? null : rows.get(0).getCreatedAt();
+    }
+
+    /** WIN-22: project delete cascade — tasks fall back to 未分类 (NULL, G-4). */
+    public void clearProjectId(String projectId) {
+        TaskEntity patch = new TaskEntity();
+        patch.setProjectId(null);
+        mapper.update(patch, new LambdaQueryWrapper<TaskEntity>()
+                .eq(TaskEntity::getProjectId, projectId));
+    }
+
+    /** WIN-22 (D.3): one-click assign (F-5) — {@code projectId} null = 未分类. */
+    public void updateProjectId(String taskId, String projectId) {
+        TaskEntity patch = new TaskEntity();
+        patch.setProjectId(projectId);
+        mapper.update(patch, new LambdaQueryWrapper<TaskEntity>().eq(TaskEntity::getId, taskId));
+    }
+
+    /** WIN-22 (D.3/Q1): owner-scoped task history — filters + pagination (newest first).
+     *  B-1/B-3: user_id 用 {0}::uuid 绑定（UUID 列）；计数 wrapper 与列表 wrapper
+     *  分离，避免 COUNT 查询携带 ORDER BY（PG 报 must appear in GROUP BY）。 */
+    public TaskPage searchByUser(UUID userId, String projectId, String status, int page, int size) {
+        LambdaQueryWrapper<TaskEntity> countWrapper = new LambdaQueryWrapper<>();
+        applyTaskFilters(countWrapper, userId, projectId, status);
+        Long total = mapper.selectCount(countWrapper);
+
+        LambdaQueryWrapper<TaskEntity> wrapper = new LambdaQueryWrapper<>();
+        applyTaskFilters(wrapper, userId, projectId, status);
+        wrapper.orderByDesc(TaskEntity::getCreatedAt);
+        int offset = Math.max(0, (page - 1) * size);
+        wrapper.last("LIMIT " + size + " OFFSET " + offset);
+        List<TaskRow> items = mapper.selectList(wrapper).stream()
+                .map(TaskRepository::toRow).toList();
+        return new TaskPage(items, total == null ? 0 : total);
+    }
+
+    /** Shared owner/filter conditions for task search (count + list wrappers). */
+    static void applyTaskFilters(LambdaQueryWrapper<TaskEntity> wrapper, UUID userId,
+                                 String projectId, String status) {
+        wrapper.apply("user_id = {0}::uuid", userId.toString());
+        if (projectId != null && !projectId.isBlank()) {
+            if ("__unclassified__".equals(projectId)) {
+                wrapper.isNull(TaskEntity::getProjectId);
+            } else {
+                wrapper.eq(TaskEntity::getProjectId, projectId);
+            }
+        }
+        if (status != null && !status.isBlank()) {
+            wrapper.eq(TaskEntity::getStatus, status);
+        }
+    }
+
+    public record TaskPage(List<TaskRow> items, long total) {
+    }
+
     @Transactional
     public void deleteTaskAndItems(String id) {
         mapper.deleteItems(id);
@@ -143,7 +214,7 @@ public class TaskRepository {
     }
 
     private static TaskRow toRow(TaskEntity e) {
-        return new TaskRow(e.getId(), e.getUserId(), e.getStatus(), e.getMode(),
+        return new TaskRow(e.getId(), e.getUserId(), e.getProjectId(), e.getStatus(), e.getMode(),
                 e.getRequestJson(), e.getResultJson(), e.getError(), e.getWarning(),
                 e.getCreatedAt(), e.getCompletedAt(), e.getExpiresAt());
     }
