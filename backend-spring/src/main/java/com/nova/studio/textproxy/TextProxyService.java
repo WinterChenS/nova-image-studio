@@ -112,6 +112,7 @@ public class TextProxyService {
         cleaned.remove("baseUrl");
         cleaned.remove("apiKey");
         cleaned.remove("model");
+        cleaned.remove("modelId");
         cleaned.remove("stream");
         cleaned.remove("requestBody");
         return cleaned;

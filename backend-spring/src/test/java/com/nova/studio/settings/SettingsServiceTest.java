@@ -1,6 +1,5 @@
 package com.nova.studio.settings;
 
-import com.nova.studio.infra.RuntimeEnv;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import tools.jackson.databind.ObjectMapper;
@@ -22,27 +21,22 @@ import static org.mockito.Mockito.when;
 /**
  * M2 T2.1/T2.6 — settings package: allowlist validation, whole-package
  * upsert/invalidate, numeric reads for limit.*, and the legacy localStorage
- * import (model id remapping onto server UUIDs).
+ * import (settings only — the legacy model branch is 下线, WIN-33).
  */
 class SettingsServiceTest {
 
     private static final UUID USER_ID = UUID.fromString("11111111-1111-1111-1111-111111111111");
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final String B64_KEY = "PttkTlCYSIm//Wgi+gWi9mWU9azNwKZmYWlqrF6cGMk=";
 
     private SettingsRepository repository;
     private SettingsCache cache;
-    private ModelRepository modelRepository;
     private SettingsService service;
 
     @BeforeEach
     void setUp() {
         repository = mock(SettingsRepository.class);
         cache = new SettingsCache();
-        modelRepository = mock(ModelRepository.class);
-        ModelService modelService = new ModelService(modelRepository, new CryptoService(B64_KEY), MAPPER, mock(RuntimeEnv.class));
-        service = new SettingsService(repository, cache, modelRepository, modelService,
-                new CryptoService(B64_KEY), MAPPER);
+        service = new SettingsService(repository, cache, MAPPER);
     }
 
     @Test
@@ -93,13 +87,7 @@ class SettingsServiceTest {
     }
 
     @Test
-    void importLegacyMapsModelsAndDefaultsToServerUuids() {
-        UUID imgUuid = UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
-        UUID txtUuid = UUID.fromString("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
-        when(modelRepository.insert(any(), anyString(), anyString(), anyString(), anyString(), anyString(),
-                anyString(), anyString(), any()))
-                .thenReturn(imgUuid, txtUuid);
-
+    void importLegacyImportsSettingsOnly_modelsBranchOffline() {
         ObjectNode legacy = MAPPER.createObjectNode();
         ObjectNode registry = MAPPER.createObjectNode();
         tools.jackson.databind.node.ArrayNode imageModels = MAPPER.createArrayNode().add(imageModel("img_1", "sk-legacy-key-1234"));
@@ -117,17 +105,14 @@ class SettingsServiceTest {
 
         var summary = service.importLegacy(USER_ID, legacy);
 
-        assertThat(summary.get("modelsCreated")).isEqualTo(2);
-        // defaults remapped to server UUIDs
-        verify(repository).upsert(eq(USER_ID), eq("registry.defaults"),
-                org.mockito.ArgumentMatchers.contains("\"textToImage\":\"" + imgUuid + "\""), eq("json"));
-        verify(repository).upsert(eq(USER_ID), eq("registry.defaults"),
-                org.mockito.ArgumentMatchers.contains("\"agent\":\"" + txtUuid + "\""), eq("json"));
+        // WIN-33: 旧 models 表逻辑冻结 — 模型导入分支下线：不写 models，也不再写
+        // registry.defaults（其引用的 legacy 模型 id 已无意义），但 settings 导入保留。
+        assertThat(summary.get("modelsCreated")).isEqualTo(0);
+        assertThat(summary.get("modelsImport")).isEqualTo("deprecated");
+        assertThat(summary.get("settingsWritten")).isEqualTo(2);
+        verify(repository, never()).upsert(eq(USER_ID), eq("registry.defaults"), anyString(), anyString());
         verify(repository).upsert(USER_ID, "workbench.t2i", "{\"model\":\"img_1\"}", "json");
         verify(repository).upsert(USER_ID, "agent.webSearch", "true", "json");
-        // legacy apiKey was encrypted (v1: prefix), never stored plaintext
-        verify(modelRepository).insert(any(), eq("image"), eq("openai"), anyString(), anyString(), anyString(),
-                org.mockito.ArgumentMatchers.startsWith("v1:"), anyString(), anyString());
     }
 
     private ObjectNode imageModel(String id, String apiKey) {

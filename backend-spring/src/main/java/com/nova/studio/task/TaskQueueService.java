@@ -1,6 +1,14 @@
 package com.nova.studio.task;
 
+import com.nova.studio.accountpool.AccountHealthService;
+import com.nova.studio.accountpool.AccountRepository;
+import com.nova.studio.accountpool.AccountScheduler;
+import com.nova.studio.accountpool.AccountService;
+import com.nova.studio.accountpool.CatalogModelRepository;
+import com.nova.studio.accountpool.CatalogModelService;
+import com.nova.studio.audit.UsageCollector;
 import com.nova.studio.imagegen.ImageGenService;
+import com.nova.studio.infra.HttpErrorException;
 import com.nova.studio.infra.NormalizedError;
 import com.nova.studio.storage.ImageStorageService;
 import com.nova.studio.ws.TaskEventBroadcaster;
@@ -12,34 +20,41 @@ import tools.jackson.databind.ObjectMapper;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
 /**
- * Task queue with slot concurrency (T1.2) — faithful port of the Node backend's
+ * Task queue with slot concurrency (T1.2) — port of the Node backend's
  * {@code drainQueue} / {@code runTask} / {@code generateSingleImage}
- * ({@code backend/server.js}):
+ * ({@code backend/server.js}), WIN-28 T5 pool dispatch:
  * <ul>
- *   <li>concurrency = image <b>slots</b> ({@code parallelCount} per task), cap 50
- *       ({@code NOVA_TASK_CONCURRENCY}, clamped to [1,50]);</li>
- *   <li>oversized exclusive run: a task whose slots exceed the cap may run alone
- *       when the queue is idle (otherwise it would never be scheduled);</li>
- *   <li>state machine: '排队中' → processing → completed|failed (expired derived
- *       on read); items updated independently;</li>
- *   <li>runtime state (apiKey / ref images / source counters) held in memory —
- *       the same way the Node backend keeps {@code apiKeys}/{@code taskRefImages}
- *       out of the DB; lost on restart, and stale tasks are failed at startup.</li>
+ *   <li>concurrency = image <b>slots</b> ({@code parallelCount} per task), cap 50;</li>
+ *   <li>state machine: '排队中' → processing → completed|failed;</li>
+ *   <li>runtime state (catalog model id / ref images / per-user source counters)
+ *       held in memory — the account is <b>selected at dispatch</b> by
+ *       {@link AccountScheduler} (least in-flight + round-robin + cooldown,
+ *       ADR-23), in-flight tracked per account, and retriable failures switch
+ *       accounts ≤2 retries (R3: 401/4xx never retried; A3/A4/A21);</li>
+ *   <li>health outcomes recorded via {@link AccountHealthService} (broken
+ *       threshold → manual recovery).</li>
  * </ul>
  */
 @Service
 public class TaskQueueService {
 
     private static final Logger log = LoggerFactory.getLogger(TaskQueueService.class);
+
+    /** R3: 换账号重试 ≤2 次（最多 3 次尝试）。 */
+    static final int MAX_ATTEMPTS = 3;
 
     private final TaskRepository repository;
     private final ImageGenService imageGenService;
@@ -48,6 +63,11 @@ public class TaskQueueService {
     private final ObjectMapper objectMapper;
     private final QueueStatsService queueStatsService;
     private final TaskMetrics taskMetrics;
+    private final AccountScheduler accountScheduler;
+    private final AccountHealthService accountHealthService;
+    private final AccountService accountService;
+    private final CatalogModelService catalogModelService;
+    private final UsageCollector usageCollector;
     private final long ttlMs;
     private final long requestTimeoutMs;
 
@@ -58,13 +78,14 @@ public class TaskQueueService {
     private int activeSlots = 0;
 
     // Runtime state mirrors (Node: apiKeys / taskRefImages / taskSources / pending counters)
-    private final Map<String, String> apiKeys = new ConcurrentHashMap<>();
+    private final Map<String, String> catalogModelIds = new ConcurrentHashMap<>();
     private final Map<String, List<TaskRequest.ImageReference>> taskRefImages = new ConcurrentHashMap<>();
     private final Map<String, Source> taskSources = new ConcurrentHashMap<>();
     private final Map<String, Integer> pendingCountByIp = new ConcurrentHashMap<>();
-    private final Map<String, Integer> pendingCountByApiKeyHash = new ConcurrentHashMap<>();
+    private final Map<String, Integer> pendingCountByUserId = new ConcurrentHashMap<>();
 
-    public record Source(String ip, String apiKeyHash) {
+    /** T12 (ADR-27): per-source = IP + userId (apiKeyHash 维度下线). */
+    public record Source(String ip, String userId) {
     }
 
     public TaskQueueService(TaskRepository repository,
@@ -74,6 +95,11 @@ public class TaskQueueService {
                             ObjectMapper objectMapper,
                             QueueStatsService queueStatsService,
                             TaskMetrics taskMetrics,
+                            AccountScheduler accountScheduler,
+                            AccountHealthService accountHealthService,
+                            AccountService accountService,
+                            CatalogModelService catalogModelService,
+                            UsageCollector usageCollector,
                             @Value("${nova.task.ttl-ms:43200000}") long ttlMs,
                             @Value("${nova.task.request-timeout-ms:1800000}") long requestTimeoutMs) {
         this.repository = repository;
@@ -83,16 +109,21 @@ public class TaskQueueService {
         this.objectMapper = objectMapper;
         this.queueStatsService = queueStatsService;
         this.taskMetrics = taskMetrics;
+        this.accountScheduler = accountScheduler;
+        this.accountHealthService = accountHealthService;
+        this.accountService = accountService;
+        this.catalogModelService = catalogModelService;
+        this.usageCollector = usageCollector;
         this.ttlMs = ttlMs;
         this.requestTimeoutMs = requestTimeoutMs;
     }
 
     // ===== runtime state =====
 
-    public void registerRuntimeState(String taskId, String apiKey, List<TaskRequest.ImageReference> images,
+    public void registerRuntimeState(String taskId, String catalogModelId, List<TaskRequest.ImageReference> images,
                                      Source source) {
-        if (apiKey != null) {
-            apiKeys.put(taskId, apiKey);
+        if (catalogModelId != null) {
+            catalogModelIds.put(taskId, catalogModelId);
         }
         if (images != null) {
             taskRefImages.put(taskId, images);
@@ -102,8 +133,8 @@ public class TaskQueueService {
             if (source.ip() != null) {
                 pendingCountByIp.merge(source.ip(), 1, Integer::sum);
             }
-            if (source.apiKeyHash() != null) {
-                pendingCountByApiKeyHash.merge(source.apiKeyHash(), 1, Integer::sum);
+            if (source.userId() != null) {
+                pendingCountByUserId.merge(source.userId(), 1, Integer::sum);
             }
         }
     }
@@ -112,17 +143,17 @@ public class TaskQueueService {
         return ip == null ? 0 : pendingCountByIp.getOrDefault(ip, 0);
     }
 
-    public int getPendingCountByApiKeyHash(String hash) {
-        return hash == null ? 0 : pendingCountByApiKeyHash.getOrDefault(hash, 0);
+    public int getPendingCountByUser(String userId) {
+        return userId == null ? 0 : pendingCountByUserId.getOrDefault(userId, 0);
     }
 
     public void cleanupTaskRuntimeState(String taskId) {
         Source source = taskSources.remove(taskId);
         if (source != null) {
             decrement(pendingCountByIp, source.ip());
-            decrement(pendingCountByApiKeyHash, source.apiKeyHash());
+            decrement(pendingCountByUserId, source.userId());
         }
-        apiKeys.remove(taskId);
+        catalogModelIds.remove(taskId);
         taskRefImages.remove(taskId);
     }
 
@@ -179,11 +210,11 @@ public class TaskQueueService {
                 .orElse(1);
     }
 
-    private java.util.Optional<TaskRequest> parseRequest(String requestJson) {
+    private Optional<TaskRequest> parseRequest(String requestJson) {
         try {
-            return java.util.Optional.of(TaskRequest.fromStored(objectMapper.readTree(requestJson), null));
+            return Optional.of(TaskRequest.fromStored(objectMapper.readTree(requestJson), null));
         } catch (Exception e) {
-            return java.util.Optional.empty();
+            return Optional.empty();
         }
     }
 
@@ -204,8 +235,9 @@ public class TaskQueueService {
 
     private void executeTask(String taskId) {
         var rowOpt = repository.findById(taskId);
-        String apiKey = apiKeys.get(taskId);
-        if (rowOpt.isEmpty() || apiKey == null
+        Instant startedAt = Instant.now();
+        String catalogModelId = catalogModelIds.get(taskId);
+        if (rowOpt.isEmpty() || catalogModelId == null
                 || !List.of(TaskRepository.STATUS_QUEUED, TaskRepository.STATUS_LEGACY_QUEUED)
                 .contains(rowOpt.get().status())) {
             cleanupTaskRuntimeState(taskId);
@@ -228,6 +260,18 @@ public class TaskQueueService {
                     request.parallelCount(), refImages);
         }
 
+        // T5: 派发时解析目录模型（runtime state 的 catalog UUID）→ 调度选号
+        CatalogModelRepository.Row catalogModel = resolveCatalogModel(catalogModelId);
+        if (catalogModel == null) {
+            repository.failTask(taskId, "目录模型不存在或已删除，请重新选择模型",
+                    Instant.now().toString(), Instant.now().plusMillis(ttlMs).toString());
+            taskMetrics.taskFailed();
+            cleanupTaskRuntimeState(taskId);
+            broadcaster.broadcastTask(taskId);
+            broadcaster.broadcastQueueStatus();
+            return;
+        }
+
         repository.updateStatus(taskId, TaskRepository.STATUS_PROCESSING);
         taskMetrics.taskProcessing();
         broadcaster.broadcastTask(taskId);
@@ -238,23 +282,32 @@ public class TaskQueueService {
             repository.updateItemProcessing(taskId, index, processingAt);
         }
 
-        // Parallel item generation (Node Promise.allSettled).
+        // Parallel item generation (Node Promise.allSettled), each item selects
+        // its own account at dispatch (E.2) with retriable account switching.
         List<Future<ItemResult>> futures = new ArrayList<>();
         final TaskRequest req = request;
-        final String key = apiKey;
         for (int index = 0; index < request.parallelCount(); index++) {
             final int idx = index;
-            futures.add(executor.submit(() -> generateSingleImage(key, req, taskId, idx)));
+            futures.add(executor.submit(() -> generateSingleImageWithRetry(catalogModel, req, taskId, idx)));
         }
         List<String> images = new ArrayList<>();
         List<String> errors = new ArrayList<>();
+        int successfulImages = 0;
+        boolean anyRetried = false;
+        UUID dominantAccount = null;
         for (Future<ItemResult> future : futures) {
             try {
                 ItemResult result = future.get();
                 if (result.success()) {
                     images.addAll(result.images());
+                    successfulImages += result.images().size();
+                    dominantAccount = result.accountId();   // 最后成功项的账号为最终 account（A3）
+                    anyRetried |= result.retried();
                 } else {
                     errors.add(result.error());
+                    if (dominantAccount == null) {
+                        dominantAccount = result.accountId();
+                    }
                 }
             } catch (Exception e) {
                 errors.add(NormalizedError.normalize(e, requestTimeoutMs));
@@ -263,7 +316,8 @@ public class TaskQueueService {
 
         Instant completedAt = Instant.now();
         Instant expiresAt = completedAt.plusMillis(ttlMs);
-        if (!images.isEmpty()) {
+        boolean allFailed = images.isEmpty();
+        if (!allFailed) {
             String warning = errors.isEmpty() ? null
                     : errors.size() + " 张图片生成失败: " + String.join("; ", errors);
             String resultJson = jsonObject(Map.of("images", images));
@@ -274,41 +328,125 @@ public class TaskQueueService {
                     completedAt.toString(), expiresAt.toString());
             taskMetrics.taskFailed();
         }
+        // T7: worker 完成后写 usage（task 级一条，幂等 UNIQUE(ref_type, ref_id)）
+        usageCollector.recordTaskUsage(new UsageCollector.TaskUsage(
+                taskId, parseUserId(rowOpt.get().userId()), catalogModel.id(), catalogModel.protocol(),
+                request.parallelCount(), successfulImages, anyRetried, allFailed, dominantAccount,
+                java.time.Duration.between(startedAt, completedAt).toMillis()));
         cleanupTaskRuntimeState(taskId);
         broadcaster.broadcastTask(taskId);
         broadcaster.broadcastQueueStatus();
     }
 
-    public record ItemResult(boolean success, List<String> images, String error) {
+    private UUID parseUserId(String userId) {
+        if (userId == null || userId.isBlank()) {
+            return null;
+        }
+        try {
+            return UUID.fromString(userId);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
     }
 
-    /** Node generateSingleImage: generate → save/expand to disk → update item row. */
-    private ItemResult generateSingleImage(String apiKey, TaskRequest request, String taskId, int index) {
+    private CatalogModelRepository.Row resolveCatalogModel(String catalogModelId) {
         try {
-            String image = imageGenService.generate(request.protocol(), apiKey, request);
-            List<String> expanded = image.startsWith("MULTI_URL:")
-                    ? java.util.Arrays.stream(image.substring(10).split("\\|\\|\\|")).map(u -> "URL:" + u).toList()
-                    : List.of(image);
-            List<String> diskRefs = new ArrayList<>();
-            for (int subIdx = 0; subIdx < expanded.size(); subIdx++) {
-                String img = expanded.get(subIdx);
-                if (img.startsWith("URL:")) {
-                    String remoteUrl = img.substring(4);
-                    String httpUrl = imageStorageService.downloadUrlToDisk(taskId, index, subIdx, remoteUrl);
-                    diskRefs.add("URL:" + httpUrl);
-                } else {
-                    byte[] buffer = java.util.Base64.getDecoder().decode(img);
-                    String httpUrl = imageStorageService.saveImageToDisk(taskId, index, subIdx, buffer, "image/png");
-                    diskRefs.add("URL:" + httpUrl);
-                }
+            return catalogModelService.resolve(UUID.fromString(catalogModelId)).orElse(null);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    public record ItemResult(boolean success, List<String> images, String error, UUID accountId, boolean retried) {
+    }
+
+    /**
+     * Node generateSingleImage on the account pool (T5): select account →
+     * generate → save to disk → update item row. Retriable upstream failures
+     * (429/5xx/timeout/conn, R3) switch accounts up to {@value MAX_ATTEMPTS}
+     * attempts; 401/other 4xx fail the item immediately. Storage failures are
+     * not retried (regeneration would double-bill).
+     */
+    private ItemResult generateSingleImageWithRetry(CatalogModelRepository.Row catalogModel,
+                                                    TaskRequest request, String taskId, int index) {
+        Set<UUID> tried = new HashSet<>();
+        String lastError = null;
+        int attempts = 0;
+        while (true) {
+            AccountScheduler.SelectedAccount selected;
+            try {
+                selected = accountScheduler.select(catalogModel, tried);
+            } catch (HttpErrorException e) {
+                lastError = e.getMessage();
+                break;   // 无更多候选账号
             }
-            repository.updateItemImageData(taskId, index, TaskRepository.STATUS_COMPLETED,
-                    jsonObject(diskRefs), Instant.now().toString());
-            return new ItemResult(true, diskRefs, null);
-        } catch (Exception e) {
-            String message = NormalizedError.normalize(e, requestTimeoutMs);
-            repository.updateItemError(taskId, index, TaskRepository.STATUS_FAILED, message, Instant.now().toString());
-            return new ItemResult(false, List.of(), message);
+            tried.add(selected.accountId());
+            attempts++;
+            try {
+                TaskRequest effective = effectiveRequest(request, catalogModel, selected);
+                String image = imageGenService.generate(selected.protocol(), selected.apiKey(), effective);
+                recordHealthSuccess(selected);
+                // 存储落盘 — 非重试域（避免重复计费）
+                List<String> diskRefs = saveImages(image, taskId, index);
+                repository.updateItemImageData(taskId, index, TaskRepository.STATUS_COMPLETED,
+                        jsonObject(diskRefs), Instant.now().toString());
+                return new ItemResult(true, diskRefs, null, selected.accountId(), attempts > 1);
+            } catch (Exception e) {
+                AccountHealthService.ErrorKind kind = accountHealthService.classify(e);
+                recordHealthFailure(selected, kind, e.getMessage());
+                lastError = NormalizedError.normalize(e, requestTimeoutMs);
+                if (kind.retriable() && attempts < MAX_ATTEMPTS) {
+                    continue;   // 换账号重试（finally 已释放旧账号在飞）
+                }
+                break;
+            } finally {
+                accountScheduler.release(selected.accountId());   // E.4: 在飞 --（重试时旧号 -1，新号 select 时 +1）
+            }
+        }
+        repository.updateItemError(taskId, index, TaskRepository.STATUS_FAILED, lastError, Instant.now().toString());
+        return new ItemResult(false, List.of(), lastError, null, attempts > 1);
+    }
+
+    /** 目录模型 + 选中账号合成实际生成参数（上游 modelId 用目录模型名，协议/地址/Key 用账号）。 */
+    private TaskRequest effectiveRequest(TaskRequest request, CatalogModelRepository.Row catalogModel,
+                                         AccountScheduler.SelectedAccount selected) {
+        return new TaskRequest(request.mode(), selected.protocol(), selected.baseUrl(), request.prompt(),
+                request.outputSize(), request.customSize(), request.aspectRatio(), request.temperature(),
+                catalogModel.modelId(), request.gptImageQuality(), request.gptImageStyle(), request.gptImageBackground(),
+                request.parallelCount(), request.images());
+    }
+
+    private List<String> saveImages(String image, String taskId, int index) {
+        List<String> expanded = image.startsWith("MULTI_URL:")
+                ? java.util.Arrays.stream(image.substring(10).split("\\|\\|\\|")).map(u -> "URL:" + u).toList()
+                : List.of(image);
+        List<String> diskRefs = new ArrayList<>();
+        for (int subIdx = 0; subIdx < expanded.size(); subIdx++) {
+            String img = expanded.get(subIdx);
+            if (img.startsWith("URL:")) {
+                String remoteUrl = img.substring(4);
+                String httpUrl = imageStorageService.downloadUrlToDisk(taskId, index, subIdx, remoteUrl);
+                diskRefs.add("URL:" + httpUrl);
+            } else {
+                byte[] buffer = java.util.Base64.getDecoder().decode(img);
+                String httpUrl = imageStorageService.saveImageToDisk(taskId, index, subIdx, buffer, "image/png");
+                diskRefs.add("URL:" + httpUrl);
+            }
+        }
+        return diskRefs;
+    }
+
+    private void recordHealthSuccess(AccountScheduler.SelectedAccount selected) {
+        AccountRepository.Row row = accountService.findById(selected.accountId()).orElse(null);
+        if (row != null) {
+            accountHealthService.recordSuccess(row);
+        }
+    }
+
+    private void recordHealthFailure(AccountScheduler.SelectedAccount selected, AccountHealthService.ErrorKind kind, String message) {
+        AccountRepository.Row row = accountService.findById(selected.accountId()).orElse(null);
+        if (row != null) {
+            accountHealthService.recordFailure(row, kind, message);
         }
     }
 

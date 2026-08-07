@@ -5,7 +5,7 @@ name: A/B Diff Regression (Spring vs Node)
 # （mock 上游，无需真实 AI Key）。依赖双后端 + mock 上游，无法并入常规构建流水线。
 #
 # 触发方式：默认仅 workflow_dispatch（手动）——避免在真实 GitHub runner 上验证前
-# 阻塞 PR 门禁。本地等价命令：bash backend-spring/scripts/run-ab-diff.sh（已实测 37/37）。
+# 阻塞 PR 门禁。本地等价命令：bash backend-spring/scripts/run-ab-diff.sh（已实测 39/39）。
 # WIN-17 (M1 遗留 1 闭环)：已固化 pull_request 门禁——后端相关改动（Spring/Node/探针/工作流）
 # 自动触发 A/B 回归，防止 Q1 契约或任务链路回归；前端改动由 build.yml 独立门禁覆盖。
 on:
@@ -99,7 +99,20 @@ jobs:
           for i in $(seq 1 90); do ok http://localhost:8080/api/nova/config && break; sleep 1; done
           ok http://localhost:8080/api/nova/config || { echo "SPRING NOT READY"; tail -80 /tmp/spring.log; exit 1; }
 
-      - name: Run A/B diff (37 probes)
+      # WIN-28 (ADR-32 账号池): 双栈下 proxy/tasks 探针需要 Spring 侧目录模型 + 账号
+      # （AbDiffSeed 独立 main 直接写 PG，幂等）；模型 ID 经 env 传给 ab-diff 脚本。
+      # 必须在 Spring 就绪后运行（V5/V6 表已由 Flyway 建好）。
+      # WIN-33: 修复类路径引号（YAML 块标量中 \" 是字面反斜杠，导致 Linux bash 把
+      # 类路径拼成带引号字符的单个条目 → Could not find or load main class）。
+      - name: Seed ab-diff catalog + account
+        working-directory: backend-spring
+        run: |
+          mvn -B -ntp -q compile dependency:build-classpath -Dmdep.outputFile=target/abdiff-cp.txt
+          ABDIFF_IDS="$(java -cp "target/classes:$(cat target/abdiff-cp.txt)" com.nova.studio.integration.AbDiffSeed)"
+          echo "ABDIFF_CATALOG_MODEL_ID=${ABDIFF_IDS%%,*}" >> "$GITHUB_ENV"
+          echo "ABDIFF_TEXT_CATALOG_MODEL_ID=${ABDIFF_IDS##*,}" >> "$GITHUB_ENV"
+
+      - name: Run A/B diff (39 probes)
         run: node backend-spring/scripts/ab-diff/ab-diff.mjs --node http://localhost:3000 --spring http://localhost:8080
 
       - name: Stop backends

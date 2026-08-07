@@ -106,11 +106,21 @@ const PORT = Number(process.env.PORT || 3000);
 const HOSTNAME = process.env.HOSTNAME || '0.0.0.0';
 // WIN-21: Spring 独占 API 前缀（认证/设置/模型）。node(3000) 命中以下前缀时转发到
 // Spring(8080)，使前端相对路径调用（/api/auth/* 等）不再 404。注意不要覆盖 node 自有
-// 路由（/api/nova/tasks|queue-status|prompts|blacklist|config|proxy/*|images/* 等）。
+// 路由（/api/nova/tasks|queue-status|prompts|blacklist|config|images/* 等）。
 // WIN-22: 追加 projects/assets/storage/admin；tasks 的「列表 + 归入」按方法感知精确透传
 // （见 shouldProxyToSpring）——POST/单查/ack 仍走 node 自有 SQLite 链路（不回归）。
+// WIN-28 (ADR-32 路由收敛): 追加 /api/nova/proxy 与 /api/nova/usage —— 账号池化后
+// proxy/text + proxy/models 统一由 Spring 处理（调度选号 + usage 采集唯一实现点），
+// 双栈下 node 旧 proxy handler 不可达（保留但标记废弃，P2 移除）；/api/nova/usage 为
+// M2/P1 的「我的用量」预留透传。
 const SPRING_PROXY_PREFIXES = ['/api/auth', '/api/nova/settings', '/api/nova/models',
-  '/api/nova/projects', '/api/nova/assets', '/api/nova/storage', '/api/nova/admin'];
+  '/api/nova/projects', '/api/nova/assets', '/api/nova/storage', '/api/nova/admin',
+  '/api/nova/proxy', '/api/nova/usage'];
+
+// ── 废弃标记（WIN-28 ADR-32）──────────────────────────────────────────────────
+// 下方 POST /api/nova/proxy/text 与 GET /api/nova/proxy/models 为 M1 之前的 Node 自有
+// handler。自 WIN-28 起 '/api/nova/proxy' 已加入 SPRING_PROXY_PREFIXES，双栈下这两段
+// 代码不可达（由 shouldProxyToSpring 拦截转发 Spring）。保留仅为回滚兼容，P2 移除。
 
 /**
  * WIN-22 (ARCH D.6 注): 双栈下 /api/nova/tasks 前缀由 node 自有链路拦截，但新增的
@@ -1851,7 +1861,7 @@ async function handleApi(req, res, pathname) {
       return true;
     }
 
-    // ===== 文本 AI 代理（流式 + 非流式，多文本协议） =====
+    // ===== 文本 AI 代理（流式 + 非流式，多文本协议）[已废弃 WIN-28 ADR-32：不可达] =====
     if (req.method === 'POST' && apiPathname === '/api/nova/proxy/text') {
       try {
         const body = await readJsonBody(req);
@@ -1940,7 +1950,7 @@ async function handleApi(req, res, pathname) {
       return true;
     }
 
-    // ===== 模型检查代理（按协议查询模型列表） =====
+    // ===== 模型检查代理（按协议查询模型列表）[已废弃 WIN-28 ADR-32：不可达] =====
     if (req.method === 'GET' && apiPathname === '/api/nova/proxy/models') {
       try {
         const parsed = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);

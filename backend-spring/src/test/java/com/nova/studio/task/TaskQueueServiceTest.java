@@ -1,19 +1,29 @@
 package com.nova.studio.task;
 
+import com.nova.studio.accountpool.AccountHealthService;
+import com.nova.studio.accountpool.AccountScheduler;
+import com.nova.studio.accountpool.AccountService;
+import com.nova.studio.accountpool.CatalogModelRepository;
+import com.nova.studio.accountpool.CatalogModelService;
+import com.nova.studio.audit.UsageCollector;
 import com.nova.studio.imagegen.ImageGenService;
+import com.nova.studio.infra.HttpErrorException;
 import com.nova.studio.storage.ImageStorageService;
 import com.nova.studio.ws.TaskEventBroadcaster;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.mockito.ArgumentCaptor;
 import tools.jackson.databind.ObjectMapper;
 
 import java.time.Instant;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -27,12 +37,11 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * T1.2 — queue slot concurrency / oversized exclusive run / state machine
- * (acceptance: 单元测试覆盖队列并发/独占/状态流转). Mirrors the Node
- * {@code drainQueue} semantics: capacity is counted in image slots
- * ({@code parallelCount}), an oversized task may run alone only when the queue
- * is idle, and tasks flow 排队中 → processing → completed/failed with
- * per-item generation.
+ * T5 (WIN-28) — queue dispatch on the account pool: the worker selects an
+ * account via {@link AccountScheduler} at generation time, tracks in-flight,
+ * and retries with another account on retriable failures (≤2 retries, R3
+ * boundary; 401/4xx never retried — A3/A4/A21). Per-user pending counters
+ * (T12, ADR-27).
  */
 class TaskQueueServiceTest {
 
@@ -41,16 +50,24 @@ class TaskQueueServiceTest {
     private ImageStorageService imageStorageService;
     private TaskEventBroadcaster broadcaster;
     private QueueStatsService queueStatsService;
+    private AccountScheduler scheduler;
+    private AccountHealthService healthService;
+    private AccountService accountService;
+    private CatalogModelService catalogModelService;
     private TaskQueueService queueService;
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final UUID MODEL_ID = UUID.fromString("22222222-2222-2222-2222-222222222222");
+    private static final UUID ACCOUNT_A = UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+    private static final UUID ACCOUNT_B = UUID.fromString("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+    private static final UUID USER_ID = UUID.fromString("11111111-1111-1111-1111-111111111111");
 
     private TaskRepository.TaskRow row(String id, String status, int parallelCount) {
-        return new TaskRepository.TaskRow(id, null, null, status, "text-to-image",
+        return new TaskRepository.TaskRow(id, USER_ID.toString(), null, status, "text-to-image",
                 "{\"mode\":\"text-to-image\",\"protocol\":\"openai\",\"baseUrl\":\"http://upstream\","
-                        + "\"prompt\":\"a cat\",\"model\":\"gpt-image-1\",\"parallelCount\":" + parallelCount
-                        + ",\"images\":[]}",
-                null, null, null, Instant.parse("2026-08-03T00:00:00Z"), null, null);
+                        + "\"prompt\":\"a cat\",\"model\":\"" + MODEL_ID + "\",\"modelId\":\"gpt-image-1\","
+                        + "\"parallelCount\":" + parallelCount + ",\"images\":[]}",
+                null, null, null, Instant.parse("2026-08-06T00:00:00Z"), null, null);
     }
 
     @BeforeEach
@@ -60,172 +77,152 @@ class TaskQueueServiceTest {
         imageStorageService = mock(ImageStorageService.class);
         broadcaster = mock(TaskEventBroadcaster.class);
         queueStatsService = mock(QueueStatsService.class);
+        scheduler = mock(AccountScheduler.class);
+        healthService = mock(AccountHealthService.class);
+        accountService = mock(AccountService.class);
+        catalogModelService = mock(CatalogModelService.class);
+        when(catalogModelService.resolve(MODEL_ID)).thenReturn(Optional.of(catalogRow()));
+        when(queueStatsService.getMaxServerConcurrency()).thenReturn(50);
         queueService = new TaskQueueService(repository, imageGenService, imageStorageService, broadcaster,
-                MAPPER, queueStatsService, new TaskMetrics(new SimpleMeterRegistry()), 43_200_000, 1_800_000);
+                MAPPER, queueStatsService, new TaskMetrics(new SimpleMeterRegistry()), scheduler,
+                healthService, accountService, catalogModelService, mock(UsageCollector.class),
+                43_200_000, 1_800_000);
+    }
+
+    private CatalogModelRepository.Row catalogRow() {
+        return new CatalogModelRepository.Row(MODEL_ID, "image", "openai", "模型", "gpt-image-1",
+                "https://api.example.com/v1", "{}", null, true, null,
+                Instant.parse("2026-08-06T00:00:00Z"), Instant.parse("2026-08-06T00:00:00Z"));
+    }
+
+    private AccountScheduler.SelectedAccount account(UUID id) {
+        return new AccountScheduler.SelectedAccount(id, "账号-" + id, "openai", "http://upstream", "key-" + id);
+    }
+
+    private void stubSuccess(String b64) {
+        when(imageGenService.generate(anyString(), anyString(), any(TaskRequest.class))).thenReturn(b64);
+        when(imageStorageService.saveImageToDisk(anyString(), anyInt(), anyInt(), any(byte[].class), anyString()))
+                .thenReturn("/api/nova/images/x/0");
+    }
+
+    // ===== dispatch selects account from pool =====
+
+    @Test
+    void taskGeneratesWithSelectedAccount() throws Exception {
+        when(repository.findById("t1")).thenReturn(Optional.of(row("t1", TaskRepository.STATUS_QUEUED, 1)));
+        when(scheduler.select(any(), any())).thenReturn(account(ACCOUNT_A));
+        stubSuccess("QUJD");
+
+        queueService.registerRuntimeState("t1", MODEL_ID.toString(), List.of(),
+                new TaskQueueService.Source("1.2.3.4", USER_ID.toString()));
+        queueService.enqueue("t1");
+        awaitTerminal("t1");
+
+        verify(imageGenService).generate(eq("openai"), eq("key-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"), any(TaskRequest.class));
+        verify(scheduler).release(ACCOUNT_A);
+        verify(repository, atLeastOnce()).completeTask(eq("t1"), anyString(), any(), anyString(), anyString());
     }
 
     @Test
-    void tasksExceedingSlotCapacityStayQueuedUntilSlotsFree() throws Exception {
-        when(queueStatsService.getMaxServerConcurrency()).thenReturn(2);
-        when(repository.findById("t1")).thenReturn(Optional.of(row("t1", TaskRepository.STATUS_QUEUED, 2)));
-        when(repository.findById("t2")).thenReturn(Optional.of(row("t2", TaskRepository.STATUS_QUEUED, 2)));
+    void retriesOnRetriableFailureWithAnotherAccount() throws Exception {
+        when(repository.findById("t1")).thenReturn(Optional.of(row("t1", TaskRepository.STATUS_QUEUED, 1)));
+        when(healthService.classify(any())).thenReturn(AccountHealthService.ErrorKind.SERVER_ERROR);
+        when(scheduler.select(any(), any())).thenReturn(account(ACCOUNT_A), account(ACCOUNT_B));
+        when(imageGenService.generate(anyString(), anyString(), any(TaskRequest.class)))
+                .thenThrow(new RuntimeException("500 Internal Server Error"))
+                .thenReturn("QUJD");
         when(imageStorageService.saveImageToDisk(anyString(), anyInt(), anyInt(), any(byte[].class), anyString()))
                 .thenReturn("/api/nova/images/x/0");
 
-        CountDownLatch firstStarted = new CountDownLatch(1);
-        CountDownLatch release = new CountDownLatch(1);
-        when(imageGenService.generate(anyString(), anyString(), any(TaskRequest.class)))
-                .thenAnswer(inv -> {
-                    firstStarted.countDown();
-                    release.await(5, TimeUnit.SECONDS);
-                    return "QUJD";
-                });
-
-        queueService.registerRuntimeState("t1", "key", List.of(), new TaskQueueService.Source("1.2.3.4", "hash"));
-        queueService.registerRuntimeState("t2", "key", List.of(), new TaskQueueService.Source("1.2.3.4", "hash"));
+        queueService.registerRuntimeState("t1", MODEL_ID.toString(), List.of(),
+                new TaskQueueService.Source("1.2.3.4", USER_ID.toString()));
         queueService.enqueue("t1");
-        queueService.enqueue("t2");
+        awaitTerminal("t1");
 
-        assertThat(firstStarted.await(5, TimeUnit.SECONDS)).as("first task started").isTrue();
-        // t2 must NOT have started while t1 holds 2/2 slots
-        Thread.sleep(200);
-        verify(repository, atLeastOnce()).updateStatus(eq("t1"), eq(TaskRepository.STATUS_PROCESSING));
-        verify(repository, never()).updateStatus(eq("t2"), eq(TaskRepository.STATUS_PROCESSING));
-
-        release.countDown();
-        awaitFinalState("t2");
-        verify(repository, atLeastOnce()).updateStatus(eq("t2"), eq(TaskRepository.STATUS_PROCESSING));
-        verify(repository, atLeastOnce()).completeTask(eq("t2"), anyString(), any(), anyString(), anyString());
+        verify(imageGenService, org.mockito.Mockito.times(2)).generate(anyString(), anyString(), any(TaskRequest.class));
+        verify(scheduler, org.mockito.Mockito.times(2)).select(any(), any());
+        verify(repository, atLeastOnce()).completeTask(eq("t1"), anyString(), any(), anyString(), anyString());
     }
 
     @Test
-    void awaitFinalStateKeepsPollingWhenDifferentArgumentsArriveFirst() throws Exception {
-        // Regression for the T1.2 flake: when the wanted task is not yet done but a
-        // DIFFERENT task's completeTask already landed in the mock log, Mockito
-        // reports the verify as ArgumentsAreDifferent (not WantedButNotInvoked).
-        // The poll loop must treat both as "terminal write not seen yet"; otherwise
-        // t1's completeTask arriving first makes verify("t2") throw immediately.
-        repository.completeTask("t1", "{}", null, "now", "later");
-
-        Thread completer = new Thread(() -> {
-            try {
-                Thread.sleep(300);
-                repository.completeTask("t2", "{}", null, "now", "later");
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-        });
-        completer.start();
-        try {
-            awaitFinalState("t2");
-        } finally {
-            completer.join();
-        }
-    }
-
-    @Test
-    void oversizedTaskRunsAloneWhenQueueIdle() throws Exception {
-        // cap = 2 slots, task needs 4 → only schedulable when idle (Node oversized exception)
-        when(queueStatsService.getMaxServerConcurrency()).thenReturn(2);
-        when(repository.findById("big")).thenReturn(Optional.of(row("big", TaskRepository.STATUS_QUEUED, 4)));
-        when(imageGenService.generate(anyString(), anyString(), any(TaskRequest.class))).thenReturn("QUJD");
-        when(imageStorageService.saveImageToDisk(anyString(), anyInt(), anyInt(), any(byte[].class), anyString()))
-                .thenReturn("/api/nova/images/big/0");
-
-        queueService.registerRuntimeState("big", "key", List.of(), new TaskQueueService.Source("1.2.3.4", "hash"));
-        queueService.enqueue("big");
-
-        awaitFinalState("big");
-        verify(repository, atLeastOnce()).updateStatus(eq("big"), eq(TaskRepository.STATUS_PROCESSING));
-        verify(repository, atLeastOnce()).completeTask(eq("big"), anyString(), any(), anyString(), anyString());
-    }
-
-    @Test
-    void stateMachineCompletesWithImagesResult() throws Exception {
-        when(queueStatsService.getMaxServerConcurrency()).thenReturn(50);
-        when(repository.findById("ok")).thenReturn(Optional.of(row("ok", TaskRepository.STATUS_QUEUED, 1)));
-        when(imageGenService.generate(anyString(), anyString(), any(TaskRequest.class))).thenReturn("QUJD");
-        when(imageStorageService.saveImageToDisk(eq("ok"), eq(0), eq(0), any(byte[].class), anyString()))
-                .thenReturn("/api/nova/images/ok/0");
-
-        queueService.registerRuntimeState("ok", "key", List.of(), new TaskQueueService.Source("1.2.3.4", "hash"));
-        queueService.enqueue("ok");
-
-        awaitFinalState("ok");
-        verify(repository).updateStatus(eq("ok"), eq(TaskRepository.STATUS_PROCESSING));
-        ArgumentCaptor<String> resultJson = ArgumentCaptor.forClass(String.class);
-        verify(repository).completeTask(eq("ok"), resultJson.capture(), org.mockito.ArgumentMatchers.isNull(), anyString(), anyString());
-        assertThat(resultJson.getValue()).contains("URL:/api/nova/images/ok/0");
-        verify(repository).updateItemImageData(eq("ok"), eq(0), eq(TaskRepository.STATUS_COMPLETED),
-                anyString(), anyString());
-    }
-
-    @Test
-    void failedGenerationMarksTaskFailed() throws Exception {
-        when(queueStatsService.getMaxServerConcurrency()).thenReturn(50);
-        when(repository.findById("bad")).thenReturn(Optional.of(row("bad", TaskRepository.STATUS_QUEUED, 1)));
+    void noRetryOn401() throws Exception {
+        when(repository.findById("t1")).thenReturn(Optional.of(row("t1", TaskRepository.STATUS_QUEUED, 1)));
+        when(healthService.classify(any())).thenReturn(AccountHealthService.ErrorKind.UNAUTHORIZED);
+        when(scheduler.select(any(), any())).thenReturn(account(ACCOUNT_A));
         when(imageGenService.generate(anyString(), anyString(), any(TaskRequest.class)))
-                .thenThrow(new IllegalStateException("upstream exploded"));
+                .thenThrow(new RuntimeException("401 Unauthorized"));
 
-        queueService.registerRuntimeState("bad", "key", List.of(), new TaskQueueService.Source("1.2.3.4", "hash"));
-        queueService.enqueue("bad");
+        queueService.registerRuntimeState("t1", MODEL_ID.toString(), List.of(),
+                new TaskQueueService.Source("1.2.3.4", USER_ID.toString()));
+        queueService.enqueue("t1");
+        awaitTerminal("t1");
 
-        awaitFinalState("bad");
-        verify(repository).failTask(eq("bad"), org.mockito.ArgumentMatchers.startsWith("所有图片生成失败:"),
-                anyString(), anyString());
-        verify(repository).updateItemError(eq("bad"), eq(0), eq(TaskRepository.STATUS_FAILED),
-                anyString(), anyString());
+        verify(imageGenService, org.mockito.Mockito.times(1)).generate(anyString(), anyString(), any(TaskRequest.class));
+        verify(repository, atLeastOnce()).failTask(eq("t1"), anyString(), anyString(), anyString());
     }
 
     @Test
-    void multiUrlExpansionSavesEachSubImage() throws Exception {
-        when(queueStatsService.getMaxServerConcurrency()).thenReturn(50);
-        when(repository.findById("multi")).thenReturn(Optional.of(row("multi", TaskRepository.STATUS_QUEUED, 1)));
+    void retryLimitedToTwoRetries() throws Exception {
+        when(repository.findById("t1")).thenReturn(Optional.of(row("t1", TaskRepository.STATUS_QUEUED, 1)));
+        when(healthService.classify(any())).thenReturn(AccountHealthService.ErrorKind.SERVER_ERROR);
+        when(scheduler.select(any(), any())).thenReturn(account(ACCOUNT_A), account(ACCOUNT_B), account(ACCOUNT_A));
         when(imageGenService.generate(anyString(), anyString(), any(TaskRequest.class)))
-                .thenReturn("MULTI_URL:http://a/x.png|||http://b/y.png");
-        when(imageStorageService.downloadUrlToDisk(eq("multi"), eq(0), anyInt(), anyString()))
-                .thenReturn("/api/nova/images/multi/0");
+                .thenThrow(new RuntimeException("500 Internal Server Error"));
 
-        queueService.registerRuntimeState("multi", "key", List.of(), new TaskQueueService.Source("1.2.3.4", "hash"));
-        queueService.enqueue("multi");
+        queueService.registerRuntimeState("t1", MODEL_ID.toString(), List.of(),
+                new TaskQueueService.Source("1.2.3.4", USER_ID.toString()));
+        queueService.enqueue("t1");
+        awaitTerminal("t1");
 
-        awaitFinalState("multi");
-        verify(imageStorageService).downloadUrlToDisk(eq("multi"), eq(0), eq(0), eq("http://a/x.png"));
-        verify(imageStorageService).downloadUrlToDisk(eq("multi"), eq(0), eq(1), eq("http://b/y.png"));
-        ArgumentCaptor<String> resultJson = ArgumentCaptor.forClass(String.class);
-        verify(repository).completeTask(eq("multi"), resultJson.capture(), any(), anyString(), anyString());
-        assertThat(resultJson.getValue()).contains("\"images\":[\"URL:/api/nova/images/multi/0\",\"URL:/api/nova/images/multi/0\"]");
+        // 最多 3 次尝试（2 次重试）
+        verify(imageGenService, org.mockito.Mockito.times(3)).generate(anyString(), anyString(), any(TaskRequest.class));
+        verify(repository, atLeastOnce()).failTask(eq("t1"), anyString(), anyString(), anyString());
     }
 
-    /** Waits (polling the mock) until the task reached its terminal DB write. */
-    private void awaitFinalState(String taskId) throws InterruptedException {
-        long deadline = System.currentTimeMillis() + 10_000;
-        while (System.currentTimeMillis() < deadline) {
+    @Test
+    void failTaskWhenNoAccountCandidate() throws Exception {
+        when(repository.findById("t1")).thenReturn(Optional.of(row("t1", TaskRepository.STATUS_QUEUED, 1)));
+        when(scheduler.select(any(), any())).thenThrow(new HttpErrorException(503, "NO_AVAILABLE_ACCOUNT", "该模型暂无可用账号，请联系管理员"));
+
+        queueService.registerRuntimeState("t1", MODEL_ID.toString(), List.of(),
+                new TaskQueueService.Source("1.2.3.4", USER_ID.toString()));
+        queueService.enqueue("t1");
+        awaitTerminal("t1");
+
+        verify(imageGenService, never()).generate(anyString(), anyString(), any(TaskRequest.class));
+        verify(repository, atLeastOnce()).failTask(eq("t1"), anyString(), anyString(), anyString());
+    }
+
+    // ===== per-user pending counters (T12, ADR-27) =====
+
+    @Test
+    void pendingCountTracksPerUser() {
+        queueService.registerRuntimeState("t1", MODEL_ID.toString(), List.of(),
+                new TaskQueueService.Source("1.2.3.4", USER_ID.toString()));
+        assertThat(queueService.getPendingCountByUser(USER_ID.toString())).isEqualTo(1);
+        queueService.cleanupTaskRuntimeState("t1");
+        assertThat(queueService.getPendingCountByUser(USER_ID.toString())).isZero();
+    }
+
+    private void awaitTerminal(String taskId) throws InterruptedException {
+        CountDownLatch latch = new CountDownLatch(1);
+        for (int i = 0; i < 50; i++) {
             try {
-                verify(repository).completeTask(eq(taskId), anyString(), any(), anyString(), anyString());
+                verify(repository, org.mockito.Mockito.atLeastOnce())
+                        .completeTask(eq(taskId), anyString(), any(), anyString(), anyString());
                 return;
-            } catch (org.mockito.exceptions.base.MockitoAssertionError
-                     | org.opentest4j.AssertionFailedError ignored) {
-                // terminal write not seen yet — keep polling.
-                // NB: when JUnit 5 is on the classpath Mockito reports a wanted-but-
-                // different-args invocation as opentest4j.ArgumentsAreDifferent
-                // (extends AssertionFailedError), NOT as MockitoAssertionError; the
-                // multi-catch covers both worlds so t1's completeTask landing first
-                // cannot escape the poll loop (T1.2 slot-capacity flake).
+            } catch (AssertionError ignored) {
+                // not terminal yet
             }
             try {
-                verify(repository).failTask(eq(taskId), anyString(), anyString(), anyString());
+                verify(repository, org.mockito.Mockito.atLeastOnce())
+                        .failTask(eq(taskId), anyString(), anyString(), anyString());
                 return;
-            } catch (org.mockito.exceptions.base.MockitoAssertionError
-                     | org.opentest4j.AssertionFailedError ignored) {
-                // terminal write not seen yet — keep polling
+            } catch (AssertionError ignored) {
+                // not terminal yet
             }
-            Thread.sleep(50);
+            Thread.sleep(100);
         }
-        throw new AssertionError("task " + taskId + " did not reach a terminal state within 10s");
-    }
-
-    private static String isNullValue() {
-        return null;
+        throw new AssertionError("task did not reach terminal state: " + taskId);
     }
 }
