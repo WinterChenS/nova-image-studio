@@ -29,7 +29,7 @@ public class CanvasService {
     private static final Logger log = LoggerFactory.getLogger(CanvasService.class);
 
     public static final String SOURCE_KIND_CANVAS = "canvas";
-    public static final int DEFAULT_PROJECT_CAP = 100;
+    public static final int DEFAULT_PROJECT_CAP = SettingsService.DEFAULT_CANVAS_PROJECT_CAP;
 
     private final CanvasProjectRepository repository;
     private final AssetService assetService;
@@ -50,7 +50,7 @@ public class CanvasService {
 
     /** 新建项目（配额校验 AC-11）。 */
     public CanvasProjectRepository.CanvasRow create(UUID userId, String title) {
-        int cap = settingsService.getInt(userId, "limit.canvasProjectCap", DEFAULT_PROJECT_CAP);
+        int cap = settingsService.getInt(userId, SettingsService.KEY_CANVAS_PROJECT_CAP, DEFAULT_PROJECT_CAP);
         long active = repository.countActive(userId);
         if (active >= cap) {
             throw new HttpErrorException(409, "QUOTA_EXCEEDED",

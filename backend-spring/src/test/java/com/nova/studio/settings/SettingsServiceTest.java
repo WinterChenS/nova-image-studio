@@ -115,6 +115,33 @@ class SettingsServiceTest {
         verify(repository).upsert(USER_ID, "agent.webSearch", "true", "json");
     }
 
+    @Test
+    void win39QuotaKeysAreAllowedBySettingsService() {
+        // WIN-40 T8：新配额键（limit.*/agent.*）必须在白名单内（SettingsService.ALLOWED_PREFIXES）
+        assertThat(SettingsService.isAllowed(SettingsService.KEY_AGENT_CONVERSATION_CAP)).isTrue();
+        assertThat(SettingsService.isAllowed(SettingsService.KEY_AGENT_MESSAGE_CAP)).isTrue();
+        assertThat(SettingsService.isAllowed(SettingsService.KEY_CANVAS_PROJECT_CAP)).isTrue();
+        assertThat(SettingsService.isAllowed(SettingsService.KEY_HISTORY_CAP_REVERSE)).isTrue();
+        assertThat(SettingsService.isAllowed(SettingsService.KEY_HISTORY_CAP_GIF)).isTrue();
+        assertThat(SettingsService.isAllowed(SettingsService.KEY_GIF_RESULT_RETENTION_DAYS)).isTrue();
+        assertThat(SettingsService.isAllowed(SettingsService.KEY_ARCHIVED_PURGE_DAYS)).isTrue();
+        assertThat(SettingsService.isAllowed(SettingsService.KEY_CANVAS_RECYCLE_DAYS)).isTrue();
+        assertThat(SettingsService.isAllowed(SettingsService.KEY_ASSET_RECYCLE_DAYS)).isTrue();
+        assertThat(SettingsService.isAllowed(SettingsService.KEY_AGENT_CONTEXT_COMPRESS_THRESHOLD)).isTrue();
+        assertThat(SettingsService.isAllowed(SettingsService.KEY_AGENT_CONTEXT_KEEP_RECENT)).isTrue();
+        // 默认值对齐 ARCH Part F.4
+        assertThat(SettingsService.DEFAULT_AGENT_CONVERSATION_CAP).isEqualTo(100);
+        assertThat(SettingsService.DEFAULT_AGENT_MESSAGE_CAP).isEqualTo(500);
+        assertThat(SettingsService.DEFAULT_CANVAS_PROJECT_CAP).isEqualTo(100);
+        assertThat(SettingsService.DEFAULT_HISTORY_CAP_REVERSE).isEqualTo(500);
+        assertThat(SettingsService.DEFAULT_HISTORY_CAP_GIF).isEqualTo(100);
+        assertThat(SettingsService.DEFAULT_ARCHIVED_PURGE_DAYS).isEqualTo(180);
+        assertThat(SettingsService.DEFAULT_CANVAS_RECYCLE_DAYS).isEqualTo(30);
+        assertThat(SettingsService.DEFAULT_ASSET_RECYCLE_DAYS).isEqualTo(30);
+        assertThat(SettingsService.DEFAULT_AGENT_CONTEXT_COMPRESS_THRESHOLD).isEqualTo(60);
+        assertThat(SettingsService.DEFAULT_AGENT_CONTEXT_KEEP_RECENT).isEqualTo(20);
+    }
+
     private ObjectNode imageModel(String id, String apiKey) {
         ObjectNode m = MAPPER.createObjectNode();
         m.put("id", id);

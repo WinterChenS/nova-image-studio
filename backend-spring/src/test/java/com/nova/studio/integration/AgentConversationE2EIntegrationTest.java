@@ -287,4 +287,30 @@ class AgentConversationE2EIntegrationTest {
         }
         return headers;
     }
+
+    @Test
+    void quotaLimitBlocksExcessConversations() {
+        // 设置配额：limit.agentConversationCap = 1（settings PUT，AC-11 运行时覆盖）
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.setBearerAuth(token);
+        ResponseEntity<String> settings = rest.exchange(base() + "/api/nova/settings", HttpMethod.PUT,
+                new HttpEntity<>(Map.of("limit.agentConversationCap", 1), headers), String.class);
+        assertThat(settings.getStatusCode().is2xxSuccessful()).isTrue();
+
+        // 第 1 个会话成功
+        postJson("/api/nova/agent/conversations", Map.of("title", "会话1"), token);
+        // 第 2 个会话 → 409 QUOTA_EXCEEDED
+        HttpHeaders postHeaders = new HttpHeaders();
+        postHeaders.setContentType(MediaType.APPLICATION_JSON);
+        postHeaders.setBearerAuth(token);
+        ResponseEntity<String> blocked = rest.exchange(base() + "/api/nova/agent/conversations",
+                HttpMethod.POST, new HttpEntity<>(Map.of("title", "会话2"), postHeaders), String.class);
+        assertThat(blocked.getStatusCode().value()).isEqualTo(409);
+        assertThat(blocked.getBody()).contains("QUOTA_EXCEEDED");
+
+        // 恢复默认配额，避免影响其它用例
+        rest.exchange(base() + "/api/nova/settings", HttpMethod.PUT,
+                new HttpEntity<>(Map.of("limit.agentConversationCap", 100), headers), String.class);
+    }
 }

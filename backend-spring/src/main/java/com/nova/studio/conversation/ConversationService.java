@@ -38,8 +38,8 @@ public class ConversationService {
     public static final String SOURCE_KIND_CONVERSATION = "conversation";
 
     /** ARCH Part F.4 配额默认值（settings limit.* 可覆盖）。 */
-    public static final int DEFAULT_CONVERSATION_CAP = 100;
-    public static final int DEFAULT_MESSAGE_CAP_PER_CONVERSATION = 500;
+    public static final int DEFAULT_CONVERSATION_CAP = SettingsService.DEFAULT_AGENT_CONVERSATION_CAP;
+    public static final int DEFAULT_MESSAGE_CAP_PER_CONVERSATION = SettingsService.DEFAULT_AGENT_MESSAGE_CAP;
 
     private final ConversationRepository repository;
     private final ConversationMessageRepository messageRepository;
@@ -63,7 +63,7 @@ public class ConversationService {
 
     /** 新建会话（可选 title；配额校验 AC-11）。 */
     public ConversationRepository.ConversationRow create(UUID userId, String title) {
-        int cap = settingsService.getInt(userId, "limit.agentConversationCap", DEFAULT_CONVERSATION_CAP);
+        int cap = settingsService.getInt(userId, SettingsService.KEY_AGENT_CONVERSATION_CAP, DEFAULT_CONVERSATION_CAP);
         long active = repository.countActive(userId);
         if (active >= cap) {
             throw new HttpErrorException(409, "QUOTA_EXCEEDED",
@@ -228,7 +228,7 @@ public class ConversationService {
         if (text.isBlank() && !body.has("imageIds")) {
             throw new IllegalArgumentException("消息内容不能为空");
         }
-        int cap = settingsService.getInt(userId, "limit.agentMessageCapPerConversation",
+        int cap = settingsService.getInt(userId, SettingsService.KEY_AGENT_MESSAGE_CAP,
                 DEFAULT_MESSAGE_CAP_PER_CONVERSATION);
         long count = messageRepository.countByConversation(conversationId, userId.toString());
         if (count >= cap) {

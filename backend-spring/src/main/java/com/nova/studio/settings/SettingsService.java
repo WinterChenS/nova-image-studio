@@ -44,6 +44,38 @@ public class SettingsService {
     public static final int DEFAULT_MAX_PENDING_TASKS_PER_API_KEY = 10;
     public static final int DEFAULT_RETRY_AFTER_SECONDS = 30;
 
+    /**
+     * WIN-39（WIN-40 T8，ARCH Part F.4）— 配额/保留默认值（settings limit.* 与 agent.* 可运行时覆盖）：
+     * limit.agentConversationCap=100、limit.agentMessageCapPerConversation=500、
+     * agent.contextCompressThreshold=60、agent.contextKeepRecent=20、limit.canvasProjectCap=100、
+     * limit.historyCapReverse=500、limit.historyCapGif=100、limit.gifResultRetentionDays=180、
+     * limit.archivedPurgeDays=180、limit.canvasRecycleDays=30、limit.assetRecycleDays=30。
+     * 键名与默认值见 ARCH Part F.4；服务层校验点见 ConversationService/CanvasService（AC-11）。
+     */
+    public static final String KEY_AGENT_CONVERSATION_CAP = "limit.agentConversationCap";
+    public static final String KEY_AGENT_MESSAGE_CAP = "limit.agentMessageCapPerConversation";
+    public static final String KEY_CANVAS_PROJECT_CAP = "limit.canvasProjectCap";
+    public static final String KEY_HISTORY_CAP_REVERSE = "limit.historyCapReverse";
+    public static final String KEY_HISTORY_CAP_GIF = "limit.historyCapGif";
+    public static final String KEY_GIF_RESULT_RETENTION_DAYS = "limit.gifResultRetentionDays";
+    public static final String KEY_ARCHIVED_PURGE_DAYS = "limit.archivedPurgeDays";
+    public static final String KEY_CANVAS_RECYCLE_DAYS = "limit.canvasRecycleDays";
+    public static final String KEY_ASSET_RECYCLE_DAYS = "limit.assetRecycleDays";
+    public static final String KEY_AGENT_CONTEXT_COMPRESS_THRESHOLD = "agent.contextCompressThreshold";
+    public static final String KEY_AGENT_CONTEXT_KEEP_RECENT = "agent.contextKeepRecent";
+
+    public static final int DEFAULT_AGENT_CONVERSATION_CAP = 100;
+    public static final int DEFAULT_AGENT_MESSAGE_CAP = 500;
+    public static final int DEFAULT_CANVAS_PROJECT_CAP = 100;
+    public static final int DEFAULT_HISTORY_CAP_REVERSE = 500;
+    public static final int DEFAULT_HISTORY_CAP_GIF = 100;
+    public static final int DEFAULT_GIF_RESULT_RETENTION_DAYS = 180;
+    public static final int DEFAULT_ARCHIVED_PURGE_DAYS = 180;
+    public static final int DEFAULT_CANVAS_RECYCLE_DAYS = 30;
+    public static final int DEFAULT_ASSET_RECYCLE_DAYS = 30;
+    public static final int DEFAULT_AGENT_CONTEXT_COMPRESS_THRESHOLD = 60;
+    public static final int DEFAULT_AGENT_CONTEXT_KEEP_RECENT = 20;
+
     private final SettingsRepository repository;
     private final SettingsCache cache;
     private final ObjectMapper objectMapper;
