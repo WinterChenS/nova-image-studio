@@ -49,6 +49,8 @@ interface WorkspaceHeaderProps {
   onToggleWideMode: () => void;
   onOpenSettings: () => void;
   onOpenConsole?: () => void;
+  /** WIN-29 (T24): 打开「我的用量」（usage.me 权限，默认角色均有）。 */
+  onOpenUsage?: () => void;
   projectSwitcher?: React.ReactNode;
   onLogoClick?: () => void;
   sidebarMode?: boolean;
@@ -58,7 +60,7 @@ interface WorkspaceHeaderProps {
 }
 
 export const WorkspaceHeader = forwardRef<WorkspaceHeaderRef, WorkspaceHeaderProps>(function WorkspaceHeader(
-  { queueStatus, wideMode, onToggleWideMode, onOpenSettings, onOpenConsole, projectSwitcher, onLogoClick, sidebarMode = false,
+  { queueStatus, wideMode, onToggleWideMode, onOpenSettings, onOpenConsole, onOpenUsage, projectSwitcher, onLogoClick, sidebarMode = false,
     user, onOpenLogin, onLogout },
   ref,
 ) {
@@ -222,6 +224,10 @@ export const WorkspaceHeader = forwardRef<WorkspaceHeaderRef, WorkspaceHeaderPro
                   <DropdownMenuItem disabled className="text-muted-foreground">
                     已登录：{user.username}
                   </DropdownMenuItem>
+                  {/* WIN-29 (T24, A11): 我的用量入口（usage.me 权限门控；仅本人数据） */}
+                  {user.permissions?.includes('usage.me') && onOpenUsage && (
+                    <DropdownMenuItem onClick={onOpenUsage}>我的用量</DropdownMenuItem>
+                  )}
                   <DropdownMenuItem onClick={() => onLogout?.()}>退出登录</DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>

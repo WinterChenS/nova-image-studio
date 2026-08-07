@@ -67,21 +67,21 @@ public class AdminAccountController {
 
     @PostMapping("/{id}/pause")
     public Map<String, Object> pause(@PathVariable UUID id, @AuthenticationPrincipal AuthUser authUser) {
-        AuthSupport.requireAdmin(authUser);
-        return accountService.pause(id);
+        AuthUser admin = AuthSupport.requireAdmin(authUser);
+        return accountService.pause(admin.id(), id);
     }
 
     @PostMapping("/{id}/resume")
     public Map<String, Object> resume(@PathVariable UUID id, @AuthenticationPrincipal AuthUser authUser) {
-        AuthSupport.requireAdmin(authUser);
-        return accountService.resume(id);
+        AuthUser admin = AuthSupport.requireAdmin(authUser);
+        return accountService.resume(admin.id(), id);
     }
 
     /** Admin recovery from broken (A4/A22) — never automatic. */
     @PostMapping("/{id}/recover")
     public Map<String, Object> recover(@PathVariable UUID id, @AuthenticationPrincipal AuthUser authUser) {
-        AuthSupport.requireAdmin(authUser);
-        return accountService.recover(id);
+        AuthUser admin = AuthSupport.requireAdmin(authUser);
+        return accountService.recover(admin.id(), id);
     }
 
     /** Lightweight connectivity test (success clears failure state). */

@@ -47,7 +47,8 @@ public class AccountRepository {
     }
 
     public UUID insert(String name, String protocol, String baseUrl, String apiKeyEnc,
-                       String modelScopeJson, Integer priority, String remark, UUID createdBy) {
+                       String modelScopeJson, Integer priority, BigDecimal monthlyCapCost,
+                       String remark, UUID createdBy) {
         UUID id = UUID.randomUUID();
         Instant now = Instant.now();
         AccountEntity e = new AccountEntity();
@@ -59,6 +60,7 @@ public class AccountRepository {
         e.setModelScopeJson(modelScopeJson == null ? "[]" : modelScopeJson);
         e.setStatus("active");
         e.setPriority(priority == null ? 100 : priority);
+        e.setMonthlyCapCost(monthlyCapCost);
         e.setHealthJson("{}");
         e.setRemark(remark);
         e.setCreatedBy(createdBy);

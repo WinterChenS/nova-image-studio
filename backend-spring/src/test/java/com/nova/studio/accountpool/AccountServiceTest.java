@@ -1,5 +1,6 @@
 package com.nova.studio.accountpool;
 
+import com.nova.studio.audit.AuditLogService;
 import com.nova.studio.infra.HttpErrorException;
 import com.nova.studio.settings.CryptoService;
 import org.junit.jupiter.api.BeforeEach;
@@ -18,6 +19,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -34,6 +36,7 @@ class AccountServiceTest {
     private AccountRepository repository;
     private CatalogModelRepository catalogRepository;
     private CryptoService crypto;
+    private AuditLogService auditLogService;
     private AccountService service;
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -51,7 +54,8 @@ class AccountServiceTest {
             String enc = inv.getArgument(0);
             return enc == null ? null : enc.replaceFirst("^v1:iv:", "");
         });
-        service = new AccountService(repository, catalogRepository, crypto, MAPPER, null);
+        auditLogService = mock(AuditLogService.class);
+        service = new AccountService(repository, catalogRepository, crypto, MAPPER, auditLogService, null);
     }
 
     private AccountRepository.Row row(String status, String protocol, String scopeJson, String healthJson) {
@@ -73,7 +77,7 @@ class AccountServiceTest {
 
     @Test
     void createEncryptsKeyAndReturnsMasked() {
-        when(repository.insert(anyString(), anyString(), anyString(), anyString(), anyString(), any(), any(), any()))
+        when(repository.insert(anyString(), anyString(), anyString(), anyString(), anyString(), any(), any(), any(), any()))
                 .thenReturn(ACCOUNT_ID);
         when(repository.findById(ACCOUNT_ID)).thenReturn(Optional.of(row("active", "openai", "[]", "{}")));
 
@@ -82,6 +86,38 @@ class AccountServiceTest {
         assertThat((String) dto.get("apiKey")).isEqualTo("sk-***1234");
         assertThat((String) dto.get("apiKey")).doesNotContain("sk-secret-1234");
         verify(crypto).encrypt("sk-secret-1234");
+    }
+
+    /** T26: create/update 接受 monthlyCapCost（月上限），DTO 暴露。 */
+    @Test
+    void createAndUpdateAcceptMonthlyCapCost() {
+        when(repository.insert(anyString(), anyString(), anyString(), anyString(), anyString(), any(),
+                org.mockito.ArgumentMatchers.eq(new BigDecimal("100")), any(), any()))
+                .thenReturn(ACCOUNT_ID);
+        when(repository.findById(ACCOUNT_ID)).thenReturn(Optional.of(
+                new AccountRepository.Row(ACCOUNT_ID, "主账号", "openai", "https://api.example.com/v1",
+                        "v1:iv:sk", "[]", "active", 100, new BigDecimal("100"), "{}", null, ADMIN,
+                        Instant.parse("2026-08-06T00:00:00Z"), Instant.parse("2026-08-06T00:00:00Z"))));
+
+        ObjectNode body = validBody();
+        body.put("monthlyCapCost", "100");
+        var dto = service.create(ADMIN, body);
+
+        assertThat(dto.get("monthlyCapCost")).isEqualTo(new BigDecimal("100"));
+
+        when(repository.findById(ACCOUNT_ID)).thenReturn(Optional.of(
+                new AccountRepository.Row(ACCOUNT_ID, "主账号", "openai", "https://api.example.com/v1",
+                        "v1:iv:sk", "[]", "active", 100, new BigDecimal("50"), "{}", null, ADMIN,
+                        Instant.parse("2026-08-06T00:00:00Z"), Instant.parse("2026-08-06T00:00:00Z"))));
+        when(repository.update(any(), anyString(), anyString(), anyString(), anyString(), anyString(), any(),
+                org.mockito.ArgumentMatchers.eq(new BigDecimal("50")), any())).thenReturn(1);
+
+        ObjectNode upd = validBody();
+        upd.put("monthlyCapCost", "50");
+        service.update(ADMIN, ACCOUNT_ID, upd);
+
+        verify(repository).update(any(), anyString(), anyString(), anyString(), anyString(), anyString(), any(),
+                org.mockito.ArgumentMatchers.eq(new BigDecimal("50")), any());
     }
 
     @Test
@@ -116,7 +152,7 @@ class AccountServiceTest {
 
     @Test
     void createAcceptsEmptyScope() {
-        when(repository.insert(anyString(), anyString(), anyString(), anyString(), anyString(), any(), any(), any()))
+        when(repository.insert(anyString(), anyString(), anyString(), anyString(), anyString(), any(), any(), any(), any()))
                 .thenReturn(ACCOUNT_ID);
         when(repository.findById(ACCOUNT_ID)).thenReturn(Optional.of(row("active", "openai", "[]", "{}")));
 
@@ -153,16 +189,45 @@ class AccountServiceTest {
         verify(repository).updateStatus(ACCOUNT_ID, "deleted");
     }
 
+    // ===== T29 (A16): 变更审计日志 =====
+
+    @Test
+    void createRecordsAuditLog() {
+        when(repository.insert(anyString(), anyString(), anyString(), anyString(), anyString(), any(), any(), any(), any()))
+                .thenReturn(ACCOUNT_ID);
+        when(repository.findById(ACCOUNT_ID)).thenReturn(Optional.of(row("active", "openai", "[]", "{}")));
+
+        service.create(ADMIN, validBody());
+
+        org.mockito.ArgumentCaptor<java.util.Map<String, Object>> detail =
+                org.mockito.ArgumentCaptor.forClass(java.util.Map.class);
+        verify(auditLogService).log(eq(ADMIN), eq("account.create"), eq("ai_accounts"), eq(ACCOUNT_ID.toString()), detail.capture());
+        assertThat(detail.getValue()).containsEntry("name", "主账号").doesNotContainKey("apiKey");
+    }
+
+    @Test
+    void pauseAndDeleteRecordAuditLog() {
+        when(repository.findById(ACCOUNT_ID)).thenReturn(Optional.of(row("active", "openai", "[]", "{}")));
+        when(repository.updateStatus(ACCOUNT_ID, "paused")).thenReturn(1);
+        service.pause(ADMIN, ACCOUNT_ID);
+        verify(auditLogService).log(eq(ADMIN), eq("account.pause"), eq("ai_accounts"), eq(ACCOUNT_ID.toString()), any());
+
+        when(repository.findById(ACCOUNT_ID)).thenReturn(Optional.of(row("paused", "openai", "[]", "{}")));
+        when(repository.updateStatus(ACCOUNT_ID, "deleted")).thenReturn(1);
+        service.delete(ADMIN, ACCOUNT_ID);
+        verify(auditLogService).log(eq(ADMIN), eq("account.delete"), eq("ai_accounts"), eq(ACCOUNT_ID.toString()), any());
+    }
+
     @Test
     void pauseAndResume() {
         when(repository.findById(ACCOUNT_ID)).thenReturn(Optional.of(row("active", "openai", "[]", "{}")));
         when(repository.updateStatus(ACCOUNT_ID, "paused")).thenReturn(1);
-        service.pause(ACCOUNT_ID);
+        service.pause(ADMIN, ACCOUNT_ID);
         verify(repository).updateStatus(ACCOUNT_ID, "paused");
 
         when(repository.findById(ACCOUNT_ID)).thenReturn(Optional.of(row("paused", "openai", "[]", "{}")));
         when(repository.updateStatus(ACCOUNT_ID, "active")).thenReturn(1);
-        service.resume(ACCOUNT_ID);
+        service.resume(ADMIN, ACCOUNT_ID);
         verify(repository).updateStatus(ACCOUNT_ID, "active");
     }
 
@@ -172,7 +237,7 @@ class AccountServiceTest {
                 row("broken", "openai", "[]", "{\"consecutive_failures\":5}")));
         when(repository.updateStatus(ACCOUNT_ID, "active")).thenReturn(1);
 
-        service.recover(ACCOUNT_ID);
+        service.recover(ADMIN, ACCOUNT_ID);
 
         verify(repository).updateStatus(ACCOUNT_ID, "active");
         verify(repository).updateHealth(eq2(ACCOUNT_ID), anyString());

@@ -53,7 +53,7 @@ export function WorkspaceShell() {
   const queueStatus = useQueueStatus();
   const { wideMode, toggleWideMode } = useWideMode();
   const { user, handleLogout } = useAuthHydration();
-  const { enterConsole } = useAppShell();
+  const { enterConsole, enterUsage } = useAppShell();
   const { currentProject } = useCurrentProject();
   const [loginOpen, setLoginOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -241,6 +241,7 @@ export function WorkspaceShell() {
             onToggleWideMode={toggleWideMode}
             onOpenSettings={() => setSettingsOpen(true)}
             onOpenConsole={enterConsole}
+            onOpenUsage={enterUsage}
             projectSwitcher={<ProjectSwitcher />}
             onLogoClick={promptGallery.handlePromptGalleryEntry}
             sidebarMode={wideMode}
