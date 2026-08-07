@@ -301,6 +301,21 @@ public class AssetService {
         repository.adjustRefCounts(userId, assetIds, delta);
     }
 
+    /** WIN-39: 合并更新素材 extra JSONB（会话图片目录 description 等，ADR-36）。 */
+    public AssetRepository.AssetRow updateExtra(UUID userId, String id, Map<String, Object> extraPatch) {
+        AssetRepository.AssetRow row = get(userId, id);
+        Map<String, Object> merged = new LinkedHashMap<>(parseExtra(row.extra()));
+        if (extraPatch != null) {
+            merged.putAll(extraPatch);
+        }
+        AssetEntity patch = new AssetEntity();
+        patch.setId(id);
+        patch.setExtra(toJsonObject(merged));
+        patch.setUpdatedAt(Instant.now());
+        repository.update(patch);
+        return get(userId, id);
+    }
+
     /** WIN-39: 会话图片目录 = assets WHERE source_kind='conversation' AND source_ref=<conversation_id>（ADR-36）。 */
     public List<AssetRepository.AssetRow> listConversationImages(UUID userId, String conversationId) {
         return repository.findBySourceRef(userId, "conversation", conversationId);
@@ -480,6 +495,14 @@ public class AssetService {
                 return node.toString();
             }
             return "{}";
+        } catch (Exception e) {
+            return "{}";
+        }
+    }
+
+    private static String toJsonObject(Map<String, Object> map) {
+        try {
+            return new tools.jackson.databind.ObjectMapper().writeValueAsString(map);
         } catch (Exception e) {
             return "{}";
         }

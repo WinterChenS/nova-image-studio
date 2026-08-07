@@ -5,6 +5,15 @@ import { nanoid } from "nanoid";
 import { localForageStorage } from "../lib/localforage-storage";
 import type { CanvasBackgroundMode } from "../lib/canvas-theme";
 import type { CanvasConnection, CanvasNodeData, ViewportTransform } from "../types";
+import {
+  createCanvasProject,
+  listCanvasProjects,
+  patchCanvasProject,
+  saveCanvasDocument,
+  softDeleteCanvasProject,
+  type ServerCanvasProject,
+} from "@/lib/canvas-api";
+import { isLoggedIn } from "@/lib/auth";
 
 export type CanvasProject = {
   id: string;
@@ -16,6 +25,7 @@ export type CanvasProject = {
   backgroundMode: CanvasBackgroundMode;
   showImageInfo: boolean;
   viewport: ViewportTransform;
+  version?: number;
 };
 
 type CanvasProjectPatch = Partial<Pick<CanvasProject, "nodes" | "connections" | "backgroundMode" | "showImageInfo" | "viewport">>;
@@ -42,12 +52,62 @@ let saveTimer: ReturnType<typeof setTimeout> | null = null;
 let queuedPersistState: PersistedCanvasState | null = null;
 let queuedPersistValue: { name: string; value: StorageValue<CanvasStore> } | null = null;
 
+/** 每项目最近一次已成功保存的文档快照（id → JSON），用于去重保存（仅差异项目提交）。 */
+const lastSavedDocs = new Map<string, string>();
+
+function projectDocSnapshot(p: CanvasProject): string {
+  return JSON.stringify({
+    title: p.title,
+    nodes: p.nodes,
+    connections: p.connections,
+    backgroundMode: p.backgroundMode,
+    showImageInfo: p.showImageInfo,
+    viewport: p.viewport,
+  });
+}
+
+function toStoreProject(server: ServerCanvasProject): CanvasProject {
+  return {
+    id: server.id,
+    title: server.title,
+    createdAt: server.createdAt,
+    updatedAt: server.updatedAt,
+    nodes: server.nodes || [],
+    connections: server.connections || [],
+    backgroundMode: server.backgroundMode || "lines",
+    showImageInfo: !!server.showImageInfo,
+    viewport: server.viewport || initialViewport,
+    version: server.version ?? 1,
+  };
+}
+
+/** 将项目整文档提交到服务端（新建走 create+PUT 幂等；已有走 PUT version 自增）。 */
+async function saveProjectToServer(project: CanvasProject): Promise<void> {
+  await saveCanvasDocument(project.id, {
+    title: project.title,
+    nodes: project.nodes,
+    connections: project.connections,
+    viewport: project.viewport,
+    backgroundMode: project.backgroundMode,
+    showImageInfo: project.showImageInfo,
+  });
+  lastSavedDocs.set(project.id, projectDocSnapshot(project));
+}
+
 async function persistQueuedCanvasState() {
   const queued = queuedPersistValue;
   if (!queued) return;
   queuedPersistValue = null;
+  const nextState = queued.value.state as PersistedCanvasState;
   try {
-    await localForageStorage.setItem(queued.name, JSON.stringify(queued.value));
+    // 按项目差异提交（仅变化的项目发请求；未登录时降级本地，离线可继续编辑）
+    const changed = nextState.projects.filter(p => lastSavedDocs.get(p.id) !== projectDocSnapshot(p));
+    if (changed.length > 0 && isLoggedIn()) {
+      await Promise.all(changed.map(saveProjectToServer));
+    } else if (changed.length > 0) {
+      // 未登录/服务端不可用 → 本地临时缓冲（非离线主存储，保存状态机 error 由上层提示）
+      await localForageStorage.setItem(queued.name, JSON.stringify(queued.value));
+    }
     if (!queuedPersistValue) useCanvasStore.setState({ saveStatus: "saved" });
   } catch {
     useCanvasStore.setState({ saveStatus: "error" });
@@ -62,8 +122,27 @@ export async function flushPendingCanvasSave() {
   await persistQueuedCanvasState();
 }
 
+/** WIN-39（T6）：从服务端加载项目列表（登录态），失败/未登录降级本地 IndexedDB。 */
+async function loadProjectsFromServer(): Promise<CanvasProject[] | null> {
+  if (!isLoggedIn()) return null;
+  try {
+    const items = await listCanvasProjects();
+    const projects = items.map(toStoreProject);
+    for (const p of projects) lastSavedDocs.set(p.id, projectDocSnapshot(p));
+    return projects;
+  } catch {
+    return null;
+  }
+}
+
 const canvasStorage: PersistStorage<CanvasStore> = {
   getItem: async (name) => {
+    const serverProjects = await loadProjectsFromServer();
+    if (serverProjects) {
+      const state = { projects: serverProjects } as PersistedCanvasState;
+      queuedPersistState = state;
+      return { state, version: 0 } as StorageValue<CanvasStore>;
+    }
     const value = await localForageStorage.getItem(name);
     if (!value) return null;
     const parsed = JSON.parse(value) as StorageValue<CanvasStore>;
@@ -104,8 +183,20 @@ export const useCanvasStore = create<CanvasStore>()(
           backgroundMode: "lines",
           showImageInfo: false,
           viewport: initialViewport,
+          version: 1,
         };
         set((state) => ({ projects: [project, ...state.projects] }));
+        // WIN-39：新建即建服务端项目（客户端 id 稳定，后续差异保存走 PUT）
+        if (isLoggedIn()) {
+          void createCanvasProject(project.title, id)
+            .then(server => {
+              lastSavedDocs.set(id, projectDocSnapshot(project));
+              useCanvasStore.setState((state) => ({
+                projects: state.projects.map(p => p.id === id ? { ...p, version: server.version ?? 1 } : p),
+              }));
+            })
+            .catch(() => useCanvasStore.setState({ saveStatus: "error" }));
+        }
         return id;
       },
       importProject: (source) => {
@@ -120,20 +211,34 @@ export const useCanvasStore = create<CanvasStore>()(
           backgroundMode: source.backgroundMode || "lines",
           showImageInfo: source.showImageInfo || false,
           viewport: source.viewport || initialViewport,
+          version: source.version || 1,
         };
         set((state) => ({ projects: [project, ...state.projects] }));
+        if (isLoggedIn()) {
+          void createCanvasProject(project.title, project.id)
+            .then(() => { lastSavedDocs.set(project.id, projectDocSnapshot(project)); })
+            .catch(() => { /* 差异保存兜底 */ });
+        }
         return project.id;
       },
       openProject: (id) => {
         return get().projects.find((item) => item.id === id) || null;
       },
-      renameProject: (id, title) =>
+      renameProject: (id, title) => {
+        const nextTitle = title.trim() || undefined;
         set((state) => ({
-          projects: state.projects.map((project) => (project.id === id ? { ...project, title: title.trim() || project.title, updatedAt: new Date().toISOString() } : project)),
-        })),
+          projects: state.projects.map((project) => (project.id === id ? { ...project, title: nextTitle || project.title, updatedAt: new Date().toISOString() } : project)),
+        }));
+        if (isLoggedIn() && nextTitle) {
+          void patchCanvasProject(id, { title: nextTitle }).catch(() => useCanvasStore.setState({ saveStatus: "error" }));
+        }
+      },
       deleteProjects: (ids) =>
         set((state) => {
           const projects = state.projects.filter((project) => !ids.includes(project.id));
+          if (isLoggedIn()) {
+            ids.forEach(id => { void softDeleteCanvasProject(id).catch(() => {}); lastSavedDocs.delete(id); });
+          }
           return { projects };
         }),
       replaceProjects: (projects) => set({ projects }),

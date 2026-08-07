@@ -48,8 +48,8 @@ public class CanvasService {
 
     // ===== CRUD =====
 
-    /** 新建项目（配额校验 AC-11）。 */
-    public CanvasProjectRepository.CanvasRow create(UUID userId, String title) {
+    /** 新建项目（配额校验 AC-11）；body.id 可选（前端/迁移提供稳定客户端 id）。 */
+    public CanvasProjectRepository.CanvasRow create(UUID userId, String title, String clientId) {
         int cap = settingsService.getInt(userId, SettingsService.KEY_CANVAS_PROJECT_CAP, DEFAULT_PROJECT_CAP);
         long active = repository.countActive(userId);
         if (active >= cap) {
@@ -58,7 +58,7 @@ public class CanvasService {
         }
         Instant now = Instant.now();
         CanvasProjectEntity entity = new CanvasProjectEntity();
-        entity.setId(UUID.randomUUID().toString());
+        entity.setId(clientId != null && !clientId.isBlank() ? clientId : UUID.randomUUID().toString());
         entity.setUserId(userId.toString());
         entity.setTitle(title != null && !title.isBlank() ? title.trim() : "未命名画布");
         entity.setNodes("[]");
@@ -72,6 +72,11 @@ public class CanvasService {
         repository.insert(entity);
         log.info("[canvas] 新建项目: user={}, project={}", userId, entity.getId());
         return repository.findByIdAndOwner(entity.getId(), userId).orElseThrow();
+    }
+
+    /** 兼容签名（无客户端 id）。 */
+    public CanvasProjectRepository.CanvasRow create(UUID userId, String title) {
+        return create(userId, title, null);
     }
 
     public List<CanvasProjectRepository.CanvasRow> list(UUID userId, boolean includeDeleted) {

@@ -150,6 +150,19 @@ public class AgentConversationController {
         return Map.of("ok", true, "removed", removed);
     }
 
+    /** 批量删除指定消息（前端重试/重编辑流程，F1 写点）。 */
+    @PostMapping("/conversations/{id}/messages/batch-delete")
+    public Map<String, Object> batchDeleteMessages(@PathVariable String id, @RequestBody JsonNode body,
+                                                   @AuthenticationPrincipal AuthUser authUser) {
+        AuthSupport.requireAuth(authUser);
+        List<String> ids = new ArrayList<>();
+        if (body != null && body.has("ids") && body.get("ids").isArray()) {
+            body.get("ids").forEach(node -> ids.add(node.asText()));
+        }
+        int deleted = conversationService.deleteMessages(authUser.id(), id, ids);
+        return Map.of("ok", true, "deleted", deleted);
+    }
+
     // ===== image directory（assets）=====
 
     @PostMapping("/images")
@@ -195,6 +208,19 @@ public class AgentConversationController {
                 .contentType(MediaType.parseMediaType(stored.contentType()))
                 .header(HttpHeaders.CACHE_CONTROL, "private, max-age=3600")
                 .body(stored.data());
+    }
+
+    /** 更新会话图片登记元数据（extra.description，ADR-36 目录语义保留）。 */
+    @PatchMapping("/images/{assetId}")
+    public Map<String, Object> updateImageDescription(@PathVariable String assetId, @RequestBody JsonNode body,
+                                                      @AuthenticationPrincipal AuthUser authUser) {
+        AuthSupport.requireAuth(authUser);
+        if (body == null || !body.has("description")) {
+            throw new IllegalArgumentException("缺少 description");
+        }
+        AssetRepository.AssetRow updated = conversationService.updateImageDescription(
+                authUser.id(), assetId, body.get("description").asText());
+        return assetJson(updated);
     }
 
     private Map<String, Object> assetJson(AssetRepository.AssetRow row) {

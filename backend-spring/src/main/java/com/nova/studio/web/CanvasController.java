@@ -59,7 +59,8 @@ public class CanvasController {
                                                       @AuthenticationPrincipal AuthUser authUser) {
         AuthSupport.requireAuth(authUser);
         String title = body != null && body.hasNonNull("title") ? body.get("title").asText() : null;
-        return ResponseEntity.status(201).body(canvasService.toJson(canvasService.create(authUser.id(), title)));
+        String clientId = body != null && body.hasNonNull("id") ? body.get("id").asText() : null;
+        return ResponseEntity.status(201).body(canvasService.toJson(canvasService.create(authUser.id(), title, clientId)));
     }
 
     @GetMapping("/projects/{id}")

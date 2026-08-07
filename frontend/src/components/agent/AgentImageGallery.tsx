@@ -23,6 +23,7 @@ import type { AgentImageRecord } from '@/lib/agent-chat-config';
 import type { ImageActionPayload } from '@/lib/image-actions';
 import { cn, clampIndex } from '@/lib/utils';
 import { createPortal } from 'react-dom';
+import { AuthenticatedImage } from '@/components/AuthenticatedImage';
 
 interface AgentImageGalleryProps {
   images: AgentImageRecord[];
@@ -299,10 +300,11 @@ export function AgentImageGallery({ images, onRedescribe }: AgentImageGalleryPro
                       onClick={() => void openPreview(filteredImages, index)}
                       className="block h-full w-full"
                     >
-                      <img
+                      <AuthenticatedImage
                         src={img.thumbnail}
                         alt={img.imgId}
                         className="h-full w-full object-cover transition-transform group-hover:scale-105"
+                        placeholderClassName="h-full w-full"
                       />
                       {/* imgId 角标 */}
                       <span className="absolute left-1.5 top-1.5 rounded bg-black/60 px-1 text-[9px] text-white">

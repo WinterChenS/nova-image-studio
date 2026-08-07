@@ -296,6 +296,19 @@ public class ConversationService {
         return deleted;
     }
 
+    /** 批量删除指定消息（前端重试/重编辑流程移除失败消息，F1 写点）。 */
+    public int deleteMessages(UUID userId, String conversationId, List<String> ids) {
+        getOwned(userId, conversationId);
+        if (ids == null || ids.isEmpty()) {
+            return 0;
+        }
+        int deleted = messageRepository.deleteByIdsAndOwner(
+                ids.stream().distinct().limit(200).toList(), conversationId, userId);
+        log.info("[conversation] 批量删除消息: user={}, conversation={}, removed={}",
+                userId, conversationId, deleted);
+        return deleted;
+    }
+
     // ===== image directory（assets source_kind='conversation'）=====
 
     /** 会话图片上传（multipart → assets，source_ref=conversation_id，ADR-36）。 */
@@ -333,6 +346,15 @@ public class ConversationService {
     public AssetService.StoredAssetFile getImage(UUID userId, String assetId) {
         return assetService.getFile(userId, assetId)
                 .orElseThrow(() -> new HttpErrorException(404, "NOT_FOUND", "图片不存在"));
+    }
+
+    /** 更新会话图片登记描述（extra.description，ADR-36 目录语义）。 */
+    public AssetRepository.AssetRow updateImageDescription(UUID userId, String assetId, String description) {
+        AssetService.StoredAssetFile stored = assetService.getFile(userId, assetId)
+                .orElseThrow(() -> new HttpErrorException(404, "NOT_FOUND", "图片不存在"));
+        AssetRepository.AssetRow row = assetService.updateExtra(userId, assetId, Map.of("description",
+                description == null ? "" : description));
+        return row;
     }
 
     // ===== helpers =====

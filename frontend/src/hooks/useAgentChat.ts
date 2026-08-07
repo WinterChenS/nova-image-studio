@@ -42,6 +42,10 @@ import {
   savePendingGeneration,
   loadPendingGeneration,
   clearPendingGeneration,
+  ensureAgentConversation,
+  setActiveConversation,
+  getActiveConversation,
+  loadEarlierMessages,
   type PendingGenerationData,
 } from '@/lib/agent-context-store';
 import { getDefaultConfiguredTextModel } from '@/lib/model-endpoints';
@@ -139,11 +143,6 @@ async function makePreviewFromBlob(blob: Blob): Promise<{ dataUrl: string; width
   }
 }
 
-function parseImgSeq(imgId: string): number {
-  const match = imgId.match(/^img_(\d+)$/);
-  return match ? Number(match[1]) : 0;
-}
-
 /**
  * 按最后一个上下文分隔点切片：分隔点之前的对话和图片对模型不可见。
  * 界面仍展示全部消息，这里只影响喂给模型的上下文。
@@ -191,6 +190,10 @@ export function useAgentChat() {
   const [generatingStartedAt, setGeneratingStartedAt] = useState<number | null>(null);
   const [generationDraft, setGenerationDraft] = useState<AgentGenerationDraft | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
+  // WIN-39（T4）：多会话 —— 当前会话 id/标题（切换页面恢复，C1）
+  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [conversationTitle, setConversationTitle] = useState<string | null>(null);
+  const [hasMoreMessages, setHasMoreMessages] = useState(false);
   // M2 (T2.3): Agent 开关改走设置 API（agent.webSearch / agent.intentRecognition）
   const [webSearchEnabled, setWebSearchEnabled] = useState(false);
   const [intentRecognition, setIntentRecognition] = useState(true);
@@ -212,7 +215,6 @@ export function useAgentChat() {
   const pollAbortRef = useRef(false);
   const pollWakeRef = useRef<(() => void) | null>(null);
   const describeAbortRef = useRef<AbortController | null>(null);
-  const seqRef = useRef(0);
   /** 当模型返回提案时，暂存分析文本，等生图完成后与结果合并为一条消息 */
   const pendingAnalysisRef = useRef('');
   const pendingReasoningRef = useRef('');
@@ -280,6 +282,8 @@ export function useAgentChat() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      // WIN-39：确保存在当前会话（无则新建；有则加载最近会话，C1/ADR-38）
+      await ensureAgentConversation();
       const [session, pending, generation] = await Promise.all([
         loadAgentSession(),
         loadPendingProposal(),
@@ -288,7 +292,9 @@ export function useAgentChat() {
       if (cancelled) return;
       setMessages(session.messages);
       setImages(session.images);
-      seqRef.current = session.images.reduce((max, img) => Math.max(max, parseImgSeq(img.imgId)), 0);
+      setConversationId(session.conversationId ?? getActiveConversation());
+      setConversationTitle(session.title);
+      setHasMoreMessages(session.messages.length >= 50);
       if (session.imageModel) setImageModelState(session.imageModel as ModelId);
 
       if (pending) {
@@ -336,11 +342,6 @@ export function useAgentChat() {
     void putImageRecord(record);
   }, []);
 
-  const nextImgId = useCallback(() => {
-    seqRef.current += 1;
-    return `img_${seqRef.current}`;
-  }, []);
-
   // 给一张图片建立登记：存字节 + 生成预览 + 视觉描述
   const ingestImage = useCallback(async (
     source: AgentImageRecord['source'],
@@ -352,12 +353,9 @@ export function useAgentChat() {
     contentHash?: string,
     describeSignal?: AbortSignal,
   ): Promise<AgentImageRecord> => {
-    const imgId = nextImgId();
-    // 上传图片（有 contentHash）已在 prepareUploadImage 时存于 nova-upload-cache，
-    // 不再重复存到 nova-image-db，节省空间；生成图片无 contentHash 则照常存储。
-    if (source === 'generated' || !contentHash) {
-      await storeAgentImageBytes(imgId, blob);
-    }
+    // WIN-39（T4）：图片字节一律上传服务端 assets（统一素材，imgId=assetId，ADR-36）；
+    // 服务端按 hash 去重（同图重复上传 → 409，由调用方错误提示）
+    const imgId = await storeAgentImageBytes('', blob, source);
 
     let description = '';
     try {
@@ -387,7 +385,7 @@ export function useAgentChat() {
     };
     registerImage(record);
     return record;
-  }, [nextImgId, registerImage]);
+  }, [registerImage]);
 
   /** 重新生成已有图片的描述 */
   const redescribeImage = useCallback(async (imgId: string): Promise<string> => {
@@ -1001,7 +999,12 @@ export function useAgentChat() {
     pollAbortRef.current = true;
     pollWakeRef.current?.();
     describeAbortRef.current?.abort();
-    await clearAgentSession();
+    // WIN-39（T4）：清空重开 = 服务端软删旧会话 + 新建（回收站可恢复，C8）
+    const nextId = await clearAgentSession();
+    setActiveConversation(nextId);
+    setConversationId(nextId);
+    setConversationTitle(null);
+    setHasMoreMessages(false);
     setMessages([]);
     setImages([]);
     setProposal(null);
@@ -1013,7 +1016,6 @@ export function useAgentChat() {
     setGenerationDraft(null);
     setIsSyncing(false);
     setError(null);
-    seqRef.current = 0;
     setPhase('idle');
   }, [flushAndCancelRaf]);
 
@@ -1127,6 +1129,81 @@ export function useAgentChat() {
     };
   }, []);
 
+  // ===== WIN-39（T4）：多会话切换 + 消息懒加载 =====
+
+  /** 切换到指定会话：中断当前流 → 设为 active → 重载会话与 pending（AC-1 切换恢复）。 */
+  const switchConversation = useCallback(async (targetId: string) => {
+    if (targetId === conversationId) return;
+    streamHandleRef.current?.abort();
+    streamHandleRef.current = null;
+    pollAbortRef.current = true;
+    pollWakeRef.current?.();
+    describeAbortRef.current?.abort();
+    setActiveConversation(targetId);
+    setConversationId(targetId);
+    setPhase('loading');
+    try {
+      const [session, pending, generation] = await Promise.all([
+        loadAgentSession(),
+        loadPendingProposal(),
+        loadPendingGeneration(),
+      ]);
+      setMessages(session.messages);
+      setImages(session.images);
+      setConversationTitle(session.title);
+      setHasMoreMessages(session.messages.length >= 50);
+      if (session.imageModel) setImageModelState(session.imageModel as ModelId);
+      setProposal(null);
+      setGenerationDraft(null);
+      setGeneratingTaskId(null);
+      setStreamingText('');
+      setStreamingReasoning('');
+      if (pending) {
+        pendingAnalysisRef.current = pending.pendingAnalysis;
+        pendingReasoningRef.current = pending.pendingReasoning;
+        isReeditRef.current = pending.isReedit;
+        setProposal(pending.proposal);
+        setPhase('proposal');
+      } else if (generation) {
+        pendingAnalysisRef.current = generation.pendingAnalysis;
+        pendingReasoningRef.current = generation.pendingReasoning;
+        proposalRef.current = generation.proposal;
+        setGeneratingTaskId(generation.taskId);
+        setGeneratingStartedAt(generation.startedAt);
+        setGenerationDraft({
+          analysis: generation.pendingAnalysis || generation.proposal.reason || '根据你的描述，正在生成图片。',
+          reasoning: generation.pendingReasoning || undefined,
+          prompt: generation.proposal.prompt,
+          parallelCount: generation.parallelCount,
+          taskId: generation.taskId,
+          startedAt: generation.startedAt,
+        });
+        setPhase('generating');
+      } else {
+        setPhase('idle');
+      }
+    } catch {
+      setPhase('idle');
+    }
+  }, [conversationId]);
+
+  /** 滚动加载更早消息（before 游标，FR-1.3 懒加载）。 */
+  const loadMoreMessages = useCallback(async () => {
+    const oldest = messages[0];
+    if (!oldest || !hasMoreMessages || phase !== 'idle') return;
+    const older = await loadEarlierMessages(new Date(oldest.createdAt).toISOString());
+    if (older.messages.length === 0) {
+      setHasMoreMessages(false);
+      return;
+    }
+    setMessages(prev => {
+      const existing = new Set(prev.map(m => m.id));
+      const merged = [...older.messages.filter(m => !existing.has(m.id)), ...prev];
+      return merged;
+    });
+    setHasMoreMessages(!!older.nextBefore);
+  }, [messages, hasMoreMessages, phase]);
+
   return {
     ready,
     hasApiKey,
@@ -1145,6 +1222,11 @@ export function useAgentChat() {
     webSearchEnabled,
     agentSupportsWebSearch: agentSupportsWebSearch(),
     intentRecognition,
+    conversationId,
+    conversationTitle,
+    hasMoreMessages,
+    switchConversation,
+    loadMoreMessages,
     sendMessage,
     approveProposal,
     cancelProposal,

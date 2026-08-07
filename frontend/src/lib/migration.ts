@@ -1,0 +1,336 @@
+'use client';
+
+/**
+ * WIN-39 (WIN-40 T7) — 存量本地数据迁移工具：读本地 IndexedDB/localForage 存量
+ * （nova-agent-db 会话 / nova-image 画布）→ 图片字节分批上传（/migration/upload-image，
+ * 返回 assetId 改写节点/消息引用）→ 按功能批量导入（/migration/{agent|canvas}/import，幂等）
+ * → 本地写 nova-migrated 标记。失败保留本地 + 可重试（FR-7.1/7.2/7.3）。
+ *
+ * 迁移在「已登录」前提下进行（FR-7.1：未登录不迁移）；重复登录不重复迁移（标记 + 服务端去重）。
+ */
+
+import { authFetch, readApiError, isLoggedIn } from '@/lib/auth';
+import type { AgentMessage, AgentImageRecord } from '@/lib/agent-chat-config';
+
+// ===== 迁移标记（localStorage）=====
+
+const MIGRATED_MARKER = 'nova-migrated';
+
+export type MigrationFeature = 'agent' | 'canvas' | 'reverse' | 'gif';
+
+export function isFeatureMigrated(feature: MigrationFeature): boolean {
+  if (typeof window === 'undefined') return true;
+  try {
+    const markers = JSON.parse(window.localStorage.getItem(MIGRATED_MARKER) || '{}') as Record<string, boolean>;
+    return !!markers[feature];
+  } catch {
+    return false;
+  }
+}
+
+export function markFeatureMigrated(feature: MigrationFeature): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const markers = JSON.parse(window.localStorage.getItem(MIGRATED_MARKER) || '{}') as Record<string, boolean>;
+    markers[feature] = true;
+    window.localStorage.setItem(MIGRATED_MARKER, JSON.stringify(markers));
+  } catch {
+    // 标记失败不阻塞（服务端去重兜底）
+  }
+}
+
+// ===== IndexedDB 读取（复用既有 DB 结构）=====
+
+function openDB(name: string, version: number): Promise<IDBDatabase | null> {
+  if (typeof indexedDB === 'undefined') return Promise.resolve(null);
+  return new Promise(resolve => {
+    const req = indexedDB.open(name, version);
+    req.onerror = () => resolve(null);
+    req.onsuccess = () => resolve(req.result);
+  });
+}
+
+function getAllFromStore<T>(db: IDBDatabase, storeName: string): Promise<T[]> {
+  return new Promise(resolve => {
+    const tx = db.transaction(storeName, 'readonly');
+    const req = tx.objectStore(storeName).getAll();
+    req.onsuccess = () => resolve((req.result as T[]) || []);
+    req.onerror = () => resolve([]);
+  });
+}
+
+/** 判断本地是否有 Agent/画布存量（迁移入口检测，FR-7.1）。 */
+export async function hasLocalAgentData(): Promise<boolean> {
+  if (isFeatureMigrated('agent')) return false;
+  const db = await openDB('nova-agent-db', 1);
+  if (!db) return false;
+  const messages = await getAllFromStore<AgentMessage>(db, 'messages');
+  db.close();
+  return messages.length > 0;
+}
+
+export async function hasLocalCanvasData(): Promise<boolean> {
+  if (isFeatureMigrated('canvas')) return false;
+  const db = await openDB('nova-image', 1);
+  if (!db) return false;
+  const tx = db.transaction('canvas_app_state', 'readonly');
+  const req = tx.objectStore('canvas_app_state').get('nova-image:canvas_store');
+  const value = await new Promise<unknown>(resolve => {
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => resolve(null);
+  });
+  db.close();
+  return !!(value && typeof value === 'object' && (value as { state?: { projects?: unknown[] } }).state?.projects?.length);
+}
+
+// ===== 图片上传（分批 + 进度）=====
+
+async function uploadMigrationImage(blob: Blob, sourceKind: string, onProgress: (done: number, total: number) => void): Promise<string> {
+  const form = new FormData();
+  form.append('file', blob);
+  form.append('sourceKind', sourceKind);
+  const response = await authFetch('/api/nova/migration/upload-image', { method: 'POST', body: form });
+  if (!response.ok) {
+    const err = await readApiError(response);
+    // 同图已存在（409）→ 幂等跳过；其余抛错
+    if ((err as { code?: string }).code === 'ASSET_ALREADY_EXISTS') {
+      onProgress(1, 1);
+      throw new Error('DUP');
+    }
+    throw err;
+  }
+  const data = (await response.json()) as { assetId: string; id: string };
+  return data.assetId ?? data.id;
+}
+
+// ===== Agent 会话迁移 =====
+
+export interface AgentMigrationInput {
+  conversations: Array<{
+    id: string;
+    title: string;
+    status?: string;
+    imageModel?: string | null;
+    webSearch?: boolean;
+    pending?: unknown;
+    contextSummary?: unknown;
+    messages: Array<Record<string, unknown>>;
+  }>;
+}
+
+export async function readLocalAgentData(): Promise<AgentMigrationInput | null> {
+  const db = await openDB('nova-agent-db', 1);
+  if (!db) return null;
+  const [messages, images, meta] = await Promise.all([
+    getAllFromStore<AgentMessage>(db, 'messages'),
+    getAllFromStore<AgentImageRecord>(db, 'images'),
+    getAllFromStore<{ key: string; value: string }>(db, 'meta'),
+  ]);
+  db.close();
+  if (messages.length === 0 && images.length === 0) return null;
+
+  const messagesById = new Map(messages.map(m => [m.id, m]));
+  const imageModel = meta.find(m => m.key === 'imageModel')?.value ?? null;
+
+  const conversation = {
+    id: 'local-agent-session',          // 幂等唯一键（同用户去重）
+    title: '迁移的 Agent 会话',
+    imageModel,
+    messages: messages.sort((a, b) => a.createdAt - b.createdAt).map(m => ({
+      id: m.id,
+      role: m.role,
+      text: m.text,
+      reasoning: m.reasoning,
+      imageIds: (m.imageIds || []).map((imgId: string) => ({ __imgIdRef: imgId })),
+      taskId: m.taskId,
+      webSearchUsed: m.webSearchUsed,
+      withdrawable: m.withdrawable,
+    })),
+  };
+  void messagesById;
+  return { conversations: [conversation] };
+}
+
+/** 迁移 Agent 会话：图片上传 → 引用改写 → 导入。返回迁移条数。 */
+export async function runAgentMigration(onProgress?: (percent: number, message: string) => void): Promise<number> {
+  if (!isLoggedIn()) throw new Error('请先登录');
+  onProgress?.(5, '正在读取本地 Agent 会话...');
+  const data = await readLocalAgentData();
+  if (!data) {
+    markFeatureMigrated('agent');
+    return 0;
+  }
+
+  // 1) 收集并上传图片（nova-image-db blobs 优先，缩略图兜底）
+  onProgress?.(15, '正在上传会话图片...');
+  const blobStore = await openDB('nova-image-db', 2);
+  const imageBlobMap = new Map<string, Blob | null>();
+  if (blobStore) {
+    const blobs = await getAllFromStore<{ jobId: string; index: number; blob: Blob }>(blobStore, 'blobs');
+    for (const b of blobs) {
+      if (b.blob && !imageBlobMap.has(b.jobId)) imageBlobMap.set(b.jobId, b.blob);
+    }
+    blobStore.close();
+  }
+  const imageRecords = await readAgentImageRecords();
+  const imgIdToAssetId = new Map<string, string>();
+  const total = imageRecords.length;
+  let done = 0;
+  for (const record of imageRecords) {
+    let blob = imageBlobMap.get(record.imgId) || null;
+    if (!blob && record.thumbnail && record.thumbnail.startsWith('data:')) {
+      blob = dataUrlToBlob(record.thumbnail);
+    }
+    if (blob) {
+      try {
+        const assetId = await uploadMigrationImage(blob, 'conversation', (d, t) => { done += d; onProgress?.(15 + Math.floor((done / Math.max(total, 1)) * 50), `正在上传会话图片 ${done}/${total}`); void t; });
+        imgIdToAssetId.set(record.imgId, assetId);
+      } catch (e) {
+        if ((e as Error).message === 'DUP') {
+          // 已存在：尝试按 hash 无法取回 id → 引用保留原值（服务端不校验）
+        } else {
+          throw e;
+        }
+      }
+    }
+  }
+
+  // 2) 改写消息 imageIds 引用（imgId → assetId）
+  for (const conv of data.conversations) {
+    for (const msg of conv.messages) {
+      const refs = (msg.imageIds as Array<{ __imgIdRef: string }>) || [];
+      msg.imageIds = refs.map(r => imgIdToAssetId.get(r.__imgIdRef) || r.__imgIdRef).filter(Boolean);
+    }
+  }
+
+  // 3) 导入（幂等：conversation id 去重）
+  onProgress?.(75, '正在导入会话到云端...');
+  const response = await authFetch('/api/nova/migration/agent/import', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) throw await readApiError(response);
+  const summary = (await response.json()) as { created: number; skipped: number };
+  markFeatureMigrated('agent');
+  onProgress?.(100, 'Agent 会话迁移完成');
+  return summary.created ?? 0;
+}
+
+async function readAgentImageRecords(): Promise<AgentImageRecord[]> {
+  const db = await openDB('nova-agent-db', 1);
+  if (!db) return [];
+  const records = await getAllFromStore<AgentImageRecord>(db, 'images');
+  db.close();
+  return records;
+}
+
+// ===== 画布迁移 =====
+
+export interface CanvasMigrationInput {
+  projects: Array<Record<string, unknown>>;
+}
+
+/** 读取本地画布数据（localForage nova-image:canvas_store）。 */
+export async function readLocalCanvasData(): Promise<{ projects: Array<Record<string, unknown>> } | null> {
+  const db = await openDB('nova-image', 1);
+  if (!db) return null;
+  const value = await new Promise<unknown>(resolve => {
+    const tx = db.transaction('canvas_app_state', 'readonly');
+    const req = tx.objectStore('canvas_app_state').get('nova-image:canvas_store');
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => resolve(null);
+  });
+  db.close();
+  const projects = (value as { state?: { projects?: Array<Record<string, unknown>> } })?.state?.projects;
+  return projects && projects.length ? { projects } : null;
+}
+
+/** 迁移画布：节点图片 blob → assets（改写 storageKey→assetId）→ 导入。返回项目数。 */
+export async function runCanvasMigration(onProgress?: (percent: number, message: string) => void): Promise<number> {
+  if (!isLoggedIn()) throw new Error('请先登录');
+  onProgress?.(5, '正在读取本地画布...');
+  const data = await readLocalCanvasData();
+  if (!data) {
+    markFeatureMigrated('canvas');
+    return 0;
+  }
+
+  onProgress?.(15, '正在上传画布图片...');
+  const blobStore = await openDB('nova-image', 1);
+  const blobMap = new Map<string, Blob | null>();
+  if (blobStore) {
+    const blobs = await getAllFromStore<{ key: string; value: Blob }>(blobStore, 'canvas_image_files');
+    for (const b of blobs) {
+      if (b && b.key && b.value instanceof Blob && !blobMap.has(b.key)) blobMap.set(b.key, b.value);
+    }
+    blobStore.close();
+  }
+
+  const storageKeyToAssetId = new Map<string, string>();
+  const refs: Array<{ key: string; blob: Blob | null }> = [];
+  for (const project of data.projects) {
+    collectCanvasStorageKeys(project, (key) => {
+      const blob = blobMap.get(key) || null;
+      if (blob) refs.push({ key, blob });
+    });
+  }
+  let done = 0;
+  const total = refs.length;
+  for (const ref of refs) {
+    const assetId = await uploadMigrationImage(ref.blob!, 'canvas', () => {
+      done += 1;
+      onProgress?.(15 + Math.floor((done / Math.max(total, 1)) * 55), `正在上传画布图片 ${done}/${total}`);
+    });
+    storageKeyToAssetId.set(ref.key, assetId);
+  }
+
+  // 改写节点图片引用（storageKey → assetId，ADR-35）
+  onProgress?.(78, '正在改写节点图片引用...');
+  for (const project of data.projects) {
+    rewriteCanvasStorageKeys(project, storageKeyToAssetId);
+  }
+
+  onProgress?.(85, '正在导入画布到云端...');
+  const response = await authFetch('/api/nova/migration/canvas/import', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) throw await readApiError(response);
+  const summary = (await response.json()) as { created: number; skipped: number };
+  markFeatureMigrated('canvas');
+  onProgress?.(100, '画布迁移完成');
+  return summary.created ?? 0;
+}
+
+/** 收集节点 storageKey 引用（旧本地 blob 引用，供上传改写，ADR-35）。 */
+export function collectCanvasStorageKeys(value: unknown, onKey: (key: string) => void): void {
+  if (!value || typeof value !== 'object') return;
+  if ('storageKey' in value && typeof value.storageKey === 'string' && value.storageKey.startsWith('image:')) {
+    onKey(value.storageKey);
+  }
+  Object.values(value).forEach(v => (Array.isArray(v) ? v.forEach(c => collectCanvasStorageKeys(c, onKey)) : collectCanvasStorageKeys(v, onKey)));
+}
+
+/** 改写节点图片引用：storageKey → assetId（迁移工具核心改写，ADR-35）。 */
+export function rewriteCanvasStorageKeys(value: unknown, mapping: Map<string, string>): void {
+  if (!value || typeof value !== 'object') return;
+  if ('storageKey' in value && typeof value.storageKey === 'string' && mapping.has(value.storageKey)) {
+    (value as { storageKey: string }).storageKey = mapping.get(value.storageKey)!;
+  }
+  Object.values(value).forEach(v => (Array.isArray(v) ? v.forEach(c => rewriteCanvasStorageKeys(c, mapping)) : rewriteCanvasStorageKeys(v, mapping)));
+}
+
+function dataUrlToBlob(dataUrl: string): Blob | null {
+  try {
+    const [head, body] = dataUrl.split(',');
+    const mime = /^data:([^;]+)/.exec(head)?.[1] || 'image/png';
+    const binary = atob(body);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return new Blob([bytes], { type: mime });
+  } catch {
+    return null;
+  }
+}

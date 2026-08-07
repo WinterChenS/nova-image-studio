@@ -8,6 +8,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
+import { MigrationBanner } from "@/components/MigrationBanner";
 import { CanvasEditor } from "./CanvasEditor";
 import { CanvasThumbnail } from "./components/canvas-thumbnail";
 import { useCanvasStore } from "./stores/use-canvas-store";
@@ -95,6 +96,8 @@ export function CanvasWorkspace({ wideMode, onConfigureApiKey, onEnableWideMode,
 
   return (
     <div className="space-y-4">
+      {/* WIN-39（T7）：本地画布存量迁移入口 */}
+      <MigrationBanner features={['canvas']} />
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <h2 className="text-lg font-semibold tracking-tight">无限画布</h2>
