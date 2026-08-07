@@ -84,6 +84,7 @@ class TaskApiE2EIntegrationTest {
     private final RestTemplate rest = new RestTemplate();
     private final ObjectMapper mapper = new ObjectMapper();
     private String token;
+    private String username;   // WIN-40 复测修复：跟踪测试用户以便清理
 
     private UUID imageCatalogId;
     private UUID textCatalogId;
@@ -103,6 +104,7 @@ class TaskApiE2EIntegrationTest {
 
         // 注册普通用户
         String username = "e2e_" + UUID.randomUUID().toString().substring(0, 8);
+        this.username = username;
         Map<String, Object> reg = new LinkedHashMap<>();
         reg.put("username", username);
         reg.put("password", "secret123");
@@ -139,6 +141,11 @@ class TaskApiE2EIntegrationTest {
         }
         if (textAccountId != null) {
             accountRepository.updateStatus(textAccountId, "deleted");
+        }
+        // WIN-40 复测修复：清理测试用户（含提权测试遗留的 admin/user 双角色行）
+        if (username != null) {
+            jdbcTemplate.update("DELETE FROM user_roles WHERE user_id = (SELECT id FROM users WHERE username = ?)", username);
+            jdbcTemplate.update("DELETE FROM users WHERE username = ?", username);
         }
         upstream.shutdown();
     }

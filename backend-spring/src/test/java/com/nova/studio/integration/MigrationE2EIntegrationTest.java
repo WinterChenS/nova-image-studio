@@ -72,6 +72,7 @@ class MigrationE2EIntegrationTest {
             jdbcTemplate.update("DELETE FROM conversation_messages WHERE user_id = ?", userId);
             jdbcTemplate.update("DELETE FROM conversations WHERE user_id = ?", userId);
             jdbcTemplate.update("DELETE FROM canvas_projects WHERE user_id = ?", userId);
+            jdbcTemplate.update("DELETE FROM histories WHERE user_id = ?", userId);
             jdbcTemplate.update("DELETE FROM assets WHERE user_id = ? AND source_kind IN ('canvas','conversation')", userId);
         }
         jdbcTemplate.update("DELETE FROM users WHERE username = ?", username);
@@ -179,10 +180,11 @@ class MigrationE2EIntegrationTest {
 
     @Test
     void reverseImportWritesHistories() {
+        String historyId = "mig-rev-" + UUID.randomUUID().toString().substring(0, 8);
         ObjectNode body = mapper.createObjectNode();
         ArrayNode items = body.putArray("items");
         ObjectNode item = items.addObject();
-        item.put("id", "mig-rev-1").put("type", "reverse").put("status", "completed");
+        item.put("id", historyId).put("type", "reverse").put("status", "completed");
         item.putObject("payload").put("text", "一只猫，赛博朋克");
         item.putArray("imageIds").add("mig-asset-2");
 
