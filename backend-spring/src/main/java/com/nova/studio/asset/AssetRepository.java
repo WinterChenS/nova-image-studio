@@ -58,8 +58,31 @@ public class AssetRepository {
      */
     public AssetPage search(UUID userId, String projectId, String source, String q, String tag,
                             String sort, int page, int size) {
-        LambdaQueryWrapper<AssetEntity> wrapper = new LambdaQueryWrapper<AssetEntity>()
-                .eq(AssetEntity::getUserId, userId.toString());
+        // B-3: 计数与列表 wrapper 分离 —— COUNT 查询不得携带 ORDER BY
+        //（PG 报 column "assets.created_at" must appear in GROUP BY）
+        LambdaQueryWrapper<AssetEntity> countWrapper = new LambdaQueryWrapper<>();
+        applySearchFilters(countWrapper, userId, projectId, source, q, tag);
+        Long total = mapper.selectCount(countWrapper);
+
+        LambdaQueryWrapper<AssetEntity> wrapper = new LambdaQueryWrapper<>();
+        applySearchFilters(wrapper, userId, projectId, source, q, tag);
+        switch (sort == null ? "newest" : sort) {
+            case "oldest" -> wrapper.orderByAsc(AssetEntity::getCreatedAt);
+            case "used" -> wrapper.orderByDesc(AssetEntity::getLastUsedAt)
+                    .orderByDesc(AssetEntity::getCreatedAt);
+            default -> wrapper.orderByDesc(AssetEntity::getCreatedAt);
+        }
+        int offset = Math.max(0, (page - 1) * size);
+        wrapper.last("LIMIT " + size + " OFFSET " + offset);
+        List<AssetRow> items = mapper.selectList(wrapper).stream()
+                .map(AssetRepository::toRow).toList();
+        return new AssetPage(items, total == null ? 0 : total);
+    }
+
+    /** Shared owner/filter conditions for asset search (count + list wrappers). */
+    static void applySearchFilters(LambdaQueryWrapper<AssetEntity> wrapper, UUID userId,
+                                   String projectId, String source, String q, String tag) {
+        wrapper.eq(AssetEntity::getUserId, userId.toString());
         if (projectId != null && !projectId.isBlank()) {
             if ("__unclassified__".equals(projectId)) {
                 wrapper.isNull(AssetEntity::getProjectId);
@@ -81,19 +104,6 @@ public class AssetRepository {
         if (tag != null && !tag.isBlank()) {
             wrapper.apply("tags ?? {0}", tag.trim());
         }
-        switch (sort == null ? "newest" : sort) {
-            case "oldest" -> wrapper.orderByAsc(AssetEntity::getCreatedAt);
-            case "used" -> wrapper.orderByDesc(AssetEntity::getLastUsedAt)
-                    .orderByDesc(AssetEntity::getCreatedAt);
-            default -> wrapper.orderByDesc(AssetEntity::getCreatedAt);
-        }
-
-        Long total = mapper.selectCount(wrapper);
-        int offset = Math.max(0, (page - 1) * size);
-        wrapper.last("LIMIT " + size + " OFFSET " + offset);
-        List<AssetRow> items = mapper.selectList(wrapper).stream()
-                .map(AssetRepository::toRow).toList();
-        return new AssetPage(items, total == null ? 0 : total);
     }
 
     /** Inserts an asset; returns the generated id. */
