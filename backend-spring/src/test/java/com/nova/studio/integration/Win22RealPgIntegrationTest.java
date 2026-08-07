@@ -1,5 +1,10 @@
 package com.nova.studio.integration;
 
+import com.nova.studio.accountpool.AccountRepository;
+import com.nova.studio.accountpool.CatalogModelRepository;
+import com.nova.studio.settings.CryptoService;
+import okhttp3.mockwebserver.MockResponse;
+import okhttp3.mockwebserver.MockWebServer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -32,6 +37,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 覆盖 QA 报告中的三个真实环境缺陷（uuid=varchar 类型错误、COUNT+ORDER BY、
  * multipart 上传 400）以及 A1–A8 主链路。仅在 {@code DB_HOST} 设置时运行
  * （CI 提供 PostgreSQL 服务；本地无 PG 自动跳过）。
+ *
+ * <p>WIN-34 合并适配：WIN-28 账号池化后任务创建走全局目录（ai_models）+
+ * 账号池（ai_accounts），{@code model} 必须为目录 UUID（Q1 移除旧 per-user
+ * apiKey/baseUrl/protocol 入参）。本测试 setUp 播种一条目录图片模型 + active
+ * 账号（mock 上游返回合法 b64，任务正常完成），任务体仅传目录 UUID——
+ * 被测的 WIN-22 项目隔离行为（projectId 落库/列表过滤/未分类/一键归入）不变。
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
@@ -43,6 +54,21 @@ class Win22RealPgIntegrationTest {
 
     @Autowired
     private org.springframework.jdbc.core.JdbcTemplate jdbcTemplate;
+
+    @Autowired
+    private CatalogModelRepository catalogRepository;
+    @Autowired
+    private AccountRepository accountRepository;
+    @Autowired
+    private com.nova.studio.accountpool.AccountService accountService;
+    @Autowired
+    private CryptoService cryptoService;
+    @Autowired
+    private com.nova.studio.audit.UsageRecordService usageRecordService;
+
+    private MockWebServer upstream;
+    private UUID catalogModelId;
+    private UUID accountId;
 
     // WIN-32: SimpleClientHttpRequestFactory 不支持 PATCH（http.client 4 也未被 Spring 7
     // 使用）——JdkClientHttpRequestFactory 基于 JDK java.net.http，GET/POST/PUT/PATCH/DELETE 全支持。
@@ -65,13 +91,49 @@ class Win22RealPgIntegrationTest {
     private String otherUsername;
 
     @BeforeEach
-    void setUp() {
+    void setUp() throws Exception {
         username = "win22_" + UUID.randomUUID().toString().substring(0, 8);
         registerAndLogin();
+        // WIN-34: 播种目录模型 + 账号（WIN-28 账号池化后任务创建的前置）。
+        // mock 上游返回合法 b64，任务正常完成（不依赖失败路径）。
+        upstream = new MockWebServer();
+        upstream.start();
+        String b64 = java.util.Base64.getEncoder().encodeToString(new byte[]{1, 2, 3, 4});
+        for (int i = 0; i < 4; i++) {
+            upstream.enqueue(new MockResponse()
+                    .setHeader("Content-Type", "application/json")
+                    .setBody("{\"data\":[{\"b64_json\":\"" + b64 + "\"}]}"));
+        }
+        // 自愈：清理上次失败运行遗留的测试种子（W22E2E-*）
+        jdbcTemplate.update("DELETE FROM usage_records WHERE account_id IN (SELECT id FROM ai_accounts WHERE name LIKE 'W22E2E-%')");
+        jdbcTemplate.update("DELETE FROM ai_model_pricing WHERE model_id IN (SELECT id FROM ai_models WHERE name LIKE 'W22E2E%')");
+        jdbcTemplate.update("DELETE FROM ai_accounts WHERE name LIKE 'W22E2E-%'");
+        jdbcTemplate.update("DELETE FROM ai_models WHERE name LIKE 'W22E2E%'");
+        // 显式 127.0.0.1（MockWebServer.url() 可能返回机器 hostname，跨环境不可靠）
+        String mockBase = "http://127.0.0.1:" + upstream.getPort();
+        catalogModelId = catalogRepository.insert("image", "openai", "W22E2E 图片模型", "gpt-image-1",
+                mockBase, "{}", null, true, null);
+        accountId = accountRepository.insert("W22E2E-账号", "openai", mockBase,
+                cryptoService.encrypt("sk-e2e"), "[]", 100, null, null);
+        accountService.invalidateCaches();
     }
 
     @AfterEach
-    void tearDown() {
+    void tearDown() throws Exception {
+        usageRecordService.flush();   // 异步 usage 写入先落库，再清理种子行（避免 FK 竞态）
+        jdbcTemplate.update("DELETE FROM usage_records WHERE account_id IN (SELECT id FROM ai_accounts WHERE name LIKE 'W22E2E-%')");
+        jdbcTemplate.update("DELETE FROM ai_model_pricing WHERE model_id IN (SELECT id FROM ai_models WHERE name LIKE 'W22E2E%')");
+        jdbcTemplate.update("DELETE FROM ai_accounts WHERE name LIKE 'W22E2E-%'");
+        jdbcTemplate.update("DELETE FROM ai_models WHERE name LIKE 'W22E2E%'");
+        if (catalogModelId != null) {
+            catalogRepository.deleteById(catalogModelId);
+        }
+        if (accountId != null) {
+            accountRepository.updateStatus(accountId, "deleted");
+        }
+        if (upstream != null) {
+            upstream.shutdown();
+        }
         // 清理测试用户（级联删除其项目/素材/任务）——含跨用户用例的第二个用户（E-3）
         if (otherUsername != null && !otherUsername.equals(username)) {
             jdbcTemplate.update("DELETE FROM users WHERE username = ?", otherUsername);
@@ -156,24 +218,22 @@ class Win22RealPgIntegrationTest {
     // ===== A2/B-1：任务携带 projectId + 列表过滤 =====
 
     @Test
-    void taskListFiltersByProjectAndUnclassified() {
+    void taskListFiltersByProjectAndUnclassified() throws Exception {
         String projectId = defaultProjectId();
         Map<String, Object> body = new LinkedHashMap<>();
-        body.put("apiKey", "sk-e2e");
-        body.put("baseUrl", "http://localhost:9"); // 不可达上游，任务将失败但已落库
-        body.put("protocol", "openai");
         body.put("mode", "text-to-image");
         body.put("prompt", "a cat in a hat");
         body.put("outputSize", "1K");
         body.put("aspectRatio", "1:1");
         body.put("temperature", 1.0);
-        body.put("model", "gpt-image-1");
+        body.put("model", catalogModelId.toString());   // WIN-28: 目录 UUID（账号池化）
         body.put("parallelCount", 1);
         body.put("images", java.util.List.of());
         body.put("projectId", projectId);
 
         JsonNode created = postJson("/api/nova/tasks", body);
         String taskId = created.get("taskId").asText();
+        awaitTerminal(taskId);   // WIN-34: 等任务终态，避免 worker 在 tearDown 后写 usage 触发 FK 竞态
 
         // GET /api/nova/tasks?projectId= → 列表（B-1：user_id 为 UUID 列，String 绑定曾 400）
         JsonNode list = get("/api/nova/tasks?projectId=" + projectId);
@@ -193,23 +253,21 @@ class Win22RealPgIntegrationTest {
     // ===== A3：任务一键归入 =====
 
     @Test
-    void taskAssignProjectMovesFromUnclassified() {
+    void taskAssignProjectMovesFromUnclassified() throws Exception {
         Map<String, Object> body = new LinkedHashMap<>();
-        body.put("apiKey", "sk-e2e");
-        body.put("baseUrl", "http://localhost:9");
-        body.put("protocol", "openai");
         body.put("mode", "text-to-image");
         body.put("prompt", "legacy task");
         body.put("outputSize", "1K");
         body.put("aspectRatio", "1:1");
         body.put("temperature", 1.0);
-        body.put("model", "gpt-image-1");
+        body.put("model", catalogModelId.toString());   // WIN-28: 目录 UUID（账号池化）
         body.put("parallelCount", 1);
         body.put("images", java.util.List.of());
         // 不带 projectId → 兜底默认项目（ADR-17），先验证含 projectId
 
         JsonNode created = postJson("/api/nova/tasks", body);
         String taskId = created.get("taskId").asText();
+        awaitTerminal(taskId);   // WIN-34: 等任务终态，避免 worker 在 tearDown 后写 usage 触发 FK 竞态
         JsonNode single = get("/api/nova/tasks/" + taskId);
         assertThat(single.get("projectId").asText()).isEqualTo(defaultProjectId());
 
@@ -354,5 +412,40 @@ class Win22RealPgIntegrationTest {
         HttpHeaders headers = new HttpHeaders();
         headers.setBearerAuth(token);
         return headers;
+    }
+
+    /** WIN-34: 轮询任务至终态（completed/failed），并等异步 usage 行落库
+     *  （ref_type='task'），确保 tearDown 删用户/种子前 usage 写入已完成，
+     *  避免 FK 竞态。 */
+    private void awaitTerminal(String taskId) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + 20_000;
+        while (System.currentTimeMillis() < deadline) {
+            HttpHeaders headers = authHeaders();
+            ResponseEntity<String> resp = rest.exchange(url("/api/nova/tasks/" + taskId),
+                    HttpMethod.GET, new HttpEntity<>(headers), String.class);
+            assertThat(resp.getStatusCode().is2xxSuccessful()).as("GET task 应成功").isTrue();
+            String status = read(resp).get("status").asText();
+            if ("completed".equals(status) || "failed".equals(status)) {
+                awaitUsageFlushed(taskId);
+                return;
+            }
+            Thread.sleep(100);
+        }
+        throw new AssertionError("task did not finish within 20s: " + taskId);
+    }
+
+    /** WIN-34: 等 usage_records 中该任务的异步写入落库（worker 在任务终态后才入队）。 */
+    private void awaitUsageFlushed(String taskId) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + 5_000;
+        while (System.currentTimeMillis() < deadline) {
+            Integer n = jdbcTemplate.queryForObject(
+                    "SELECT COUNT(*) FROM usage_records WHERE ref_type = 'task' AND ref_id = ?",
+                    Integer.class, taskId);
+            if (n != null && n > 0) {
+                return;
+            }
+            Thread.sleep(50);
+        }
+        throw new AssertionError("usage not flushed for task " + taskId);
     }
 }
