@@ -217,6 +217,17 @@ public class AssetRepository {
                 .stream().map(AssetRepository::toRow).toList();
     }
 
+    /** WIN-39: 按 source_kind + source_ref 查询（会话图片目录 source_ref=conversation_id）。 */
+    public List<AssetRow> findBySourceRef(UUID userId, String sourceKind, String sourceRef) {
+        return mapper.selectList(new LambdaQueryWrapper<AssetEntity>()
+                        .eq(AssetEntity::getUserId, userId.toString())
+                        .eq(AssetEntity::getSourceKind, sourceKind)
+                        .eq(AssetEntity::getSourceRef, sourceRef)
+                        .isNull(AssetEntity::getDeletedAt)
+                        .orderByAsc(AssetEntity::getCreatedAt))
+                .stream().map(AssetRepository::toRow).toList();
+    }
+
     /** Same-hash duplicate within (user, project) — R-5 dedup hint. */
     public Optional<AssetRow> findDuplicate(UUID userId, String projectId, String hash) {
         if (hash == null || hash.isBlank()) {

@@ -301,6 +301,11 @@ public class AssetService {
         repository.adjustRefCounts(userId, assetIds, delta);
     }
 
+    /** WIN-39: 会话图片目录 = assets WHERE source_kind='conversation' AND source_ref=<conversation_id>（ADR-36）。 */
+    public List<AssetRepository.AssetRow> listConversationImages(UUID userId, String conversationId) {
+        return repository.findBySourceRef(userId, "conversation", conversationId);
+    }
+
     /**
      * 批量删除（WIN-39 语义：一律软删进回收站，ADR-42；对象保留至清理任务硬删）。
      */
