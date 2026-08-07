@@ -8,12 +8,14 @@
 import { createContext, useCallback, useContext, useState } from 'react';
 import { CurrentProjectProvider } from '@/hooks/useCurrentProject';
 
-export type AppView = 'workbench' | 'console';
+export type AppView = 'workbench' | 'console' | 'usage';
 
 interface AppShellContextValue {
   view: AppView;
   enterConsole: () => void;
   exitConsole: () => void;
+  enterUsage: () => void;
+  exitUsage: () => void;
 }
 
 const AppShellContext = createContext<AppShellContextValue | null>(null);
@@ -29,9 +31,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   const enterConsole = useCallback(() => setView('console'), []);
   const exitConsole = useCallback(() => setView('workbench'), []);
+  // WIN-29 (T24): 「我的用量」全页视图（SPA 状态切换，静态导出友好）
+  const enterUsage = useCallback(() => setView('usage'), []);
+  const exitUsage = useCallback(() => setView('workbench'), []);
 
   return (
-    <AppShellContext.Provider value={{ view, enterConsole, exitConsole }}>
+    <AppShellContext.Provider value={{ view, enterConsole, exitConsole, enterUsage, exitUsage }}>
       <CurrentProjectProvider>{children}</CurrentProjectProvider>
     </AppShellContext.Provider>
   );

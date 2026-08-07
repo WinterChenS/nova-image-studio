@@ -2,6 +2,7 @@ package com.nova.studio.accountpool;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import com.nova.studio.audit.AuditLogService;
 import com.nova.studio.infra.HttpErrorException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -34,14 +35,17 @@ public class PricingService {
 
     private final PricingRepository repository;
     private final CatalogModelRepository catalogRepository;
+    private final AuditLogService auditLogService;
     private final ObjectMapper objectMapper;
     private final Cache<PricingKey, Optional<PricingRepository.Row>> cache;
 
     public PricingService(PricingRepository repository,
                           CatalogModelRepository catalogRepository,
+                          AuditLogService auditLogService,
                           ObjectMapper objectMapper) {
         this.repository = repository;
         this.catalogRepository = catalogRepository;
+        this.auditLogService = auditLogService;
         this.objectMapper = objectMapper;
         this.cache = Caffeine.newBuilder()
                 .expireAfterWrite(Duration.ofSeconds(1)).maximumSize(10_000).build();
@@ -88,6 +92,8 @@ public class PricingService {
         }
         repository.upsert(modelId, currency, perRequest, perToken, adminId);
         cache.invalidate(new PricingKey(modelId, currency));
+        auditLogService.log(adminId, "pricing.upsert", "ai_model_pricing", modelId.toString(),
+                Map.of("currency", currency, "perRequestPrice", perRequest, "pricePerToken", perToken));
         return Map.of("modelId", modelId.toString(), "currency", currency,
                 "perRequestPrice", perRequest, "pricePerToken", perToken);
     }
@@ -98,6 +104,8 @@ public class PricingService {
             throw new HttpErrorException(404, "NOT_FOUND", "价格配置不存在");
         }
         cache.invalidate(new PricingKey(modelId, cur));
+        auditLogService.log(adminId, "pricing.delete", "ai_model_pricing", modelId.toString(),
+                Map.of("currency", cur));
     }
 
     // ===== cost snapshot (B3 / A8) =====

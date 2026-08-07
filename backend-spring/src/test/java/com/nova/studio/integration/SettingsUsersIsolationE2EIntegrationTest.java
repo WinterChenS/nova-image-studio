@@ -87,7 +87,7 @@ class SettingsUsersIsolationE2EIntegrationTest {
         catalogModelId = catalogRepository.insert("image", "openai", "E2E 图片模型", "gpt-image-1",
                 upstream.url("/").toString(), "{}", null, true, null);
         accountId = accountRepository.insert("E2E-账号", "openai", upstream.url("/").toString(),
-                cryptoService.encrypt("sk-e2e-isolation"), "[]", 100, null, null);
+                cryptoService.encrypt("sk-e2e-isolation"), "[]", 100, null, null, null);
         accountService.invalidateCaches();
     }
 

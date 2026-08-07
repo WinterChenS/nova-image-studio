@@ -1,5 +1,6 @@
 package com.nova.studio.accountpool;
 
+import com.nova.studio.audit.AuditLogService;
 import com.nova.studio.infra.HttpErrorException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -29,6 +30,7 @@ class PricingServiceTest {
 
     private PricingRepository repository;
     private CatalogModelRepository catalogRepository;
+    private AuditLogService auditLogService;
     private PricingService service;
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -39,7 +41,8 @@ class PricingServiceTest {
     void setUp() {
         repository = mock(PricingRepository.class);
         catalogRepository = mock(CatalogModelRepository.class);
-        service = new PricingService(repository, catalogRepository, MAPPER);
+        auditLogService = mock(AuditLogService.class);
+        service = new PricingService(repository, catalogRepository, auditLogService, MAPPER);
     }
 
     private ObjectNode body(String perRequest, String perToken) {
@@ -66,6 +69,21 @@ class PricingServiceTest {
         verify(repository).upsert(any(), org.mockito.ArgumentMatchers.eq("CNY"),
                 org.mockito.ArgumentMatchers.eq(new BigDecimal("0.1")),
                 org.mockito.ArgumentMatchers.eq(new BigDecimal("0.002")), any());
+    }
+
+    /** T29 (A16): 价格变更落审计日志（detail 不含 Key）。 */
+    @Test
+    void upsertRecordsAuditLog() {
+        when(catalogRepository.findById(MODEL_ID)).thenReturn(Optional.of(modelRow()));
+        when(repository.upsert(any(), anyString(), any(), any(), any())).thenReturn(1);
+
+        service.upsert(ADMIN, body("0.1", "0.002"));
+
+        org.mockito.ArgumentCaptor<java.util.Map<String, Object>> detail =
+                org.mockito.ArgumentCaptor.forClass(java.util.Map.class);
+        verify(auditLogService).log(org.mockito.ArgumentMatchers.eq(ADMIN), org.mockito.ArgumentMatchers.eq("pricing.upsert"),
+                org.mockito.ArgumentMatchers.eq("ai_model_pricing"), org.mockito.ArgumentMatchers.eq(MODEL_ID.toString()), detail.capture());
+        assertThat(detail.getValue()).containsEntry("currency", "CNY");
     }
 
     @Test

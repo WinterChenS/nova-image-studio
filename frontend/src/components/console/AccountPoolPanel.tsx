@@ -114,7 +114,7 @@ export function AccountPoolPanel() {
 
   const openCreate = () => {
     setEditing(null);
-    setForm({ name: '', protocol: 'openai', baseUrl: '', apiKey: '', priority: '100', remark: '' });
+    setForm({ name: '', protocol: 'openai', baseUrl: '', apiKey: '', priority: '100', monthlyCapCost: '', remark: '' });
     setFormOpen(true);
   };
 
@@ -126,6 +126,7 @@ export function AccountPoolPanel() {
       baseUrl: account.baseUrl,
       apiKey: '', // 掩码 Key 空 = 沿用已存密文
       priority: String(account.priority ?? 100),
+      monthlyCapCost: account.monthlyCapCost != null ? String(account.monthlyCapCost) : '',
       remark: account.remark || '',
       modelScope: (account.modelScope || []).join(','),
     });
@@ -141,6 +142,7 @@ export function AccountPoolPanel() {
         protocol: form.protocol,
         baseUrl: form.baseUrl,
         priority: Number(form.priority || 100),
+        monthlyCapCost: form.monthlyCapCost ? Number(form.monthlyCapCost) : null, // T26: 空 = 清除上限
         remark: form.remark || '',
       };
       if (form.apiKey) dto.apiKey = form.apiKey;
@@ -405,6 +407,9 @@ export function AccountPoolPanel() {
                     <span className="truncate">Key：{account.apiKey || '（未配置）'}</span>
                     <span className="truncate">模型作用域：{account.modelScope?.length ? account.modelScope.length + ' 个' : '全部'}</span>
                     <span>优先级：{account.priority ?? 100}</span>
+                    <span>
+                      月上限：{account.monthlyCapCost != null ? `${account.monthlyCapCost} CNY` : '未设置'}
+                    </span>
                     <span className="flex items-center gap-1">
                       健康：
                       {failures > 0 ? <span className="text-amber-600">失败 {failures} 次</span> : <span className="text-emerald-600">良好</span>}
@@ -521,6 +526,12 @@ export function AccountPoolPanel() {
             <div className="space-y-1.5">
               <label className="text-xs text-muted-foreground">优先级</label>
               <Input type="number" value={form.priority || '100'} onChange={(e) => setForm((f) => ({ ...f, priority: e.target.value }))} />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs text-muted-foreground">
+                月度费用上限（CNY；留空 = 不限制，达限自动暂停）
+              </label>
+              <Input type="number" min="0" step="0.0001" value={form.monthlyCapCost || ''} onChange={(e) => setForm((f) => ({ ...f, monthlyCapCost: e.target.value }))} placeholder="不限制" />
             </div>
             <div className="space-y-1.5 sm:col-span-2">
               <label className="text-xs text-muted-foreground">模型作用域（逗号分隔的目录模型 UUID；留空 = 全部）</label>

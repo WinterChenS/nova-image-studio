@@ -2,6 +2,7 @@ package com.nova.studio.accountpool;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import com.nova.studio.audit.AuditLogService;
 import com.nova.studio.imagegen.ImageGenService;
 import com.nova.studio.infra.HttpErrorException;
 import com.nova.studio.infra.NormalizedError;
@@ -48,6 +49,7 @@ public class AccountService {
     private final CatalogModelRepository catalogRepository;
     private final CryptoService crypto;
     private final ObjectMapper objectMapper;
+    private final AuditLogService auditLogService;
     private final WebClient.Builder webClientBuilder;
     private final Cache<String, List<AccountRepository.Row>> byStatusCache;
 
@@ -55,11 +57,13 @@ public class AccountService {
                           CatalogModelRepository catalogRepository,
                           CryptoService crypto,
                           ObjectMapper objectMapper,
+                          AuditLogService auditLogService,
                           WebClient.Builder webClientBuilder) {
         this.repository = repository;
         this.catalogRepository = catalogRepository;
         this.crypto = crypto;
         this.objectMapper = objectMapper;
+        this.auditLogService = auditLogService;
         this.webClientBuilder = webClientBuilder;
         this.byStatusCache = Caffeine.newBuilder()
                 .expireAfterWrite(Duration.ofSeconds(1)).maximumSize(10).build();
@@ -78,8 +82,11 @@ public class AccountService {
     public Map<String, Object> create(UUID adminId, JsonNode body) {
         Validated valid = validate(body);
         UUID id = repository.insert(valid.name(), valid.protocol(), valid.baseUrl(),
-                crypto.encrypt(valid.apiKey()), valid.modelScopeJson(), valid.priority(), valid.remark(), adminId);
+                crypto.encrypt(valid.apiKey()), valid.modelScopeJson(), valid.priority(),
+                valid.monthlyCapCost(), valid.remark(), adminId);
         invalidate();
+        auditLogService.log(adminId, "account.create", "ai_accounts", id.toString(),
+                Map.of("name", valid.name(), "protocol", valid.protocol(), "status", STATUS_ACTIVE));
         return repository.findById(id).map(this::toDto)
                 .orElseThrow(() -> new IllegalStateException("账号创建后读取失败"));
     }
@@ -89,41 +96,49 @@ public class AccountService {
         Validated valid = validate(body);
         String keyEnc = resolveKeyEnc(existing, body);
         repository.update(id, valid.name(), valid.protocol(), valid.baseUrl(), keyEnc,
-                valid.modelScopeJson(), valid.priority(), existing.monthlyCapCost(), valid.remark());
+                valid.modelScopeJson(), valid.priority(), valid.monthlyCapCost(), valid.remark());
         invalidate();
+        auditLogService.log(adminId, "account.update", "ai_accounts", id.toString(),
+                Map.of("name", valid.name(), "protocol", valid.protocol(), "status", existing.status()));
         return repository.findById(id).map(this::toDto)
                 .orElseThrow(() -> new IllegalStateException("账号更新后读取失败"));
     }
 
     /** Soft delete (ADR-28) — keeps usage_records FK integrity; never schedulable. */
     public void delete(UUID adminId, UUID id) {
-        require(id);
+        AccountRepository.Row row = require(id);
         repository.updateStatus(id, STATUS_DELETED);
         invalidate();
+        auditLogService.log(adminId, "account.delete", "ai_accounts", id.toString(),
+                Map.of("name", row.name(), "status", STATUS_DELETED));
     }
 
-    public Map<String, Object> pause(UUID id) {
+    public Map<String, Object> pause(UUID adminId, UUID id) {
         AccountRepository.Row row = require(id);
         if (!STATUS_ACTIVE.equals(row.status())) {
             throw new HttpErrorException(400, "INVALID_STATE", "仅 active 账号可停用");
         }
         repository.updateStatus(id, STATUS_PAUSED);
         invalidate();
+        auditLogService.log(adminId, "account.pause", "ai_accounts", id.toString(),
+                Map.of("name", row.name(), "status", STATUS_PAUSED));
         return toDto(require(id));
     }
 
-    public Map<String, Object> resume(UUID id) {
+    public Map<String, Object> resume(UUID adminId, UUID id) {
         AccountRepository.Row row = require(id);
         if (!STATUS_PAUSED.equals(row.status())) {
             throw new HttpErrorException(400, "INVALID_STATE", "仅 paused 账号可启用");
         }
         repository.updateStatus(id, STATUS_ACTIVE);
         invalidate();
+        auditLogService.log(adminId, "account.resume", "ai_accounts", id.toString(),
+                Map.of("name", row.name(), "status", STATUS_ACTIVE));
         return toDto(require(id));
     }
 
     /** Admin recovery from broken (A4/A22) — active + health reset (no auto-recovery). */
-    public Map<String, Object> recover(UUID id) {
+    public Map<String, Object> recover(UUID adminId, UUID id) {
         AccountRepository.Row row = require(id);
         if (!STATUS_BROKEN.equals(row.status())) {
             throw new HttpErrorException(400, "INVALID_STATE", "仅 broken 账号可恢复");
@@ -131,6 +146,8 @@ public class AccountService {
         repository.updateStatus(id, STATUS_ACTIVE);
         repository.updateHealth(id, AccountHealth.EMPTY.toJson(objectMapper));
         invalidate();
+        auditLogService.log(adminId, "account.recover", "ai_accounts", id.toString(),
+                Map.of("name", row.name(), "status", STATUS_ACTIVE));
         return toDto(require(id));
     }
 
@@ -143,9 +160,22 @@ public class AccountService {
      */
     public Map<String, Object> testConnection(UUID id) {
         AccountRepository.Row row = require(id);
+        ProbeResult result = probeUpstream(row);
+        if (result.ok()) {
+            repository.updateHealth(id, AccountHealth.EMPTY.toJson(objectMapper));
+            invalidate();
+        }
+        return Map.of("ok", result.ok(), "message", result.message());
+    }
+
+    /**
+     * T27 (WIN-29) — 轻量探活（/models 或最小请求），供测试连通与主动健康探测共用：
+     * 成功返回 ok；失败返回归一化错误消息（不落 Key）。调用方决定是否记录健康状态。
+     */
+    public ProbeResult probeUpstream(AccountRepository.Row row) {
         String apiKey = crypto.decrypt(row.apiKeyEnc());
         if (apiKey == null || apiKey.isBlank()) {
-            throw new HttpErrorException(400, "NO_API_KEY", "账号未配置 API Key");
+            return new ProbeResult(false, "账号未配置 API Key");
         }
         try {
             String normalizedBaseUrl = ImageGenService.normalizeProtocolBaseUrl(row.protocol(), row.baseUrl());
@@ -172,14 +202,16 @@ public class AccountService {
                             .map(text -> new StatusBody(resp.statusCode().value(), text)))
                     .block(TEST_TIMEOUT);
             if (result == null || result.status() >= 300) {
-                return Map.of("ok", false, "message", "上游返回 " + (result == null ? "无响应" : result.status()));
+                return new ProbeResult(false, "上游返回 " + (result == null ? "无响应" : result.status()));
             }
-            repository.updateHealth(id, AccountHealth.EMPTY.toJson(objectMapper));   // 成功清失败计数
-            invalidate();
-            return Map.of("ok", true, "message", "连接成功");
+            return new ProbeResult(true, "连接成功");
         } catch (Exception e) {
-            return Map.of("ok", false, "message", NormalizedError.normalize(e, TEST_TIMEOUT.toMillis()));
+            return new ProbeResult(false, NormalizedError.normalize(e, TEST_TIMEOUT.toMillis()));
         }
+    }
+
+    /** Probe outcome (T27 shared with {@link AccountProbeService}). */
+    public record ProbeResult(boolean ok, String message) {
     }
 
     // ===== scheduler / catalog integration =====
@@ -267,7 +299,7 @@ public class AccountService {
     }
 
     private record Validated(String name, String protocol, String baseUrl, String apiKey,
-                             String modelScopeJson, Integer priority, String remark) {
+                             String modelScopeJson, Integer priority, BigDecimal monthlyCapCost, String remark) {
     }
 
     private Validated validate(JsonNode body) {
@@ -313,9 +345,10 @@ public class AccountService {
             scopeJson = array.toString();
         }
         Integer priority = body.hasNonNull("priority") ? body.get("priority").asInt(100) : 100;
+        BigDecimal monthlyCapCost = decimal(body, "monthlyCapCost");
         String remark = text(body, "remark");
         return new Validated(name.trim(), protocol, baseUrl.trim(), apiKey.trim(),
-                scopeJson, priority, remark);
+                scopeJson, priority, monthlyCapCost, remark);
     }
 
     private String resolveKeyEnc(AccountRepository.Row existing, JsonNode body) {
@@ -363,6 +396,7 @@ public class AccountService {
         dto.put("modelScope", scopeStrings);
         dto.put("status", row.status());
         dto.put("priority", row.priority());
+        dto.put("monthlyCapCost", row.monthlyCapCost());
         dto.put("health", parseHealth(row.healthJson()));
         dto.put("remark", row.remark());
         dto.put("createdAt", row.createdAt() == null ? null : row.createdAt().toString());
@@ -390,6 +424,21 @@ public class AccountService {
 
     private void invalidate() {
         byStatusCache.invalidateAll();
+    }
+
+    private static BigDecimal decimal(JsonNode body, String key) {
+        JsonNode value = body == null ? null : body.get(key);
+        if (value == null || value.isNull()) {
+            return null;
+        }
+        if (!value.isNumber() && !value.isTextual()) {
+            throw new IllegalArgumentException(key + " 必须为数字");
+        }
+        try {
+            return new BigDecimal(value.asText());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(key + " 必须为数字");
+        }
     }
 
     private static String text(JsonNode node, String key) {

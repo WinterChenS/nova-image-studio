@@ -119,9 +119,9 @@ class TaskApiE2EIntegrationTest {
         textCatalogId = catalogRepository.insert("text", "openai-chat-completions", "E2E 文本模型", "gpt-4o",
                 upstream.url("/").toString(), "{}", null, true, null);
         imageAccountId = accountRepository.insert("E2E-账号", "openai", upstream.url("/").toString(),
-                cryptoService.encrypt("sk-e2e-image-key"), "[]", 100, null, null);
+                cryptoService.encrypt("sk-e2e-image-key"), "[]", 100, null, null, null);
         textAccountId = accountRepository.insert("E2E-文本账号", "openai-chat-completions", upstream.url("/").toString(),
-                cryptoService.encrypt("sk-e2e-text-key"), "[]", 100, null, null);
+                cryptoService.encrypt("sk-e2e-text-key"), "[]", 100, null, null, null);
         accountService.invalidateCaches();
     }
 

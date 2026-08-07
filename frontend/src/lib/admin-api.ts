@@ -17,6 +17,8 @@ export interface AdminAccount {
   modelScope: string[];
   status: 'active' | 'paused' | 'broken' | 'deleted';
   priority?: number;
+  /** WIN-29 (T26): 月度费用上限（CNY）；达限自动 paused，管理员可解除。 */
+  monthlyCapCost?: number | null;
   health: {
     consecutiveFailures?: number;
     cooldownUntil?: string | null;
@@ -232,4 +234,111 @@ export async function exportUsageCsv(filters: UsageFilters = {}): Promise<Blob> 
   const response = await authFetch(`/api/nova/admin/usage/export${qs ? `?${qs}` : ''}`);
   if (!response.ok) throw await readApiError(response);
   return await response.blob();
+}
+
+// ===== 我的用量（T24, A11：仅本人） =====
+
+export interface MyUsageItem {
+  id: number;
+  modelId?: string | null;
+  modelName?: string;
+  accountId?: string | null;
+  accountName?: string;
+  protocol?: string;
+  reqType?: string;
+  refType?: string;
+  status?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  images?: number;
+  cost?: number;
+  currency?: string;
+  durationMs?: number;
+  createdAt?: string;
+}
+
+export interface MyUsageDaily {
+  aggDate?: string;
+  reqType?: string;
+  requestCount?: number;
+  successCount?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  cost?: number;
+  currency?: string;
+}
+
+export interface MyUsageResult {
+  items: MyUsageItem[];
+  total: number;
+  page: number;
+  size: number;
+  summary: UsageSummary;
+  daily: MyUsageDaily[];
+}
+
+/**
+ * 用户本人用量（A11）：接口无 userId 参数，后端恒绑定当前登录用户——
+ * 前端也不得携带任何目标用户标识。
+ */
+export async function fetchMyUsage(filters: { from?: string; to?: string; page?: number; size?: number } = {}): Promise<MyUsageResult> {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(filters)) {
+    if (value !== undefined && value !== null && value !== '') params.set(key, String(value));
+  }
+  const qs = params.toString();
+  const response = await authFetch(`/api/nova/usage/me${qs ? `?${qs}` : ''}`, { cache: 'no-store' });
+  if (!response.ok) throw await readApiError(response);
+  return (await response.json()) as MyUsageResult;
+}
+
+// ===== 角色与权限（T28, rbac.manage） =====
+
+export interface RbacRole {
+  id: string;
+  code: string;
+  name: string;
+  builtin: boolean;
+}
+
+export interface RbacPermission {
+  id: string;
+  code: string;
+  type: 'menu' | 'button';
+  parentCode: string | null;
+  label: string;
+  apiPath: string | null;
+  sortOrder: number;
+}
+
+export async function fetchRoles(): Promise<RbacRole[]> {
+  const response = await authFetch('/api/nova/admin/roles', { cache: 'no-store' });
+  if (!response.ok) throw await readApiError(response);
+  return (await response.json()) as RbacRole[];
+}
+
+export async function fetchPermissions(): Promise<RbacPermission[]> {
+  const response = await authFetch('/api/nova/admin/roles/permissions', { cache: 'no-store' });
+  if (!response.ok) throw await readApiError(response);
+  return (await response.json()) as RbacPermission[];
+}
+
+export async function fetchRolePermissions(roleId: string): Promise<{ roleId: string; roleCode: string; permissionIds: string[] }> {
+  const response = await authFetch(`/api/nova/admin/roles/${encodeURIComponent(roleId)}/permissions`, { cache: 'no-store' });
+  if (!response.ok) throw await readApiError(response);
+  return (await response.json()) as { roleId: string; roleCode: string; permissionIds: string[] };
+}
+
+/** 保存角色×权限矩阵（后端写 audit_log + 权限缓存失效，A16/A14）。 */
+export async function saveRolePermissions(
+  roleId: string,
+  permissionIds: string[],
+): Promise<{ ok: boolean; roleId: string; before: string[]; after: string[] }> {
+  const response = await authFetch(`/api/nova/admin/roles/${encodeURIComponent(roleId)}/permissions`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ permissionIds }),
+  });
+  if (!response.ok) throw await readApiError(response);
+  return (await response.json()) as { ok: boolean; roleId: string; before: string[]; after: string[] };
 }

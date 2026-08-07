@@ -114,7 +114,7 @@ class Win22RealPgIntegrationTest {
         catalogModelId = catalogRepository.insert("image", "openai", "W22E2E 图片模型", "gpt-image-1",
                 mockBase, "{}", null, true, null);
         accountId = accountRepository.insert("W22E2E-账号", "openai", mockBase,
-                cryptoService.encrypt("sk-e2e"), "[]", 100, null, null);
+                cryptoService.encrypt("sk-e2e"), "[]", 100, null, null, null);
         accountService.invalidateCaches();
     }
 

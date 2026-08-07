@@ -83,7 +83,7 @@ class AdminAccountControllerTest {
 
     @Test
     void adminRecoverPassthrough() {
-        when(service.recover(any())).thenReturn(Map.of("status", "active"));
+        when(service.recover(any(), any())).thenReturn(Map.of("status", "active"));
         assertThat(controller.recover(UUID.randomUUID(), admin).get("status")).isEqualTo("active");
     }
 
