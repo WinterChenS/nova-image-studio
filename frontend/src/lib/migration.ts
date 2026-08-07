@@ -43,11 +43,12 @@ export function markFeatureMigrated(feature: MigrationFeature): void {
 
 function openDB(name: string, version?: number): Promise<IDBDatabase | null> {
   if (typeof indexedDB === 'undefined') return Promise.resolve(null);
-  return new Promise(resolve => {
-    // S1 修复：不传版本时以当前版本打开（localforage 1.10.0 将 nova-image 建为 version 2，
+  return new Promise((resolve, reject) => {
+    // S1 修复：不传版本时以当前版本打开（localforage 1.10.0 将 nova-image 建为 v2，
     // 硬编码 version 1 会抛 VersionError → 误判无存量）
+    // G1-2：打开失败抛错（与「无存量」区分），由调用方决定是否可写迁移标记
     const req = version == null ? indexedDB.open(name) : indexedDB.open(name, version);
-    req.onerror = () => resolve(null);
+    req.onerror = () => reject(new Error(`本地数据库打开失败: ${name}`));
     req.onsuccess = () => resolve(req.result);
   });
 }
@@ -88,17 +89,25 @@ function getAllKeyValues<T>(db: IDBDatabase, storeName: string): Promise<Array<{
 /** 判断本地是否有 Agent/画布存量（迁移入口检测，FR-7.1）。 */
 export async function hasLocalAgentData(): Promise<boolean> {
   if (isFeatureMigrated('agent')) return false;
-  const db = await openDB('nova-agent-db', 1);
-  if (!db) return false;
-  const messages = await getAllFromStore<AgentMessage>(db, 'messages');
-  db.close();
-  return messages.length > 0;
+  try {
+    const db = await openDB('nova-agent-db', 1);
+    if (!db) return false;
+    const messages = await getAllFromStore<AgentMessage>(db, 'messages');
+    db.close();
+    return messages.length > 0;
+  } catch {
+    return false;   // 读取失败视为无存量（仅影响提示条，不写迁移标记）
+  }
 }
 
 export async function hasLocalCanvasData(): Promise<boolean> {
   if (isFeatureMigrated('canvas')) return false;
-  const data = await readLocalCanvasData();
-  return !!data && data.projects.length > 0;
+  try {
+    const data = await readLocalCanvasData();
+    return !!data && data.projects.length > 0;
+  } catch {
+    return false;   // 读取失败视为无存量（仅影响提示条，不写迁移标记）
+  }
 }
 
 // ===== 图片上传（分批 + 进度）=====
@@ -163,7 +172,13 @@ export async function readLocalAgentData(): Promise<AgentMigrationInput | null> 
 export async function runAgentMigration(onProgress?: (percent: number, message: string) => void): Promise<number> {
   if (!isLoggedIn()) throw new Error('请先登录');
   onProgress?.(5, '正在读取本地 Agent 会话...');
-  const data = await readLocalAgentData();
+  let data: AgentMigrationInput | null;
+  try {
+    data = await readLocalAgentData();
+  } catch (e) {
+    // G1-2：读取异常 ≠ 无存量 —— 不写迁移标记（避免阶段3 清理误删未迁移数据）
+    throw new Error(`读取本地会话失败（数据已保留，可重试）: ${e instanceof Error ? e.message : e}`);
+  }
   if (!data) {
     markFeatureMigrated('agent');
     return 0;
@@ -294,7 +309,13 @@ export async function readLocalCanvasImages(): Promise<Map<string, Blob>> {
 export async function runCanvasMigration(onProgress?: (percent: number, message: string) => void): Promise<number> {
   if (!isLoggedIn()) throw new Error('请先登录');
   onProgress?.(5, '正在读取本地画布...');
-  const data = await readLocalCanvasData();
+  let data: { projects: Array<Record<string, unknown>> } | null;
+  try {
+    data = await readLocalCanvasData();
+  } catch (e) {
+    // G1-2：读取异常 ≠ 无存量 —— 不写迁移标记（避免阶段3 清理误删未迁移数据）
+    throw new Error(`读取本地画布失败（数据已保留，可重试）: ${e instanceof Error ? e.message : e}`);
+  }
   if (!data) {
     markFeatureMigrated('canvas');
     return 0;

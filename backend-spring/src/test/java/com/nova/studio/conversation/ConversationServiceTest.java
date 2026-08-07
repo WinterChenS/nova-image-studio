@@ -135,6 +135,62 @@ class ConversationServiceTest {
     }
 
     @Test
+    void appendMessageIncrementsRefCountsForImageIds() {
+        // G1-1：消息携带 imageIds → ref_count +1（引用保护，A7）
+        when(repository.findByIdAndOwner("c1", USER_ID)).thenReturn(Optional.of(row("c1", "active", "标题")));
+        when(messageRepository.countByConversation("c1", USER_ID.toString())).thenReturn(0L);
+        when(messageRepository.findByIdAndOwner(anyString(), eq("c1"), eq(USER_ID))).thenAnswer(invocation ->
+                Optional.of(new ConversationMessageRepository.MessageRow(invocation.getArgument(0), "c1",
+                        USER_ID.toString(), "user", "看图", null, "[\"a1\",\"a2\"]", null, null, null, false,
+                        Instant.parse("2026-08-01T00:00:00Z"))));
+
+        ObjectMapper mapper = new ObjectMapper();
+        var body = mapper.createObjectNode();
+        body.put("role", "user").put("text", "看图");
+        body.putArray("imageIds").add("a1").add("a2");
+        service.appendMessage(USER_ID, "c1", body);
+        verify(assetService).adjustRefCounts(USER_ID, List.of("a1", "a2"), 1);
+    }
+
+    @Test
+    void withdrawDecrementsRefCountsForRemovedMessages() {
+        // G1-1：撤回（删除 withdrawable 及之后消息）→ 对应消息引用 ref_count -1
+        when(repository.findByIdAndOwner("c1", USER_ID)).thenReturn(Optional.of(row("c1", "active", "标题")));
+        when(messageRepository.findByIdAndOwner("m1", "c1", USER_ID)).thenReturn(Optional.of(
+                new ConversationMessageRepository.MessageRow("m1", "c1", USER_ID.toString(), "assistant",
+                        "text", null, "[\"a1\"]", null, null, null, true,
+                        Instant.parse("2026-08-01T00:00:00Z"))));
+        when(messageRepository.listByConversation("c1", USER_ID.toString(), null, 200)).thenReturn(
+                new ConversationMessageRepository.MessagePage(List.of(
+                        new ConversationMessageRepository.MessageRow("m0", "c1", USER_ID.toString(), "user",
+                                "你好", null, "[]", null, null, null, false,
+                                Instant.parse("2026-08-01T00:00:00Z")),
+                        new ConversationMessageRepository.MessageRow("m1", "c1", USER_ID.toString(), "assistant",
+                                "text", null, "[\"a1\"]", null, null, null, true,
+                                Instant.parse("2026-08-01T00:00:01Z"))),
+                        "cursor"));
+        when(messageRepository.deleteByIdsAndOwner(List.of("m1"), "c1", USER_ID)).thenReturn(1);
+
+        service.withdraw(USER_ID, "c1", "m1");
+        verify(assetService).adjustRefCounts(USER_ID, List.of("a1"), -1);
+    }
+
+    @Test
+    void deleteMessagesDecrementsRefCountsForImageIds() {
+        // G1-1：批量删除消息 → 引用素材 ref_count -1（尽力而为，A7）
+        when(repository.findByIdAndOwner("c1", USER_ID)).thenReturn(Optional.of(row("c1", "active", "标题")));
+        when(messageRepository.findByIdAndOwner(eq("m2"), eq("c1"), eq(USER_ID))).thenReturn(Optional.of(
+                new ConversationMessageRepository.MessageRow("m2", "c1", USER_ID.toString(), "assistant",
+                        "text", null, "[\"a3\"]", null, null, null, false,
+                        Instant.parse("2026-08-01T00:00:00Z"))));
+        when(messageRepository.findByIdAndOwner(eq("m3"), eq("c1"), eq(USER_ID))).thenReturn(Optional.empty());
+        when(messageRepository.deleteByIdsAndOwner(List.of("m2", "m3"), "c1", USER_ID)).thenReturn(1);
+
+        service.deleteMessages(USER_ID, "c1", List.of("m2", "m3"));
+        verify(assetService).adjustRefCounts(USER_ID, List.of("a3"), -1);
+    }
+
+    @Test
     void patchValidatesPendingKind() {
         when(repository.findByIdAndOwner("c1", USER_ID)).thenReturn(Optional.of(row("c1", "active", "标题")));
         ObjectMapper mapper = new ObjectMapper();
