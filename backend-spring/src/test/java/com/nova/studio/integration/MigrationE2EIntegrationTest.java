@@ -179,6 +179,28 @@ class MigrationE2EIntegrationTest {
     }
 
     @Test
+    void uploadImageIsIdempotentByHash() {
+        // S2 修复：同字节图片重复上传 → 幂等返回同一 assetId（重试/同图场景引用不悬挂，FR-7.2）
+        HttpHeaders headers = new HttpHeaders();
+        headers.setBearerAuth(token);
+        headers.setContentType(MediaType.MULTIPART_FORM_DATA);
+        org.springframework.util.LinkedMultiValueMap<String, Object> form = new org.springframework.util.LinkedMultiValueMap<>();
+        form.add("file", new org.springframework.core.io.ByteArrayResource(new byte[]{5, 6, 7, 8, 9}) {
+            @Override
+            public String getFilename() {
+                return "dup.png";
+            }
+        });
+        form.add("sourceKind", "conversation");
+        String first = parse(rest.postForEntity(base() + "/api/nova/migration/upload-image",
+                new HttpEntity<>(form, headers), String.class)).get("assetId").asText();
+        // 第二次同字节上传 → 同一 assetId，不 409
+        String second = parse(rest.postForEntity(base() + "/api/nova/migration/upload-image",
+                new HttpEntity<>(form, headers), String.class)).get("assetId").asText();
+        assertThat(second).isEqualTo(first);
+    }
+
+    @Test
     void reverseImportWritesHistories() {
         String historyId = "mig-rev-" + UUID.randomUUID().toString().substring(0, 8);
         ObjectNode body = mapper.createObjectNode();

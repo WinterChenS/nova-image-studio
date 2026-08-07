@@ -241,6 +241,19 @@ public class AssetRepository {
                 .map(AssetRepository::toRow);
     }
 
+    /** WIN-39 (T7 幂等修复): 同 hash 素材（用户范围内，任意项目）——迁移重试取回已有 assetId。 */
+    public Optional<AssetRow> findByHash(UUID userId, String hash) {
+        if (hash == null || hash.isBlank()) {
+            return Optional.empty();
+        }
+        return Optional.ofNullable(mapper.selectOne(new LambdaQueryWrapper<AssetEntity>()
+                .eq(AssetEntity::getUserId, userId.toString())
+                .eq(AssetEntity::getHash, hash)
+                .isNull(AssetEntity::getDeletedAt)
+                .last("LIMIT 1")))
+                .map(AssetRepository::toRow);
+    }
+
     private static AssetRow toRow(AssetEntity e) {
         return new AssetRow(e.getId(), e.getUserId(), e.getProjectId(), e.getKind(), e.getName(),
                 e.getMimeType(), e.getSizeBytes(), e.getWidth(), e.getHeight(),

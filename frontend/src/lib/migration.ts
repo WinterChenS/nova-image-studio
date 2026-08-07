@@ -41,10 +41,12 @@ export function markFeatureMigrated(feature: MigrationFeature): void {
 
 // ===== IndexedDB 读取（复用既有 DB 结构）=====
 
-function openDB(name: string, version: number): Promise<IDBDatabase | null> {
+function openDB(name: string, version?: number): Promise<IDBDatabase | null> {
   if (typeof indexedDB === 'undefined') return Promise.resolve(null);
   return new Promise(resolve => {
-    const req = indexedDB.open(name, version);
+    // S1 修复：不传版本时以当前版本打开（localforage 1.10.0 将 nova-image 建为 version 2，
+    // 硬编码 version 1 会抛 VersionError → 误判无存量）
+    const req = version == null ? indexedDB.open(name) : indexedDB.open(name, version);
     req.onerror = () => resolve(null);
     req.onsuccess = () => resolve(req.result);
   });
@@ -56,6 +58,30 @@ function getAllFromStore<T>(db: IDBDatabase, storeName: string): Promise<T[]> {
     const req = tx.objectStore(storeName).getAll();
     req.onsuccess = () => resolve((req.result as T[]) || []);
     req.onerror = () => resolve([]);
+  });
+}
+
+/** 游标读取 key→value 对（localforage 无 keyPath store 的裸值/裸 Blob 需按 key 关联，S1 修复）。 */
+function getAllKeyValues<T>(db: IDBDatabase, storeName: string): Promise<Array<{ key: string; value: T }>> {
+  return new Promise(resolve => {
+    const out: Array<{ key: string; value: T }> = [];
+    try {
+      const tx = db.transaction(storeName, 'readonly');
+      const store = tx.objectStore(storeName);
+      const cursor = store.openCursor();
+      cursor.onsuccess = () => {
+        const c = cursor.result;
+        if (c) {
+          out.push({ key: String(c.key), value: c.value as T });
+          c.continue();
+        } else {
+          resolve(out);
+        }
+      };
+      cursor.onerror = () => resolve(out);
+    } catch {
+      resolve(out);
+    }
   });
 }
 
@@ -71,34 +97,18 @@ export async function hasLocalAgentData(): Promise<boolean> {
 
 export async function hasLocalCanvasData(): Promise<boolean> {
   if (isFeatureMigrated('canvas')) return false;
-  const db = await openDB('nova-image', 1);
-  if (!db) return false;
-  const tx = db.transaction('canvas_app_state', 'readonly');
-  const req = tx.objectStore('canvas_app_state').get('nova-image:canvas_store');
-  const value = await new Promise<unknown>(resolve => {
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => resolve(null);
-  });
-  db.close();
-  return !!(value && typeof value === 'object' && (value as { state?: { projects?: unknown[] } }).state?.projects?.length);
+  const data = await readLocalCanvasData();
+  return !!data && data.projects.length > 0;
 }
 
 // ===== 图片上传（分批 + 进度）=====
 
-async function uploadMigrationImage(blob: Blob, sourceKind: string, onProgress: (done: number, total: number) => void): Promise<string> {
+async function uploadMigrationImage(blob: Blob, sourceKind: string): Promise<string> {
   const form = new FormData();
   form.append('file', blob);
   form.append('sourceKind', sourceKind);
   const response = await authFetch('/api/nova/migration/upload-image', { method: 'POST', body: form });
-  if (!response.ok) {
-    const err = await readApiError(response);
-    // 同图已存在（409）→ 幂等跳过；其余抛错
-    if ((err as { code?: string }).code === 'ASSET_ALREADY_EXISTS') {
-      onProgress(1, 1);
-      throw new Error('DUP');
-    }
-    throw err;
-  }
+  if (!response.ok) throw await readApiError(response);   // S2 修复：服务端幂等（同 hash 返回已有），不再依赖 409 跳过
   const data = (await response.json()) as { assetId: string; id: string };
   return data.assetId ?? data.id;
 }
@@ -129,7 +139,6 @@ export async function readLocalAgentData(): Promise<AgentMigrationInput | null> 
   db.close();
   if (messages.length === 0 && images.length === 0) return null;
 
-  const messagesById = new Map(messages.map(m => [m.id, m]));
   const imageModel = meta.find(m => m.key === 'imageModel')?.value ?? null;
 
   const conversation = {
@@ -147,7 +156,6 @@ export async function readLocalAgentData(): Promise<AgentMigrationInput | null> 
       withdrawable: m.withdrawable,
     })),
   };
-  void messagesById;
   return { conversations: [conversation] };
 }
 
@@ -166,9 +174,9 @@ export async function runAgentMigration(onProgress?: (percent: number, message: 
   const blobStore = await openDB('nova-image-db', 2);
   const imageBlobMap = new Map<string, Blob | null>();
   if (blobStore) {
-    const blobs = await getAllFromStore<{ jobId: string; index: number; blob: Blob }>(blobStore, 'blobs');
+    const blobs = await getAllFromStore<{ jobId: string; index: number; blob: unknown }>(blobStore, 'blobs');
     for (const b of blobs) {
-      if (b.blob && !imageBlobMap.has(b.jobId)) imageBlobMap.set(b.jobId, b.blob);
+      if (b.blob && isBlobLike(b.blob) && !imageBlobMap.has(b.jobId)) imageBlobMap.set(b.jobId, b.blob as Blob);
     }
     blobStore.close();
   }
@@ -182,16 +190,11 @@ export async function runAgentMigration(onProgress?: (percent: number, message: 
       blob = dataUrlToBlob(record.thumbnail);
     }
     if (blob) {
-      try {
-        const assetId = await uploadMigrationImage(blob, 'conversation', (d, t) => { done += d; onProgress?.(15 + Math.floor((done / Math.max(total, 1)) * 50), `正在上传会话图片 ${done}/${total}`); void t; });
-        imgIdToAssetId.set(record.imgId, assetId);
-      } catch (e) {
-        if ((e as Error).message === 'DUP') {
-          // 已存在：尝试按 hash 无法取回 id → 引用保留原值（服务端不校验）
-        } else {
-          throw e;
-        }
-      }
+      // S2 修复：服务端幂等（同 hash 返回已有 assetId），失败则整体报错（可重试，不静默悬挂引用）
+      const assetId = await uploadMigrationImage(blob, 'conversation');
+      done += 1;
+      onProgress?.(15 + Math.floor((done / Math.max(total, 1)) * 50), `正在上传会话图片 ${done}/${total}`);
+      imgIdToAssetId.set(record.imgId, assetId);
     }
   }
 
@@ -231,19 +234,60 @@ export interface CanvasMigrationInput {
   projects: Array<Record<string, unknown>>;
 }
 
-/** 读取本地画布数据（localForage nova-image:canvas_store）。 */
+/**
+ * 读取本地画布数据（localForage nova-image:canvas_store）。
+ * S1 修复：① DB 以当前版本打开（localforage 建为 v2）；② persist 写入的是
+ * JSON.stringify({state, version}) 字符串，需先 parse 再取 state.projects。
+ */
 export async function readLocalCanvasData(): Promise<{ projects: Array<Record<string, unknown>> } | null> {
-  const db = await openDB('nova-image', 1);
+  const db = await openDB('nova-image');
   if (!db) return null;
   const value = await new Promise<unknown>(resolve => {
-    const tx = db.transaction('canvas_app_state', 'readonly');
-    const req = tx.objectStore('canvas_app_state').get('nova-image:canvas_store');
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => resolve(null);
+    try {
+      const tx = db.transaction('canvas_app_state', 'readonly');
+      const req = tx.objectStore('canvas_app_state').get('nova-image:canvas_store');
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
   });
   db.close();
-  const projects = (value as { state?: { projects?: Array<Record<string, unknown>> } })?.state?.projects;
+  if (value == null) return null;
+  // persist 值为 JSON 字符串（{state:{projects}, version}）；旧版导入可能为对象，兼容两者
+  let parsed: unknown = value;
+  if (typeof value === 'string') {
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+  const projects = (parsed as { state?: { projects?: Array<Record<string, unknown>> } })?.state?.projects;
   return projects && projects.length ? { projects } : null;
+}
+
+/** Blob 检测（真实浏览器 IDB 返回 Blob 实例；兜底 duck-typing，兼容测试环境/多 realm）。 */
+function isBlobLike(value: unknown): value is Blob {
+  if (value instanceof Blob) return true;
+  return !!value && typeof value === 'object'
+    && typeof (value as { arrayBuffer?: unknown }).arrayBuffer === 'function';
+}
+
+/** 读取本地画布图片（canvas_image_files，裸 Blob 按 key 关联，S1 修复）。 */
+export async function readLocalCanvasImages(): Promise<Map<string, Blob>> {
+  const blobMap = new Map<string, Blob>();
+  const blobStore = await openDB('nova-image');
+  if (blobStore) {
+    const entries = await getAllKeyValues<unknown>(blobStore, 'canvas_image_files');
+    for (const entry of entries) {
+      if (isBlobLike(entry.value) && !blobMap.has(entry.key)) {
+        blobMap.set(entry.key, entry.value as Blob);
+      }
+    }
+    blobStore.close();
+  }
+  return blobMap;
 }
 
 /** 迁移画布：节点图片 blob → assets（改写 storageKey→assetId）→ 导入。返回项目数。 */
@@ -257,15 +301,7 @@ export async function runCanvasMigration(onProgress?: (percent: number, message:
   }
 
   onProgress?.(15, '正在上传画布图片...');
-  const blobStore = await openDB('nova-image', 1);
-  const blobMap = new Map<string, Blob | null>();
-  if (blobStore) {
-    const blobs = await getAllFromStore<{ key: string; value: Blob }>(blobStore, 'canvas_image_files');
-    for (const b of blobs) {
-      if (b && b.key && b.value instanceof Blob && !blobMap.has(b.key)) blobMap.set(b.key, b.value);
-    }
-    blobStore.close();
-  }
+  const blobMap = await readLocalCanvasImages();
 
   const storageKeyToAssetId = new Map<string, string>();
   const refs: Array<{ key: string; blob: Blob | null }> = [];
@@ -278,10 +314,9 @@ export async function runCanvasMigration(onProgress?: (percent: number, message:
   let done = 0;
   const total = refs.length;
   for (const ref of refs) {
-    const assetId = await uploadMigrationImage(ref.blob!, 'canvas', () => {
-      done += 1;
-      onProgress?.(15 + Math.floor((done / Math.max(total, 1)) * 55), `正在上传画布图片 ${done}/${total}`);
-    });
+    const assetId = await uploadMigrationImage(ref.blob!, 'canvas');
+    done += 1;
+    onProgress?.(15 + Math.floor((done / Math.max(total, 1)) * 55), `正在上传画布图片 ${done}/${total}`);
     storageKeyToAssetId.set(ref.key, assetId);
   }
 

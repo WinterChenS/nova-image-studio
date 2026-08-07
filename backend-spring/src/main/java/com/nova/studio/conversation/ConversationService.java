@@ -252,6 +252,12 @@ public class ConversationService {
         entity.setCreatedAt(now);
         messageRepository.insert(entity);
 
+        // WIN-39 (G1 修复): 消息引用素材 → ref_count +1（引用保护，A7）
+        List<String> assetIds = parseJsonArray(entity.getImageIds());
+        if (!assetIds.isEmpty()) {
+            assetService.adjustRefCounts(userId, assetIds, 1);
+        }
+
         // title 自动摘要：首条用户消息截断 24 字（C1/ADR-38）
         ConversationEntity convPatch = new ConversationEntity();
         convPatch.setId(conversationId);
@@ -291,6 +297,13 @@ public class ConversationService {
         int deleted = messageRepository.deleteByIdsAndOwner(
                 toRemove.stream().map(ConversationMessageRepository.MessageRow::id).toList(),
                 conversationId, userId);
+        // WIN-39 (G1): 撤回消息 → 引用素材 ref_count -1（尽力而为，A7）
+        for (ConversationMessageRepository.MessageRow removed : toRemove) {
+            List<String> assetIds = parseJsonArray(removed.imageIds());
+            if (!assetIds.isEmpty()) {
+                assetService.adjustRefCounts(userId, assetIds, -1);
+            }
+        }
         log.info("[conversation] 撤回消息: user={}, conversation={}, message={}, removed={}",
                 userId, conversationId, messageId, deleted);
         return deleted;
@@ -306,6 +319,16 @@ public class ConversationService {
                 ids.stream().distinct().limit(200).toList(), conversationId, userId);
         log.info("[conversation] 批量删除消息: user={}, conversation={}, removed={}",
                 userId, conversationId, deleted);
+        // WIN-39 (G1 修复): 删除消息 → 引用素材 ref_count -1（尽力而为，A7）
+        for (String id : ids) {
+            messageRepository.findByIdAndOwner(id, conversationId, userId)
+                    .ifPresent(row -> {
+                        List<String> assetIds = parseJsonArray(row.imageIds());
+                        if (!assetIds.isEmpty()) {
+                            assetService.adjustRefCounts(userId, assetIds, -1);
+                        }
+                    });
+        }
         return deleted;
     }
 

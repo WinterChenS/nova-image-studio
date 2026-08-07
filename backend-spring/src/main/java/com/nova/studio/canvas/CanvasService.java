@@ -11,6 +11,7 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -120,6 +121,10 @@ public class CanvasService {
             patch.setTitle(title.trim());
         }
         repository.saveDocument(patch);
+        // WIN-39 (G1 修复): 画布节点图片引用变更 → ref_count 差值调整（A7 引用保护）
+        List<String> nextAssetIds = extractNodeAssetIds(body.has("nodes") ? body.get("nodes").toString() : null);
+        List<String> prevAssetIds = extractNodeAssetIds(row.nodes());
+        adjustRefCountDelta(userId, prevAssetIds, nextAssetIds);
         log.info("[canvas] 保存画布文档: user={}, project={}, version={}",
                 userId, projectId, patch.getVersion());
         return getOwned(userId, projectId);
@@ -224,6 +229,49 @@ public class CanvasService {
             return objectMapper.readValue(raw, Object.class);
         } catch (Exception e) {
             return null;
+        }
+    }
+
+    // ===== 引用计数（A7，G1 修复）=====
+
+    /** 从节点 JSON 中提取素材引用（metadata.storageKey = assetId，ADR-35 素材引用化）。 */
+    private List<String> extractNodeAssetIds(String nodesJson) {
+        if (nodesJson == null || nodesJson.isBlank()) {
+            return List.of();
+        }
+        List<String> ids = new ArrayList<>();
+        try {
+            JsonNode nodes = objectMapper.readTree(nodesJson);
+            if (nodes != null && nodes.isArray()) {
+                for (JsonNode node : nodes) {
+                    JsonNode metadata = node.get("metadata");
+                    if (metadata != null && metadata.hasNonNull("storageKey")) {
+                        String key = metadata.get("storageKey").asText();
+                        // 仅统计服务端 assetId（UUID 或 assets/ 前缀）；本地 blob 引用不算
+                        if (isAssetIdRef(key)) {
+                            ids.add(key);
+                        }
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+            // 解析失败不阻断保存（引用计数尽力而为）
+        }
+        return ids.stream().distinct().toList();
+    }
+
+    private boolean isAssetIdRef(String key) {
+        return key != null && (key.matches("[0-9a-fA-F-]{36}") || key.startsWith("assets/"));
+    }
+
+    private void adjustRefCountDelta(UUID userId, List<String> prevIds, List<String> nextIds) {
+        List<String> added = nextIds.stream().filter(id -> !prevIds.contains(id)).toList();
+        List<String> removed = prevIds.stream().filter(id -> !nextIds.contains(id)).toList();
+        if (!added.isEmpty()) {
+            assetService.adjustRefCounts(userId, added, 1);
+        }
+        if (!removed.isEmpty()) {
+            assetService.adjustRefCounts(userId, removed, -1);
         }
     }
 }

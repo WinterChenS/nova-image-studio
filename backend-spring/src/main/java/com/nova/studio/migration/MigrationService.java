@@ -237,8 +237,7 @@ public class MigrationService {
     // ===== 图片分批上传（→ assets，返回 assetId 供 JSON 改写引用）=====
 
     /**
-     * 图片字节分批上传：sourceKind=canvas|conversation|reverse-prompt|gif，
-     * 复用 assets hash 去重（同 hash 同用户 → 409 由前端捕获跳过，FR-7.2 幂等）。
+     * 图片字节分批上传（幂等 FR-7.2）：同 hash 已存在 → 返回已有 assetId（引用改写不悬挂，S2 修复）。
      */
     public AssetRepository.AssetRow uploadImage(UUID userId, byte[] bytes, String mimeType,
                                                 String sourceKind, String sourceRef, String name) {
@@ -246,7 +245,7 @@ public class MigrationService {
         if (!AssetService.SOURCE_KINDS.contains(normalizedKind)) {
             throw new IllegalArgumentException("来源分类无效");
         }
-        return assetService.createImage(userId, null, name, List.of(), null,
+        return assetService.createImageIdempotent(userId, null, name, List.of(), null,
                 normalizedKind, "迁移导入", sourceRef, null,
                 bytes, mimeType, null, null, Instant.now(), "{}");
     }

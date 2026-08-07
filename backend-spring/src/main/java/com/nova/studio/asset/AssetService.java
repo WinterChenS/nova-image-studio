@@ -439,6 +439,25 @@ public class AssetService {
         log.warn("[asset] 对象删除最终失败（孤儿对象，P1 兜底扫描）: {}", key);
     }
 
+    /**
+     * WIN-39 (T7 幂等修复, S2): 迁移幂等上传 —— 同 hash 素材已存在（同用户任意项目）时直接返回
+     * 已有素材，否则创建。避免「失败重试 / 会话内同图」时 409 导致引用悬挂（FR-7.2 可重试 + 引用改写）。
+     */
+    public AssetRow createImageIdempotent(UUID userId, String projectId, String name, List<String> tags,
+                                          String note, String sourceKind, String sourceLabel, String sourceRef,
+                                          String prompt, byte[] fileBytes, String mimeType,
+                                          Integer width, Integer height, Instant now, String extra) {
+        String hash = sha256(fileBytes);
+        Optional<AssetRepository.AssetRow> existing = repository.findByHash(userId, hash);
+        if (existing.isPresent()) {
+            log.info("[asset] 幂等上传命中已有素材: user={}, asset={}, hash={}",
+                    userId, existing.get().id(), hash.substring(0, Math.min(12, hash.length())));
+            return existing.get();
+        }
+        return createImage(userId, projectId, name, tags, note, sourceKind, sourceLabel, sourceRef,
+                prompt, fileBytes, mimeType, width, height, now, extra);
+    }
+
     private static String sha256(byte[] data) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");

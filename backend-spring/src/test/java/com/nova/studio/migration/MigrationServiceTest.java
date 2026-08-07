@@ -1,5 +1,6 @@
 package com.nova.studio.migration;
 
+import com.nova.studio.asset.AssetRepository;
 import com.nova.studio.asset.AssetService;
 import com.nova.studio.canvas.CanvasProjectRepository;
 import com.nova.studio.conversation.ConversationRepository;
@@ -134,5 +135,22 @@ class MigrationServiceTest {
                 .isInstanceOf(IllegalArgumentException.class);
         verify(assetService, never()).createImage(eq(USER_ID), any(), any(), any(), any(),
                 anyString(), any(), any(), any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void uploadImageUsesIdempotentCreate() {
+        // S2 修复：迁移上传走 createImageIdempotent（同 hash 返回已有 assetId，重试引用不悬挂）
+        when(assetService.createImageIdempotent(eq(USER_ID), any(), any(), any(), any(), eq("canvas"),
+                any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(new AssetRepository.AssetRow("a1", USER_ID.toString(), "p1", "image", "迁移图",
+                        "image/png", 3L, null, null, "[]", null, "canvas", "迁移导入", null,
+                        null, "assets/u1/a1.png", "abc", "{}", null, 0L,
+                        java.time.Instant.parse("2026-08-01T00:00:00Z"),
+                        java.time.Instant.parse("2026-08-01T00:00:00Z"), null));
+        AssetRepository.AssetRow row = service.uploadImage(USER_ID, new byte[]{1}, "image/png",
+                "canvas", null, null);
+        assertThat(row.id()).isEqualTo("a1");
+        verify(assetService).createImageIdempotent(eq(USER_ID), any(), any(), any(), any(), eq("canvas"),
+                any(), any(), any(), any(), any(), any(), any(), any(), any());
     }
 }

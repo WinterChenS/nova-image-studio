@@ -232,6 +232,40 @@ class AssetServiceTest {
     }
 
     @Test
+    void createImageIdempotentReturnsExistingByHash() {
+        // S2 修复：同 hash 已存在（同用户任意项目）→ 直接返回已有素材，不重复创建/不 409
+        AssetRow existing = new AssetRow("a1", USER_ID.toString(), "p1", "image", "已存在", "image/png", 3L, 1, 1,
+                "[]", null, "canvas", "迁移导入", null, null, "assets/u1/a1.png", "abc",
+                "{}", null, 0L,
+                Instant.parse("2026-08-01T00:00:00Z"), Instant.parse("2026-08-01T00:00:00Z"), null);
+        when(repository.findByHash(eq(USER_ID), anyString())).thenReturn(Optional.of(existing));
+
+        AssetRow result = service.createImageIdempotent(USER_ID, null, "重试图", List.of(),
+                null, "canvas", null, null, null, new byte[]{1, 2, 3}, "image/png", null, null,
+                Instant.now(), "{}");
+
+        assertThat(result.id()).isEqualTo("a1");
+        verify(repository, never()).insert(any(AssetEntity.class));
+        verify(storage, never()).put(anyString(), any(), any());
+    }
+
+    @Test
+    void createImageIdempotentCreatesWhenHashMissing() {
+        when(repository.findByHash(eq(USER_ID), anyString())).thenReturn(Optional.empty());
+        when(repository.findDuplicate(eq(USER_ID), eq("p-default"), anyString())).thenReturn(Optional.empty());
+        when(repository.findByIdAndOwner(anyString(), eq(USER_ID))).thenAnswer(invocation ->
+                Optional.of(row(invocation.getArgument(0), "p-default", "image",
+                        "assets/" + USER_ID + "/" + invocation.getArgument(0) + ".png")));
+
+        AssetRow created = service.createImageIdempotent(USER_ID, null, "新图", List.of(),
+                null, "canvas", null, null, null, new byte[]{1}, "image/png", null, null,
+                Instant.now(), "{}");
+
+        assertThat(created.storageKey()).startsWith("assets/" + USER_ID + "/");
+        verify(repository).insert(any(AssetEntity.class));
+    }
+
+    @Test
     void jsonIncludesExtraDeletedAtRefCount() {
         var json = AssetService.toJson(new AssetRow("a1", USER_ID.toString(), "p1", "image", "name", "image/png", 10L, 1, 1,
                 "[]", null, "conversation", null, "conv-1", null, "assets/u1/a1.png", "abc",

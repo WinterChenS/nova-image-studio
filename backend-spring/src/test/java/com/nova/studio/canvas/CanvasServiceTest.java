@@ -132,4 +132,18 @@ class CanvasServiceTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("nodes");
     }
+
+    @Test
+    void saveDocumentAdjustsRefCountsByNodeDiff() {
+        // G1 修复：节点图片引用变更 → ref_count 差值调整（A7）
+        when(repository.findByIdAndOwner("c1", USER_ID)).thenReturn(Optional.of(row("c1", 1L)));
+        ObjectMapper mapper = new ObjectMapper();
+        var body = mapper.createObjectNode();
+        var nodes = body.putArray("nodes");
+        nodes.addObject().put("id", "n1").putObject("metadata").put("storageKey", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+        nodes.addObject().put("id", "n2").putObject("metadata").put("storageKey", "image:local-blob");  // 本地引用不计
+        service.saveDocument(USER_ID, "c1", body);
+        verify(assetService).adjustRefCounts(USER_ID,
+                java.util.List.of("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"), 1);
+    }
 }

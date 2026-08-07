@@ -47,6 +47,7 @@
     "@vitejs/plugin-react": "^5.1.2",
     "eslint": "^9",
     "eslint-config-next": "16.1.1",
+    "fake-indexeddb": "^6.2.5",
     "jsdom": "^27.0.1",
     "shadcn": "^4.1.2",
     "sharp": "^0.34.5",
