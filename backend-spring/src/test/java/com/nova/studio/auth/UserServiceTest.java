@@ -1,9 +1,13 @@
 package com.nova.studio.auth;
 
 import com.nova.studio.infra.HttpErrorException;
+import com.nova.studio.rbac.UserPermissionService;
+import com.nova.studio.rbac.UserRoleRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -20,10 +24,13 @@ import static org.mockito.Mockito.when;
 /**
  * M2 T2.2 — register/login validation, bcrypt hashing, unique username and
  * credential verification (repository mocked, real bcrypt + JWT).
+ * WIN-25 (T15) — register dual-writes user_roles; me() returns roles+permissions.
  */
 class UserServiceTest {
 
     private UserRepository repository;
+    private UserRoleRepository userRoleRepository;
+    private UserPermissionService permissionService;
     private UserService service;
 
     private static final UUID USER_ID = UUID.fromString("11111111-1111-1111-1111-111111111111");
@@ -31,7 +38,12 @@ class UserServiceTest {
     @BeforeEach
     void setUp() {
         repository = mock(UserRepository.class);
-        service = new UserService(repository, new JwtService("S3GYs4Qf3sLwAgajjSi4/ADjR00ldw9RX2iwL5NgRr6fGU98/24hTLFHu0JySZG7"));
+        userRoleRepository = mock(UserRoleRepository.class);
+        permissionService = mock(UserPermissionService.class);
+        when(permissionService.load(any(UUID.class)))
+                .thenReturn(new UserPermissionService.UserPermissions(List.of("user"), List.of("workbench.view")));
+        service = new UserService(repository, new JwtService("S3GYs4Qf3sLwAgajjSi4/ADjR00ldw9RX2iwL5NgRr6fGU98/24hTLFHu0JySZG7"),
+                userRoleRepository, permissionService);
     }
 
     @Test
@@ -41,6 +53,14 @@ class UserServiceTest {
         var user = service.register("alice", "secret123");
         assertThat(user).containsEntry("id", USER_ID.toString()).containsEntry("username", "alice");
         verify(repository).insert(anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void registerDualWritesUserRoles() {
+        when(repository.existsByUsername("alice")).thenReturn(false);
+        when(repository.insert(anyString(), anyString(), anyString())).thenReturn(USER_ID);
+        service.register("alice", "secret123");
+        verify(userRoleRepository).insertRole(USER_ID, "user");   // T15 (R4) 双写
     }
 
     @Test
@@ -74,9 +94,35 @@ class UserServiceTest {
         String hash = new org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder(12).encode("secret123");
         when(repository.findByUsername("alice")).thenReturn(Optional.of(
                 new UserRepository.UserRow(USER_ID, "alice", hash, "user", "active", null, null, null)));
+        when(repository.findById(USER_ID)).thenReturn(Optional.of(
+                new UserRepository.UserRow(USER_ID, "alice", hash, "user", "active", null, null, null)));
         var body = service.login("alice", "secret123");
         assertThat(body).containsKey("token");
-        assertThat(body.get("user")).isInstanceOf(java.util.Map.class);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> user = (Map<String, Object>) body.get("user");
+        assertThat(user).containsEntry("role", "user");
+        assertThat(user.get("permissions")).isEqualTo(List.of("workbench.view"));
+    }
+
+    @Test
+    void meReturnsRolesAndPermissions() {
+        String hash = new org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder(12).encode("secret123");
+        when(repository.findById(USER_ID)).thenReturn(Optional.of(
+                new UserRepository.UserRow(USER_ID, "alice", hash, "admin", "active", null, null, null)));
+        when(permissionService.load(USER_ID))
+                .thenReturn(new UserPermissionService.UserPermissions(
+                        List.of("admin"), List.of("account.manage", "audit.view")));
+        var me = service.me(new AuthUser(USER_ID, "alice", "admin"));
+        assertThat(me).containsEntry("role", "admin");
+        assertThat(me.get("roles")).isEqualTo(List.of("admin"));
+        assertThat(me.get("permissions")).isEqualTo(List.of("account.manage", "audit.view"));
+    }
+
+    @Test
+    void forgotPasswordReturnsGuidanceWithoutLeakingUserExistence() {
+        var body = service.forgotPassword("ghost");
+        assertThat(body.get("ok")).isEqualTo(true);
+        assertThat(body.get("message").toString()).contains("联系管理员");
     }
 
     @Test

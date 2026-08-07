@@ -1,6 +1,8 @@
 package com.nova.studio.auth;
 
 import com.nova.studio.infra.HttpErrorException;
+import com.nova.studio.rbac.UserPermissionService;
+import com.nova.studio.rbac.UserRoleRepository;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.stereotype.Service;
 
@@ -18,6 +20,8 @@ import java.util.regex.Pattern;
  *
  * <p>Guards (R-8/G): an admin cannot disable or demote themselves, and cannot
  * disable/demote the last remaining admin (would lock the instance out).
+ *
+ * <p>WIN-25 (T15, R4) — 角色指派双写 {@code user_roles} + 失效权限缓存（A14）。
  */
 @Service
 public class AdminUserService {
@@ -25,9 +29,14 @@ public class AdminUserService {
     private static final Pattern PASSWORD_PATTERN = Pattern.compile("^.{6,72}$");
 
     private final UserRepository repository;
+    private final UserRoleRepository userRoleRepository;
+    private final UserPermissionService permissionService;
 
-    public AdminUserService(UserRepository repository) {
+    public AdminUserService(UserRepository repository, UserRoleRepository userRoleRepository,
+                            UserPermissionService permissionService) {
         this.repository = repository;
+        this.userRoleRepository = userRoleRepository;
+        this.permissionService = permissionService;
     }
 
     /** All users (id/username/role/status/createdAt/lastLoginAt), newest first. */
@@ -67,6 +76,9 @@ public class AdminUserService {
                 throw new IllegalArgumentException("角色无效");
             }
             repository.updateRole(targetId, role);
+            // T15 (R4): 双写 user_roles + 失效权限缓存（A14 即时生效）
+            userRoleRepository.assignRole(targetId, role);
+            permissionService.invalidate(targetId);
         }
         if (status != null) {
             if (!"active".equals(status) && !"disabled".equals(status)) {

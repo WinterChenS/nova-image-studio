@@ -67,8 +67,18 @@ class NovaWebSocketE2ETest {
     @Import({com.nova.studio.config.WebSocketConfig.class, com.nova.studio.config.WsCoreConfig.class,
             com.nova.studio.config.SecurityConfig.class,
             com.nova.studio.web.SpikeTaskController.class,
-            com.nova.studio.auth.JwtService.class})
+            com.nova.studio.auth.JwtService.class,
+            NovaWebSocketE2ETest.MockPermissionConfig.class})
     static class WsTestApp {
+    }
+
+    /** M2 (T14): WS-only context 无 DB —— SecurityConfig 依赖的权限服务用 mock。 */
+    @org.springframework.boot.test.context.TestConfiguration
+    static class MockPermissionConfig {
+        @org.springframework.context.annotation.Bean
+        com.nova.studio.rbac.UserPermissionService userPermissionService() {
+            return org.mockito.Mockito.mock(com.nova.studio.rbac.UserPermissionService.class);
+        }
     }
 
     record Client(WebSocket ws, BlockingQueue<String> messages) {
@@ -197,6 +207,10 @@ class NovaWebSocketE2ETest {
     private JsonNode postTask(Map<String, Object> task) {
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
+        // M2 (T13 门禁收口): /api/nova/spike/** 需登录 —— WS 测试上下文用同一 JWT 密钥签发 token
+        com.nova.studio.auth.JwtService jwt = new com.nova.studio.auth.JwtService(
+                "test-secret-test-secret-test-secret-test-secret");
+        headers.setBearerAuth(jwt.issue(java.util.UUID.randomUUID(), "ws-test", "user"));
         HttpEntity<Map<String, Object>> entity = new HttpEntity<>(task, headers);
         ResponseEntity<String> resp = new RestTemplate().postForEntity(
                 "http://localhost:" + port + "/api/nova/spike/tasks", entity, String.class);

@@ -18,16 +18,16 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
- * WIN-16 (ADR-12) — Spring Security 7.1 filter chain behavior over the real
- * MVC surface (servlet stack, web + webflux coexist — ARCH C.3.2.8 ②④):
+ * WIN-16 (ADR-12) + WIN-25 (T13/T16, ADR-30/31) — Spring Security 7.1 filter
+ * chain over the real MVC surface:
  * <ul>
- *   <li>anonymous read-only boundary (Q1): public endpoints stay open;</li>
- *   <li>protected endpoints (settings/models CRUD, auth/me, task creation)
- *       reject anonymous/invalid tokens with the Node-style 401 JSON
- *       {@code {"error":"请先登录","code":"UNAUTHORIZED"}} — frontend
- *       {@code {error, code}} parsing stays unchanged;</li>
- *   <li>a valid JWT (issued by the reused {@link JwtService}, jjwt 0.12.6)
- *       reaches the controller via {@code @AuthenticationPrincipal}.</li>
+ *   <li><b>门禁收口</b>：白名单外 {@code anyRequest().authenticated()} —— 原匿名只读
+ *       端点（tasks/prompts/blacklist/config/queue-status）未登录 → 401（D2 默认，A19）;</li>
+ *   <li><b>公开白名单</b>（ADR-31）：登录/注册/忘记密码、健康探针、静态产物、
+ *       WS 握手、图片 URL 保持公开;</li>
+ *   <li>401/403 JSON 保持 Node 风格 {@code {error, code}}（前端解析不变）;</li>
+ *   <li>合法 JWT 经 {@link JwtService} 到达控制器；admin 端点以 @PreAuthorize
+ *       权限码鉴权（普通用户 → 403，A13）。</li>
  * </ul>
  */
 @SpringBootTest
@@ -40,29 +40,56 @@ class SecurityConfigTest {
     @Autowired
     private JwtService jwtService;
 
-    // ===== anonymous read-only boundary (Q1) =====
+    // ===== 公开白名单（ADR-30/31） =====
 
     @Test
-    void anonymousReadOnlyEndpointsStayOpen() throws Exception {
-        mockMvc.perform(get("/api/nova/queue-status"))
-                .andExpect(status().isOk());
-    }
-
-    @Test
-    void anonymousCanReadLegacyTask() throws Exception {
-        // /api/nova/tasks/* is permitAll; a missing task is a 404, not a 401.
-        mockMvc.perform(get("/api/nova/tasks/" + UUID.randomUUID()))
-                .andExpect(status().isNotFound());
-    }
-
-    @Test
-    void anonymousCanHitHealthAndLoginEndpoints() throws Exception {
+    void healthAndLoginEndpointsStayPublic() throws Exception {
         mockMvc.perform(get("/actuator/health"))
                 .andExpect(status().isOk());
         mockMvc.perform(post("/api/auth/login")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"username\":\"ghost\",\"password\":\"wrong-pass\"}"))
                 .andExpect(status().isUnauthorized()); // 401 INVALID_CREDENTIALS, not blocked by the chain
+    }
+
+    @Test
+    void forgotPasswordIsPublic() throws Exception {
+        mockMvc.perform(post("/api/auth/forgot-password")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"username\":\"ghost\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.ok").value(true));
+    }
+
+    @Test
+    void staticAssetsAndImagesWhitelistStayPublic() throws Exception {
+        // 静态产物（浏览器加载无法携带 Bearer，ADR-30）
+        mockMvc.perform(get("/")).andExpect(status().isOk());
+        mockMvc.perform(get("/_next/static/chunks/whatever.js")).andExpect(status().isNotFound());
+        // ADR-31 例外：图片 URL（不可猜测 UUID，双段 taskId/index）与 WS 握手公开
+        mockMvc.perform(get("/api/nova/images/" + UUID.randomUUID() + "/0"))
+                .andExpect(status().isNotFound()); // 公开路径可达（404 缺文件，非 401）
+    }
+
+    // ===== 原匿名只读边界收口（D2 默认，A19） =====
+
+    @Test
+    void anonymousReadOnlyEndpointsNowReject401() throws Exception {
+        mockMvc.perform(get("/api/nova/queue-status"))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(get("/api/nova/prompts"))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(get("/api/nova/blacklist"))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(get("/api/nova/config"))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void anonymousLegacyTaskReadNow401() throws Exception {
+        // /api/nova/tasks/* 由匿名只读改为登录后访问（D2）
+        mockMvc.perform(get("/api/nova/tasks/" + UUID.randomUUID()))
+                .andExpect(status().isUnauthorized());
     }
 
     // ===== protected endpoints require auth =====
@@ -96,7 +123,6 @@ class SecurityConfigTest {
 
     @Test
     void anonymousMeGets401Not500() throws Exception {
-        // Previously this path NPE'd into a 400; the security chain must 401 it.
         mockMvc.perform(get("/api/auth/me"))
                 .andExpect(status().isUnauthorized())
                 .andExpect(jsonPath("$.code").value("UNAUTHORIZED"));
@@ -109,12 +135,16 @@ class SecurityConfigTest {
                 .andExpect(jsonPath("$.code").value("UNAUTHORIZED"));
     }
 
+    @Test
+    void anonymousAdminEndpointGets401() throws Exception {
+        mockMvc.perform(get("/api/nova/admin/accounts"))
+                .andExpect(status().isUnauthorized());
+    }
+
     // ===== authenticated access via reused JwtService =====
 
     @Test
     void validTokenReachesProtectedEndpoints() throws Exception {
-        // /api/auth/me refreshes identity from the DB, so the principal must be a
-        // real registered user (not a random UUID).
         String token = registerAndLogin("alice_" + UUID.randomUUID().toString().substring(0, 6));
         mockMvc.perform(get("/api/nova/settings").header("Authorization", "Bearer " + token))
                 .andExpect(status().isOk());
@@ -125,7 +155,6 @@ class SecurityConfigTest {
 
     @Test
     void csrfDisabledForStatelessJwt() throws Exception {
-        // PUT with a valid token must not require a CSRF token (stateless JWT).
         String token = registerAndLogin("bob_" + UUID.randomUUID().toString().substring(0, 6));
         mockMvc.perform(put("/api/nova/settings")
                         .header("Authorization", "Bearer " + token)

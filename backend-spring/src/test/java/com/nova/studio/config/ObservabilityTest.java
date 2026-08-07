@@ -40,9 +40,10 @@ class ObservabilityTest {
     }
 
     @Test
-    void metricsEndpointExposed() throws Exception {
+    void metricsEndpointGatedBehindLogin() throws Exception {
+        // ADR-30 门禁收口：白名单仅含 /actuator/health，metrics 需登录（401）
         mockMvc.perform(get("/actuator/metrics"))
-                .andExpect(status().isOk());
+                .andExpect(status().isUnauthorized());
     }
 
     @Test

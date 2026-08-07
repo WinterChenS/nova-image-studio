@@ -40,6 +40,12 @@ public class AuthController {
         return userService.login(text(body, "username"), text(body, "password"));
     }
 
+    /** WIN-25 (D3) — 基础忘记密码：提交申请 → 引导联系管理员重置（公开白名单）。 */
+    @PostMapping("/forgot-password")
+    public Map<String, Object> forgotPassword(@RequestBody JsonNode body) {
+        return userService.forgotPassword(text(body, "username"));
+    }
+
     @GetMapping("/me")
     public Map<String, Object> me(@org.springframework.security.core.annotation.AuthenticationPrincipal AuthUser authUser) {
         return userService.me(authUser);

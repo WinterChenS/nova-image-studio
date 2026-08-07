@@ -1,6 +1,8 @@
 package com.nova.studio.auth;
 
 import com.nova.studio.infra.HttpErrorException;
+import com.nova.studio.rbac.UserPermissionService;
+import com.nova.studio.rbac.UserRoleRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -28,6 +30,8 @@ class AdminUserServiceTest {
     private static final UUID MEMBER_ID = UUID.fromString("33333333-3333-3333-3333-333333333333");
 
     private UserRepository repository;
+    private UserRoleRepository userRoleRepository;
+    private UserPermissionService permissionService;
     private AdminUserService service;
 
     private UserRepository.UserRow userRow(UUID id, String role, String status) {
@@ -38,7 +42,9 @@ class AdminUserServiceTest {
     @BeforeEach
     void setUp() {
         repository = mock(UserRepository.class);
-        service = new AdminUserService(repository);
+        userRoleRepository = mock(UserRoleRepository.class);
+        permissionService = mock(UserPermissionService.class);
+        service = new AdminUserService(repository, userRoleRepository, permissionService);
     }
 
     @Test
@@ -79,6 +85,16 @@ class AdminUserServiceTest {
         when(repository.countByRole("admin")).thenReturn(2L);
         service.update(ADMIN_ID, MEMBER_ID, "disabled", null);
         verify(repository).updateStatus(MEMBER_ID, "disabled");
+    }
+
+    @Test
+    void roleChangeDualWritesUserRolesAndInvalidatesCache() {
+        when(repository.findById(MEMBER_ID)).thenReturn(Optional.of(userRow(MEMBER_ID, "user", "active")));
+        when(repository.countByRole("admin")).thenReturn(2L);
+        service.update(ADMIN_ID, MEMBER_ID, null, "admin");
+        verify(repository).updateRole(MEMBER_ID, "admin");
+        verify(userRoleRepository).assignRole(MEMBER_ID, "admin");   // T15 (R4) 双写
+        verify(permissionService).invalidate(MEMBER_ID);              // A14 缓存失效
     }
 
     @Test

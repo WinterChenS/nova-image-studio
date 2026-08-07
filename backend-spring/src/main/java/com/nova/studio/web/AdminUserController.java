@@ -3,6 +3,7 @@ package com.nova.studio.web;
 import com.nova.studio.auth.AdminUserService;
 import com.nova.studio.auth.AuthSupport;
 import com.nova.studio.auth.AuthUser;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
@@ -24,6 +25,7 @@ import java.util.UUID;
  * Non-admin → 403 (401 anonymous), enforced in the controller.
  */
 @RestController
+@PreAuthorize("hasAuthority('PERM_user.manage')")
 @RequestMapping("/api/nova/admin/users")
 public class AdminUserController {
 

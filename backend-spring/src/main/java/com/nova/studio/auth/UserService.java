@@ -1,6 +1,8 @@
 package com.nova.studio.auth;
 
 import com.nova.studio.infra.HttpErrorException;
+import com.nova.studio.rbac.UserPermissionService;
+import com.nova.studio.rbac.UserRoleRepository;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.stereotype.Service;
 
@@ -12,6 +14,10 @@ import java.util.regex.Pattern;
 /**
  * Registration / login orchestration (T2.2). Passwords are bcrypt-hashed
  * (cost 12 per ADR C.6 security); successful login issues a JWT.
+ *
+ * <p>WIN-25 (T15, R4) — register dual-writes {@code user_roles} (user role);
+ * {@code /api/auth/me} and the login body now include {@code roles} +
+ * {@code permissions} + {@code status} (G.3).
  */
 @Service
 public class UserService {
@@ -21,14 +27,19 @@ public class UserService {
     private final UserRepository repository;
     private final BCryptPasswordEncoder encoder;
     private final JwtService jwtService;
+    private final UserRoleRepository userRoleRepository;
+    private final UserPermissionService permissionService;
 
-    public UserService(UserRepository repository, JwtService jwtService) {
+    public UserService(UserRepository repository, JwtService jwtService,
+                       UserRoleRepository userRoleRepository, UserPermissionService permissionService) {
         this.repository = repository;
         this.jwtService = jwtService;
+        this.userRoleRepository = userRoleRepository;
+        this.permissionService = permissionService;
         this.encoder = new BCryptPasswordEncoder(12);
     }
 
-    /** Node-style register: username/password validation, unique check, insert. */
+    /** Node-style register: username/password validation, unique check, insert + user_roles 双写. */
     public Map<String, Object> register(String username, String password) {
         String user = normalize(username, "用户名不能为空");
         if (password == null || password.length() < 6) {
@@ -44,6 +55,8 @@ public class UserService {
             throw new HttpErrorException(409, "USERNAME_TAKEN", "用户名已被占用");
         }
         UUID id = repository.insert(user, encoder.encode(password), "user");
+        // T15 (R4): 注册路径双写 user_roles（权限判定依据）
+        userRoleRepository.insertRole(id, "user");
         return publicUser(id, user, "user");
     }
 
@@ -69,18 +82,42 @@ public class UserService {
         return body;
     }
 
-    /** GET /api/auth/me — refresh identity from the DB (token may carry stale username). */
+    /** GET /api/auth/me — refresh identity from the DB; extend with roles/permissions/status (G.3). */
     public Map<String, Object> me(AuthUser authUser) {
         UserRepository.UserRow row = repository.findById(authUser.id())
                 .orElseThrow(() -> new HttpErrorException(401, "INVALID_TOKEN", "用户不存在"));
         return publicUser(row.id(), row.username(), row.role());
     }
 
-    private static Map<String, Object> publicUser(UUID id, String username, String role) {
+    /** 基础忘记密码（D3）：提交申请 → 引导联系管理员重置（复用 WIN-22 reset-password）。 */
+    public Map<String, Object> forgotPassword(String username) {
+        String user = normalize(username, "用户名不能为空");
+        // 不泄露用户是否存在（防枚举）；统一引导联系管理员
+        repository.findByUsername(user).ifPresent(row ->
+                org.slf4j.LoggerFactory.getLogger(getClass())
+                        .info("[auth] 忘记密码申请: user {} (由管理员重置)", row.id()));
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("ok", true);
+        body.put("message", "已收到申请，请联系管理员重置密码");
+        return body;
+    }
+
+    private Map<String, Object> publicUser(UUID id, String username, String role) {
         Map<String, Object> user = new LinkedHashMap<>();
         user.put("id", id.toString());
         user.put("username", username);
         user.put("role", role);
+        UserRepository.UserRow row = repository.findById(id).orElse(null);
+        if (row != null) {
+            user.put("status", row.status() == null ? "active" : row.status());
+            UserPermissionService.UserPermissions perms = permissionService.load(id);
+            user.put("roles", perms.roles());
+            user.put("permissions", perms.permissions());
+        } else {
+            user.put("status", "active");
+            user.put("roles", java.util.List.of(role));
+            user.put("permissions", java.util.List.of());
+        }
         return user;
     }
 

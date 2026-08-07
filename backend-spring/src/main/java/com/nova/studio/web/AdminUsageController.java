@@ -7,6 +7,7 @@ import com.nova.studio.auth.AuthUser;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -25,6 +26,7 @@ import java.util.UUID;
  * Admin-only (M1: requireAdmin; M2 T14 → PERM_audit.view / PERM_audit.export).
  */
 @RestController
+@PreAuthorize("hasAuthority('PERM_audit.view')")
 @RequestMapping("/api/nova/admin/usage")
 public class AdminUsageController {
 
@@ -52,6 +54,7 @@ public class AdminUsageController {
                 parseUuid(accountId), protocol, reqType, status), page, size);
     }
 
+    @PreAuthorize("hasAuthority('PERM_audit.export')")
     @GetMapping("/export")
     public ResponseEntity<byte[]> export(@RequestParam(required = false) String from,
                                          @RequestParam(required = false) String to,

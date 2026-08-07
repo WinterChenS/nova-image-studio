@@ -5,6 +5,7 @@ import com.nova.studio.auth.AuthSupport;
 import com.nova.studio.auth.AuthUser;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -26,6 +27,7 @@ import java.util.UUID;
  * Admin-only (M1: {@link AuthSupport#requireAdmin}; M2 T14 → PERM_account.manage).
  */
 @RestController
+@PreAuthorize("hasAuthority('PERM_account.manage')")
 @RequestMapping("/api/nova/admin/accounts")
 public class AdminAccountController {
 
@@ -83,6 +85,7 @@ public class AdminAccountController {
     }
 
     /** Lightweight connectivity test (success clears failure state). */
+    @PreAuthorize("hasAuthority('PERM_account.test')")
     @PostMapping("/{id}/test")
     public Map<String, Object> test(@PathVariable UUID id, @AuthenticationPrincipal AuthUser authUser) {
         AuthSupport.requireAdmin(authUser);

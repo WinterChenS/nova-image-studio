@@ -1,6 +1,8 @@
 package com.nova.studio.auth;
 
 import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
+import com.nova.studio.rbac.UserPermissionService;
+import com.nova.studio.rbac.UserRoleRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -18,6 +20,9 @@ import java.time.Instant;
  * the only way to grant the admin role in P1 (H5: 管理接口 admin 角色); the
  * role is read from the DB on every JWT issuance, so existing sessions see
  * the new role after re-login.
+ *
+ * <p>WIN-25 (T15, R4/H2) — 提权同时双写 {@code user_roles}（权限判定依据）
+ * 并失效权限缓存。
  */
 @Component
 public class AdminBootstrap implements ApplicationRunner {
@@ -26,12 +31,17 @@ public class AdminBootstrap implements ApplicationRunner {
 
     private final UserRepository userRepository;
     private final UserMapper userMapper;
+    private final UserRoleRepository userRoleRepository;
+    private final UserPermissionService permissionService;
     private final String adminUsername;
 
     public AdminBootstrap(UserRepository userRepository, UserMapper userMapper,
+                          UserRoleRepository userRoleRepository, UserPermissionService permissionService,
                           @Value("${NOVA_ADMIN_USERNAME:}") String adminUsername) {
         this.userRepository = userRepository;
         this.userMapper = userMapper;
+        this.userRoleRepository = userRoleRepository;
+        this.permissionService = permissionService;
         this.adminUsername = adminUsername == null ? "" : adminUsername.trim();
     }
 
@@ -51,6 +61,11 @@ public class AdminBootstrap implements ApplicationRunner {
                     .eq("username", adminUsername)
                     .set("role", "admin")
                     .set("updated_at", Instant.now()));
+            userRepository.findByUsername(adminUsername).ifPresent(row -> {
+                // T15 (R4): 双写 user_roles + 失效权限缓存（A14 即时生效）
+                userRoleRepository.assignRole(row.id(), "admin");
+                permissionService.invalidate(row.id());
+            });
             log.info("[admin-bootstrap] 用户 {} 已提升为 admin", adminUsername);
         } catch (Exception e) {
             log.warn("[admin-bootstrap] 提权失败: {}", e.getMessage());

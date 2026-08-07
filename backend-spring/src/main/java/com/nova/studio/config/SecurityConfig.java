@@ -2,11 +2,13 @@ package com.nova.studio.config;
 
 import com.nova.studio.auth.JwtAuthenticationFilter;
 import com.nova.studio.auth.JwtService;
+import com.nova.studio.rbac.UserPermissionService;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
+import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
@@ -19,34 +21,34 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 
 /**
- * WIN-16 (ADR-12) — full Spring Security 7.1.0 filter chain replacing the
- * custom {@code AuthFilter} (ARCH C.3.2.6).
+ * WIN-16 (ADR-12) + WIN-25 (T13, ADR-30/31) — Spring Security 7.1.0 filter
+ * chain.
  *
- * <p>Option 1 rule boundary (zero drift vs. the in-flight behavior): the chain
- * declares only the <b>must-login</b> rules (task creation, settings/models
- * CRUD, auth/me); everything else stays {@code permitAll()} so the anonymous
- * read-only boundary (Q1) and legacy endpoints keep working unchanged.
- * Controllers still enforce login via {@code @AuthenticationPrincipal} +
- * {@code AuthSupport.requireAuth} where the ARCH keeps that semantic.
+ * <p><b>M2 门禁收口（ADR-30）</b>：从「opt-in 登录清单 + permitAll 兜底」翻转为
+ * <b>白名单 + {@code anyRequest().authenticated()}</b>（D2 默认）：
+ * <ul>
+ *   <li>公开白名单：登录/注册/忘记密码、健康探针、静态产物（浏览器加载 JS/CSS
+ *       无法携带 Bearer）、WS 握手与图片 URL（ADR-31 例外，不可猜测 UUID）;</li>
+ *   <li>其余全部登录（401 JSON {@code {error, code}} 收口），前端 authFetch 401
+ *       全局引导登录页（Part H.1）；</li>
+ *   <li>{@code @EnableMethodSecurity} 开启，管理端点以 {@code @PreAuthorize
+ *       ("hasAuthority('PERM_xxx')")} 做权限码鉴权（G.2），普通用户直调 → 403。</li>
+ * </ul>
  *
- * <p>401/403 JSON follows the Node-style {@code {error, code}} envelope
- * (same shape as {@code HttpErrorException}) so frontend error parsing stays
- * untouched. WS handshake ({@code /api/nova/ws}, {@code ?token=}) remains
- * permitAll — handled by {@code WsAuthHandshakeInterceptor} as before.
- *
- * <p>Security 7.x notes: {@code and()} DSL is gone (lambda style only);
- * {@code requestMatchers} use {@code PathPatternRequestMatcher}; the JWT
- * filter is registered <em>inside</em> the chain (not as a servlet filter
- * bean) so it runs exactly once, before authorization evaluation.
+ * <p>WS handshake ({@code /api/nova/ws}, {@code ?token=}) remains permitAll —
+ * handled by {@code WsAuthHandshakeInterceptor} as before (ADR-31).
  */
 @Configuration
 @EnableWebSecurity
+@EnableMethodSecurity
 public class SecurityConfig {
 
     private final JwtService jwtService;
+    private final UserPermissionService permissionService;
 
-    public SecurityConfig(JwtService jwtService) {
+    public SecurityConfig(JwtService jwtService, UserPermissionService permissionService) {
         this.jwtService = jwtService;
+        this.permissionService = permissionService;
     }
 
     @Bean
@@ -60,18 +62,22 @@ public class SecurityConfig {
                         .accessDeniedHandler((request, response, ex) ->
                                 writeError(response, 403, "FORBIDDEN", "无权访问该资源")))
                 .authorizeHttpRequests(auth -> auth
-                        .requestMatchers("/api/auth/register", "/api/auth/login", "/api/nova/health").permitAll()
-                        .requestMatchers(HttpMethod.POST, "/api/nova/tasks").authenticated()   // Q1: task creation requires login
-                        .requestMatchers("/api/auth/me", "/api/nova/settings/**", "/api/nova/models/**",
-                                "/api/nova/admin/**",
-                                "/api/nova/projects/**", "/api/nova/assets/**", "/api/nova/storage/**")
-                                .authenticated()   // T3.1/T6: admin API requires login (role in controller); WIN-22: projects/assets/storage require login
-                        .requestMatchers("/", "/index.html", "/assets/**", "/favicon.ico",
-                                "/api/nova/ws", "/api/nova/images/**", "/api/nova/queue-status",
-                                "/api/nova/prompts", "/api/nova/blacklist", "/api/nova/config",
-                                "/api/nova/proxy/**", "/api/nova/tasks/*").permitAll()          // anonymous read-only (Q1)
-                        .anyRequest().permitAll())                  // option 1 fallback: boundaries enforced in controllers
-                .addFilterBefore(new JwtAuthenticationFilter(jwtService), UsernamePasswordAuthenticationFilter.class);
+                        // ---- 公开白名单（ADR-30/31, D.2）----
+                        .requestMatchers("/api/auth/login", "/api/auth/register",
+                                "/api/auth/forgot-password").permitAll()
+                        .requestMatchers("/api/nova/health", "/actuator/health").permitAll()
+                        // 静态产物（浏览器加载无法携带 Bearer）
+                        .requestMatchers("/", "/index.html", "/favicon.ico", "/favicon.png",
+                                "/manifest.json", "/sw.js", "/404", "/404.html",
+                                "/_next/**", "/static/**", "/assets/**",
+                                "/icon-*.png", "/icon-maskable-512.png",
+                                "/screenshot-*.png", "/togif.png").permitAll()
+                        // ADR-31 例外：WS 握手 + 图片 URL（不可猜测 UUID）
+                        .requestMatchers("/api/nova/ws", "/api/nova/images/**").permitAll()
+                        // ---- 其余全部登录（401 收口；匿名只读边界 D2 收口）----
+                        .anyRequest().authenticated())
+                .addFilterBefore(new JwtAuthenticationFilter(jwtService, permissionService),
+                        UsernamePasswordAuthenticationFilter.class);
         return http.build();
     }
 
