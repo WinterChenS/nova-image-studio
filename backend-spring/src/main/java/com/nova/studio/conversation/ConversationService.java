@@ -216,6 +216,15 @@ public class ConversationService {
      * 阶段1 纯存储；阶段2（T9）消息发送走 SSE 托管，本方法保留为落库写点。
      */
     public ConversationMessageRepository.MessageRow appendMessage(UUID userId, String conversationId, JsonNode body) {
+        return appendMessage(userId, conversationId, body, null);
+    }
+
+    /**
+     * 追加消息；{@code clientMessageId} 非空时作为消息主键（T9 后端会话托管：
+     * SSE 发送路径以前端本地 id 落库，撤回/回滚按 id 一致）。
+     */
+    public ConversationMessageRepository.MessageRow appendMessage(UUID userId, String conversationId, JsonNode body,
+                                                                  String clientMessageId) {
         ConversationRepository.ConversationRow conversation = getOwned(userId, conversationId);
         if (STATUS_DELETED.equals(conversation.status())) {
             throw new HttpErrorException(409, "CONVERSATION_DELETED", "会话已删除，请从回收站恢复");
@@ -238,7 +247,12 @@ public class ConversationService {
 
         Instant now = Instant.now();
         ConversationMessageEntity entity = new ConversationMessageEntity();
-        entity.setId(UUID.randomUUID().toString());
+        String messageId = clientMessageId != null && !clientMessageId.isBlank()
+                ? clientMessageId : UUID.randomUUID().toString();
+        if (messageRepository.existsById(messageId)) {
+            messageId = UUID.randomUUID().toString();   // 主键冲突兜底（多端重放）
+        }
+        entity.setId(messageId);
         entity.setConversationId(conversationId);
         entity.setUserId(userId.toString());
         entity.setRole(role);

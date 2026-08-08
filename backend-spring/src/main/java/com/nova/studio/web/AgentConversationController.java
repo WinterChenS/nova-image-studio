@@ -1,5 +1,8 @@
 package com.nova.studio.web;
 
+import com.nova.studio.accountpool.AccountScheduler;
+import com.nova.studio.accountpool.CatalogModelRepository;
+import com.nova.studio.agent.AgentChatService;
 import com.nova.studio.asset.AssetRepository;
 import com.nova.studio.asset.AssetService;
 import com.nova.studio.auth.AuthSupport;
@@ -7,6 +10,9 @@ import com.nova.studio.auth.AuthUser;
 import com.nova.studio.conversation.ConversationRepository;
 import com.nova.studio.conversation.ConversationMessageRepository;
 import com.nova.studio.conversation.ConversationService;
+import com.nova.studio.textproxy.TextProxyService;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -17,29 +23,38 @@ import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
+import java.io.IOException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
 
 /**
- * WIN-39 (WIN-40 T3) — Agent 会话持久化 API（ARCH Part G.1 阶段1 子集）：
+ * WIN-39 (WIN-40 T3 + WIN-41 T9/T10) — Agent 会话持久化 + 后端化托管 API（ARCH Part G.1）：
  * <ul>
  *   <li>{@code GET/POST /api/nova/agent/conversations} — 会话列表 / 新建；</li>
  *   <li>{@code GET/PATCH /api/nova/agent/conversations/{id}} — 详情（pending/context_summary/图片目录）/ 字段更新；</li>
  *   <li>{@code DELETE .../restore} — 软删进回收站 / 恢复（C8）；</li>
- *   <li>{@code GET/POST .../messages} — 消息分页（before 游标）/ 单条追加（F1 写点）；</li>
+ *   <li>{@code GET .../messages} — 消息分页（before 游标）；</li>
+ *   <li>{@code POST .../messages} — {@code Accept: text/event-stream} → SSE 统一事件流（T9 后端化托管，
+ *       会话/历史/图片目录/指令/工具 schema 由后端组装）；{@code X-Agent-Stream: raw} → 原始透传回退（对拍/应急，G.3）；
+ *       否则 JSON 单条追加（system-note/context-divider 等存储写点）；</li>
  *   <li>{@code POST .../messages/{mid}/withdraw} — 撤回；</li>
+ *   <li>{@code POST /api/nova/agent/describe} — 图片描述（vision，T9 替代前端 describing 直连）；</li>
  *   <li>{@code POST /api/nova/agent/images} + {@code GET .../images/{assetId}} — 会话图片目录（assets）。</li>
  * </ul>
- * 每条路由 requireAuth；属主隔离 → 404（AC-10）；配额超限 → 409（AC-11）。
+ * 每条路由 requireAuth；属主隔离 → 404（AC-10）；配额超限 → 409（AC-11）；同会话并发流 → 409 CONCURRENT_STREAM。
  */
 @RestController
 @RequestMapping("/api/nova/agent")
@@ -47,10 +62,20 @@ public class AgentConversationController {
 
     private final ConversationService conversationService;
     private final AssetService assetService;
+    private final AgentChatService agentChatService;
+    private final TextProxyService textProxyService;
+    private final ObjectMapper objectMapper;
 
-    public AgentConversationController(ConversationService conversationService, AssetService assetService) {
+    public AgentConversationController(ConversationService conversationService,
+                                       AssetService assetService,
+                                       AgentChatService agentChatService,
+                                       TextProxyService textProxyService,
+                                       ObjectMapper objectMapper) {
         this.conversationService = conversationService;
         this.assetService = assetService;
+        this.agentChatService = agentChatService;
+        this.textProxyService = textProxyService;
+        this.objectMapper = objectMapper;
     }
 
     // ===== conversations =====
@@ -130,16 +155,101 @@ public class AgentConversationController {
     }
 
     /**
-     * 单条消息追加（阶段1 纯存储写点；阶段2 T9 升级为 SSE 统一事件流，接口路径不变）。
+     * 消息发送（T9 后端化托管）：
+     * <ul>
+     *   <li>{@code Accept: text/event-stream} → SSE 统一事件流（会话托管，前端不传协议/完整历史）；</li>
+     *   <li>{@code X-Agent-Stream: raw} → 原始透传回退（G.3 回退开关：请求体含 requestBody，后端仅解析
+     *       账号/模型后逐字节透传上游 SSE，供对拍/应急）；</li>
+     *   <li>否则 JSON 单条追加（system-note/context-divider 等存储写点，F1）。</li>
+     * </ul>
      */
     @PostMapping("/conversations/{id}/messages")
-    public ResponseEntity<Map<String, Object>> appendMessage(@PathVariable String id,
-                                                             @RequestBody JsonNode body,
-                                                             @AuthenticationPrincipal AuthUser authUser) {
+    public void sendMessage(@PathVariable String id,
+                            @RequestBody(required = false) JsonNode body,
+                            @RequestHeader(value = "Accept", required = false) String accept,
+                            @RequestHeader(value = "X-Agent-Stream", required = false) String agentStream,
+                            @AuthenticationPrincipal AuthUser authUser,
+                            HttpServletRequest request,
+                            HttpServletResponse response) throws IOException {
+        AuthUser user = AuthSupport.requireAuth(authUser);
+        boolean wantsSse = accept != null && accept.toLowerCase().contains("text/event-stream");
+        boolean raw = "raw".equalsIgnoreCase(agentStream);
+        if (!wantsSse) {
+            // JSON 单条追加（阶段1 语义不变）
+            ConversationMessageRepository.MessageRow created =
+                    conversationService.appendMessage(user.id(), id, body);
+            writeJson(response, 201, conversationService.messageToJson(created));
+            return;
+        }
+        response.setStatus(200);
+        response.setContentType("text/event-stream");
+        response.setCharacterEncoding("UTF-8");
+        response.setHeader("Cache-Control", "no-cache");
+        response.setHeader("Connection", "keep-alive");
+        response.setHeader("X-Accel-Buffering", "no");
+        if (raw) {
+            rawPassthrough(user, id, body, response);
+            return;
+        }
+        AgentChatService.SseWriter writer = (type, data) -> {
+            response.getWriter().write("event: " + type + "\n");
+            response.getWriter().write("data: " + objectMapper.writeValueAsString(data) + "\n\n");
+            response.getWriter().flush();
+        };
+        agentChatService.streamChat(user.id(), id, body, writer);
+    }
+
+    /**
+     * 原始透传回退（G.3）：请求体 {model（目录文本模型 UUID）, requestBody} → 解析账号/模型后
+     * 逐字节透传上游 SSE（无转译；前端回退模式仍用旧 sse-stream-parser 解析）。
+     */
+    private void rawPassthrough(AuthUser user, String conversationId, JsonNode body,
+                                HttpServletResponse response) throws IOException {
+        String modelField = body == null ? null : text(body, "model");
+        if (modelField == null) {
+            writeJson(response, 400, Map.of("error", "Missing model"));
+            return;
+        }
+        CatalogModelRepository.Row model = agentChatService.resolveTextModelPublic(modelField);
+        if (model == null) {
+            writeJson(response, 400, Map.of("error", "未找到文本模型配置"));
+            return;
+        }
+        JsonNode requestBody = body != null && body.has("requestBody") ? body.get("requestBody") : body;
+        try {
+            var selected = agentChatService.selectAccount(model, Set.of());
+            try {
+                TextProxyService.Target target = textProxyService.buildTarget(
+                        selected.protocol(), selected.baseUrl(), selected.apiKey(), model.modelId(), true);
+                TextProxyService.ProxyExchange exchange = textProxyService.exchange(target, requestBody);
+                if (exchange.streamed()) {
+                    exchange.transferTo(response.getOutputStream());
+                } else {
+                    writeJson(response, exchange.status(),
+                            exchange.jsonBody() == null ? Map.of("error", "上游返回 " + exchange.status())
+                                    : parseJsonOrRaw(exchange.jsonBody()));
+                }
+            } finally {
+                agentChatService.releaseAccount(selected.accountId());
+            }
+        } catch (Exception e) {
+            writeJson(response, 502, Map.of("error", "代理请求失败：" + e.getMessage()));
+        }
+    }
+
+    /**
+     * 图片描述（T9，vision）：body {assetId, model（目录文本模型 UUID）} → 复用账号池非流式转发。
+     */
+    @PostMapping("/describe")
+    public Map<String, Object> describe(@RequestBody JsonNode body, @AuthenticationPrincipal AuthUser authUser)
+            throws IOException {
         AuthSupport.requireAuth(authUser);
-        ConversationMessageRepository.MessageRow created =
-                conversationService.appendMessage(authUser.id(), id, body);
-        return ResponseEntity.status(201).body(conversationService.messageToJson(created));
+        if (body == null || !body.hasNonNull("assetId")) {
+            throw new IllegalArgumentException("缺少 assetId");
+        }
+        String model = body.hasNonNull("model") ? body.get("model").asText() : null;
+        String description = agentChatService.describeImage(authUser.id(), body.get("assetId").asText(), model);
+        return Map.of("description", description);
     }
 
     @PostMapping("/conversations/{id}/messages/{mid}/withdraw")
@@ -227,5 +337,30 @@ public class AgentConversationController {
         Map<String, Object> map = new LinkedHashMap<>(AssetService.toJson(row));
         map.put("assetId", row.id());
         return map;
+    }
+
+    private void writeJson(HttpServletResponse response, int status, Object payload) throws IOException {
+        response.setStatus(status);
+        response.setContentType("application/json");
+        response.setCharacterEncoding("UTF-8");
+        response.getWriter().write(objectMapper.writeValueAsString(payload));
+    }
+
+    private Object parseJsonOrRaw(String bodyText) {
+        if (bodyText == null || bodyText.isBlank()) {
+            return Map.of("error", "上游返回异常");
+        }
+        try {
+            return objectMapper.readValue(bodyText, Object.class);
+        } catch (Exception e) {
+            return Map.of("error", "上游返回异常");
+        }
+    }
+
+    private static String text(JsonNode body, String key) {
+        if (body == null || !body.has(key) || !body.get(key).isTextual()) {
+            return null;
+        }
+        return body.get(key).asText();
     }
 }
