@@ -68,6 +68,9 @@ class UsageMeServiceTest {
         List<Map<String, Object>> items = (List<Map<String, Object>>) result.get("items");
         assertThat(items).hasSize(1);
         assertThat(items.get(0)).containsEntry("modelId", MODEL.toString()).containsEntry("status", "success");
+        // WIN-45 回归加固：items 明细项必须携带 refId（与 admin 用量导出 AuditQueryService/CSV 契约一致），
+        // 否则 /api/nova/usage/me 前端无法对账（QA-WIN45 BUG-1）
+        assertThat(items.get(0)).containsEntry("refId", "req-1");
         // A11: 查询只经 user 维度，从不走管理员全量查询面
         verify(repository).searchByUser(eq(ME), any(), any(), eq(0), eq(20));
         verify(repository, never()).search(any(), anyInt(), anyInt());
