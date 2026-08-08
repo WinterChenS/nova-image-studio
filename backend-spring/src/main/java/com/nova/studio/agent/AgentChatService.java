@@ -311,7 +311,8 @@ public class AgentChatService {
         }
         if (proposal != null) {
             writer.event(AgentStreamTranslator.EV_PROPOSAL, proposal);
-            writer.event(AgentStreamTranslator.EV_DONE, Map.of("messageId", "", "taskId", "", "proposalId", ""));
+            // S-2（质量评审）：proposal 分支无 assistant 落库，done.messageId 回填用户消息 id（契约补全，前端不依赖）
+            writer.event(AgentStreamTranslator.EV_DONE, Map.of("messageId", userMessageId, "taskId", "", "proposalId", ""));
             return new ChatResult(null, userMessageId);
         }
         writer.event(AgentStreamTranslator.EV_DONE, Map.of(

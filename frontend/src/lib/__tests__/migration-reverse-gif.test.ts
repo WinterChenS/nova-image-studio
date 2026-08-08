@@ -5,7 +5,7 @@ import {
   runGifMigration,
   runReverseMigration,
 } from '@/lib/migration';
-import { isLoggedIn } from '@/lib/auth';
+import { authFetch, isLoggedIn } from '@/lib/auth';
 
 vi.mock('@/lib/auth', async importOriginal => {
   const actual = await importOriginal<typeof import('@/lib/auth')>();
@@ -20,24 +20,18 @@ vi.mock('@/lib/auth', async importOriginal => {
   };
 });
 
+const mockedAuthFetch = vi.mocked(authFetch);
 const mockedIsLoggedIn = vi.mocked(isLoggedIn);
 
 // 动态 import 的依赖 mock
-vi.mock('@/lib/histories-api', () => ({
-  saveReverseRecord: vi.fn(async () => ({ id: 'h-1' })),
-  saveReverseDraft: vi.fn(async () => ({ id: 'h-2' })),
-  createGifJob: vi.fn(async () => ({ id: 'g-1', status: 'idle' })),
-  patchGifJob: vi.fn(async () => ({ id: 'g-1' })),
-}));
-
 vi.mock('@/lib/assets-api', () => ({
   createImageAsset: vi.fn(async () => ({ id: 'asset-1' })),
 }));
 
 vi.mock('@/lib/reverse-prompt-store', () => ({
   readLocalReverseData: vi.fn(async () => ({
-    current: { slot: 'current', text: '当前结果', model: 'm1', mode: 'simple', timestamp: 1 },
-    previous: { slot: 'previous', text: '上次结果', model: 'm2', mode: 'expert', timestamp: 2 },
+    current: { slot: 'current', text: '当前结果', model: 'm1', mode: 'simple', timestamp: 2 },
+    previous: { slot: 'previous', text: '上次结果', model: 'm2', mode: 'expert', timestamp: 1 },
     draft: null,
   })),
   hasLocalReverseData: vi.fn(async () => true),
@@ -60,7 +54,14 @@ vi.mock('@/lib/gif-job-store', () => ({
   })),
 }));
 
-describe('WIN-41 T14 迁移扩展（反推/GIF 存量 → 云端）', () => {
+function jsonResponse(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+describe('WIN-41 T14 迁移扩展（反推/GIF 存量 → 服务端导入，幂等）', () => {
   const localStorageBackup = globalThis.localStorage;
 
   beforeEach(() => {
@@ -86,25 +87,41 @@ describe('WIN-41 T14 迁移扩展（反推/GIF 存量 → 云端）', () => {
     expect(hasLocalGifData()).toBe(true);
   });
 
-  it('runReverseMigration 导入双槽并写迁移标记', async () => {
-    const { saveReverseRecord } = await import('@/lib/histories-api');
+  it('runReverseMigration 走 /migration/reverse/import（双槽 items + 稳定幂等 id）', async () => {
+    mockedAuthFetch.mockResolvedValue(jsonResponse(200, { created: 2, skipped: 0, failed: 0 }));
     const migrated = await runReverseMigration();
     expect(migrated).toBe(2);
-    expect(saveReverseRecord).toHaveBeenCalledTimes(2);
-    expect(saveReverseRecord).toHaveBeenNthCalledWith(1, expect.objectContaining({ text: '上次结果' }));
-    expect(saveReverseRecord).toHaveBeenNthCalledWith(2, expect.objectContaining({ text: '当前结果' }));
+    expect(mockedAuthFetch).toHaveBeenCalledTimes(1);
+    const [url, init] = mockedAuthFetch.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('/api/nova/migration/reverse/import');
+    expect(init.method).toBe('POST');
+    const body = JSON.parse(String(init.body)) as { items: Array<Record<string, unknown>> };
+    expect(body.items).toHaveLength(2);
+    expect(body.items[0].id).toBe('local-reverse-previous-user-1');
+    expect(body.items[1].id).toBe('local-reverse-current-user-1');
+    expect(body.items[0]).toMatchObject({ status: 'completed', payload: { text: '上次结果' } });
     expect(isFeatureMigrated('reverse')).toBe(true);
   });
 
-  it('runGifMigration 创建云端 job 并按 done 状态推进状态机', async () => {
-    const { createGifJob, patchGifJob } = await import('@/lib/histories-api');
+  it('runReverseMigration 导入失败（failed>0）不写迁移标记', async () => {
+    mockedAuthFetch.mockResolvedValue(jsonResponse(200, { created: 1, skipped: 0, failed: 1 }));
+    await expect(runReverseMigration()).rejects.toThrow('导入失败 1 条');
+    expect(isFeatureMigrated('reverse')).toBe(false);
+  });
+
+  it('runGifMigration 走 /migration/gif/import（done 快照 + 幂等 id）', async () => {
+    mockedAuthFetch.mockResolvedValue(jsonResponse(200, { created: 1, skipped: 0, failed: 0 }));
     const migrated = await runGifMigration();
     expect(migrated).toBe(1);
-    expect(createGifJob).toHaveBeenCalledTimes(1);
-    expect(createGifJob).toHaveBeenCalledWith(expect.objectContaining({ prompt: '眨眼 GIF', loop: true }));
-    // done 需依次经历 generating_grid → review_grid → generating_gif → done
-    const states = vi.mocked(patchGifJob).mock.calls.map(call => (call[1] as { status: string }).status);
-    expect(states).toEqual(['generating_grid', 'review_grid', 'generating_gif', 'done']);
+    const [url, init] = mockedAuthFetch.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('/api/nova/migration/gif/import');
+    const body = JSON.parse(String(init.body)) as { items: Array<Record<string, unknown>> };
+    expect(body.items).toHaveLength(1);
+    expect(body.items[0]).toMatchObject({
+      id: 'local-gif-job-user-1',
+      status: 'done',
+      payload: { prompt: '眨眼 GIF', loop: true, encodeMode: 'client' },
+    });
     expect(isFeatureMigrated('gif')).toBe(true);
   });
 

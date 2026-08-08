@@ -462,14 +462,15 @@ async function readGifGridBlob(jobId: string): Promise<Blob | null> {
 }
 
 /**
- * 迁移反推存量（nova-reverse-db）→ histories type=reverse：
- * completed 双槽（最近两条）+ 草稿（输入图上传 assets → PUT draft）。幂等：迁移标记 + 双槽语义。
+ * 迁移反推存量（nova-reverse-db）→ 服务端迁移导入（POST /api/nova/migration/reverse/import，
+ * id 级幂等 existsByIdAndOwner → skipped，AC-5）：completed 双槽 + 草稿（输入图上传 assets → draft 行）。
  */
 export async function runReverseMigration(onProgress?: (percent: number, message: string) => void): Promise<number> {
   if (!isLoggedIn()) throw new Error('请先登录');
+  const userId = await resolveMigrationUserId();
+  if (!userId) throw new Error('无法获取当前用户信息，迁移已取消（本地数据已保留）');
   onProgress?.(10, '正在读取本地反推结果...');
   const { readLocalReverseData } = await import('@/lib/reverse-prompt-store');
-  const { saveReverseRecord, saveReverseDraft } = await import('@/lib/histories-api');
   const { createImageAsset } = await import('@/lib/assets-api');
   let data;
   try {
@@ -482,18 +483,24 @@ export async function runReverseMigration(onProgress?: (percent: number, message
     return 0;
   }
 
-  let migrated = 0;
+  // 组装 items（稳定 id 保证服务端幂等：local-reverse-<slot>-<userId>）
+  const items: Array<Record<string, unknown>> = [];
   const records = [data.previous, data.current].filter((r): r is NonNullable<typeof r> => !!r?.text);
-  onProgress?.(40, `正在导入反推结果 ${migrated}/${records.length}...`);
   for (const record of records) {
-    await saveReverseRecord({ text: record.text, model: record.model, mode: record.mode });
-    migrated += 1;
-    onProgress?.(40 + Math.floor((migrated / Math.max(records.length, 1)) * 40), `正在导入反推结果 ${migrated}/${records.length}`);
+    const slot = record === data.current ? 'current' : 'previous';
+    items.push({
+      id: `local-reverse-${slot}-${userId}`,
+      status: 'completed',
+      title: record.text.trim().replace(/\s+/g, ' ').slice(0, 24),
+      payload: { text: record.text, model: record.model, mode: record.mode },
+      imageIds: [],
+      createdAt: new Date(record.timestamp || Date.now()).toISOString(),
+    });
   }
 
-  // 草稿输入图 → assets（source_kind='reverse-prompt'）+ 云端 draft
+  // 草稿输入图 → assets（source_kind='reverse-prompt'）→ 以 draft 行导入（每用户至多一条，幂等）
   if (data.draft?.file) {
-    onProgress?.(85, '正在同步反推草稿...');
+    onProgress?.(60, '正在上传反推草稿图...');
     const file = data.draft.file;
     const blob = file.dataUrl.startsWith('data:') ? dataUrlToBlob(file.dataUrl) : null;
     if (blob) {
@@ -504,49 +511,54 @@ export async function runReverseMigration(onProgress?: (percent: number, message
         sourceKind: 'reverse-prompt',
         sourceLabel: '反推提示词上传图',
       });
-      await saveReverseDraft({ text: '', imageIds: [asset.id] });
+      items.push({
+        id: `local-reverse-draft-${userId}`,
+        status: 'draft',
+        title: '反推草稿',
+        payload: { text: '', model: '', mode: '' },
+        imageIds: [asset.id],
+        createdAt: new Date().toISOString(),
+      });
     }
   }
 
+  onProgress?.(75, '正在导入反推历史到云端...');
+  const response = await authFetch('/api/nova/migration/reverse/import', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ items }),
+  });
+  if (!response.ok) throw await readApiError(response);
+  const summary = (await response.json()) as { created: number; skipped: number; failed?: number };
+  if ((summary.failed ?? 0) > 0) {
+    throw new Error(`反推历史导入失败 ${summary.failed} 条（本地数据已保留，可重试）`);
+  }
   markFeatureMigrated('reverse');
   onProgress?.(100, '反推历史迁移完成');
-  return migrated;
+  return summary.created ?? 0;
 }
 
 /**
- * 迁移 GIF 存量（localStorage nova-gif-active-job）→ histories type=gif 状态机：
- * 创建云端 job → 网格图上传（若本地 blob 存在）→ 按本地状态推进（含 done/failed）。
+ * 迁移 GIF 存量（localStorage nova-gif-active-job）→ 服务端迁移导入
+ * （POST /api/nova/migration/gif/import，id 级幂等，AC-5）：网格图上传 + 按本地状态落行。
  * 成品 GIF 字节不持久化于本地（内存态），迁移后历史列表可见任务与网格图；成品可重新编码。
  */
 export async function runGifMigration(onProgress?: (percent: number, message: string) => void): Promise<number> {
   if (!isLoggedIn()) throw new Error('请先登录');
+  const userId = await resolveMigrationUserId();
+  if (!userId) throw new Error('无法获取当前用户信息，迁移已取消（本地数据已保留）');
   onProgress?.(10, '正在读取本地 GIF 任务...');
   const { loadActiveGifJob } = await import('@/lib/gif-job-store');
-  const { createGifJob, patchGifJob } = await import('@/lib/histories-api');
   const job = loadActiveGifJob();
   if (!job) {
     markFeatureMigrated('gif');
     return 0;
   }
 
-  onProgress?.(35, '正在创建云端 GIF 任务...');
-  const row = await createGifJob({
-    prompt: job.prompt,
-    model: job.model,
-    loop: job.loop,
-    closedLoop: job.closedLoop,
-    frameDelayMs: job.frameDelayMs,
-    loopCount: job.loopCount,
-    framePadding: job.framePadding,
-    gptImageQuality: job.gptImageQuality,
-    gptImageStyle: job.gptImageStyle,
-    gptImageBackground: job.gptImageBackground,
-  });
-
   // 网格图上传（尽力而为；本地 blob 不存在则跳过，不影响状态迁移）
   let gridImageAssetId: string | undefined;
   if (job.gridImageRef) {
-    onProgress?.(55, '正在上传 GIF 网格图...');
+    onProgress?.(40, '正在上传 GIF 网格图...');
     try {
       const blob = await readGifGridBlob(job.id);
       if (blob) {
@@ -557,23 +569,44 @@ export async function runGifMigration(onProgress?: (percent: number, message: st
     }
   }
 
-  // 按本地状态推进云端状态机（非法迁移由服务端 409 拒绝并中止迁移）
-  onProgress?.(75, '正在同步 GIF 状态...');
-  const states = job.status === 'done'
-    ? ['generating_grid', 'review_grid', 'generating_gif', 'done']
-    : job.status === 'failed'
-      ? ['generating_grid', 'failed']
-      : [job.status];
-  for (const status of states) {
-    await patchGifJob(row.id, {
-      status,
-      ...(job.serverTaskId ? { taskId: job.serverTaskId } : {}),
-      ...(gridImageAssetId ? { gridImageAssetId } : {}),
-      ...(status === 'failed' && job.error ? { error: job.error } : {}),
-    });
-  }
+  const status = job.status === 'done' ? 'done'
+    : job.status === 'failed' ? 'failed'
+      : job.status;   // generating_grid / review_grid / generating_gif 快照
+  const item: Record<string, unknown> = {
+    id: `local-gif-job-${userId}`,
+    status,
+    title: job.prompt.trim().replace(/\s+/g, ' ').slice(0, 24),
+    payload: {
+      prompt: job.prompt,
+      model: job.model,
+      loop: job.loop,
+      closedLoop: job.closedLoop,
+      frameDelayMs: job.frameDelayMs,
+      loopCount: job.loopCount,
+      framePadding: job.framePadding,
+      gptImageQuality: job.gptImageQuality,
+      gptImageStyle: job.gptImageStyle,
+      gptImageBackground: job.gptImageBackground,
+      encodeMode: 'client',
+    },
+    imageIds: gridImageAssetId ? [gridImageAssetId] : [],
+    taskId: job.serverTaskId,
+    error: status === 'failed' ? job.error : undefined,
+    createdAt: job.createdAt,
+  };
 
+  onProgress?.(70, '正在导入 GIF 任务到云端...');
+  const response = await authFetch('/api/nova/migration/gif/import', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ items: [item] }),
+  });
+  if (!response.ok) throw await readApiError(response);
+  const summary = (await response.json()) as { created: number; skipped: number; failed?: number };
+  if ((summary.failed ?? 0) > 0) {
+    throw new Error(`GIF 任务导入失败 ${summary.failed} 条（本地数据已保留，可重试）`);
+  }
   markFeatureMigrated('gif');
   onProgress?.(100, 'GIF 任务迁移完成');
-  return 1;
+  return summary.created ?? 0;
 }

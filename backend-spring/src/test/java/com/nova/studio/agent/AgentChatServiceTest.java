@@ -207,6 +207,9 @@ class AgentChatServiceTest {
         Map<String, Object> proposal = recorder.datas.get(0);
         assertThat(proposal.get("action")).isEqualTo("generate");
         assertThat(proposal.get("prompt")).isEqualTo("一只橘猫");
+        // S-2（质量评审）：proposal 路径 done.messageId 回填用户消息 id（契约补全）
+        Map<String, Object> done = recorder.datas.get(1);
+        assertThat(done.get("messageId")).isEqualTo("client-msg-1");
         // 提案路径不落 assistant 消息（仅用户消息）
         ArgumentCaptor<JsonNode> captor = ArgumentCaptor.forClass(JsonNode.class);
         verify(conversationService, org.mockito.Mockito.times(1))
