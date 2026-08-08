@@ -13,12 +13,18 @@ import {
   type AgentResolvedLayout,
 } from '@/lib/model-capabilities';
 import type { ModelId } from '@/lib/gemini-config';
-import { getCompleteImageModels, loadRegistry } from '@/lib/nova-models';
+import { getCompleteImageModels, loadRegistry, type TextModelConfig } from '@/lib/nova-models';
 import {
   streamAgentChat,
-  describeImage,
+  describeImage as describeImageLegacy,
   type StreamAgentHandle,
 } from '@/lib/agent-chat-client';
+import {
+  streamBackendChat,
+  describeAsset,
+  type StreamBackendHandle,
+} from '@/lib/agent-stream-client';
+import { getConversation, type ServerContextSummary } from '@/lib/agent-api';
 import {
   AGENT_DEFAULT_IMAGE_MODEL_FALLBACK,
   type AgentMessage,
@@ -197,20 +203,26 @@ export function useAgentChat() {
   // M2 (T2.3): Agent 开关改走设置 API（agent.webSearch / agent.intentRecognition）
   const [webSearchEnabled, setWebSearchEnabled] = useState(false);
   const [intentRecognition, setIntentRecognition] = useState(true);
+  // WIN-41（T11）：后端化统一事件流（默认）vs 旧浏览器直连回退（raw 透传/对拍应急）
+  const [rawStreamFallback, setRawStreamFallback] = useState(false);
+  // WIN-41（T10 ADR-44）：会话自动压缩摘要 → 驱动压缩分隔条（已压缩 N 条较早消息）
+  const [contextSummary, setContextSummary] = useState<ServerContextSummary | null>(null);
   useEffect(() => {
     let cancelled = false;
     Promise.all([
       fetchSetting('agent.webSearch', false),
       fetchSetting('agent.intentRecognition', true),
-    ]).then(([ws, ir]) => {
+      fetchSetting('agent.rawStreamFallback', false),
+    ]).then(([ws, ir, raw]) => {
       if (cancelled) return;
       setWebSearchEnabled(ws);
       setIntentRecognition(ir);
+      setRawStreamFallback(raw);
     });
     return () => { cancelled = true; };
   }, []);
 
-  const streamHandleRef = useRef<StreamAgentHandle | null>(null);
+  const streamHandleRef = useRef<StreamBackendHandle | StreamAgentHandle | null>(null);
   const mountedRef = useRef(true);
   const pollAbortRef = useRef(false);
   const pollWakeRef = useRef<(() => void) | null>(null);
@@ -296,6 +308,8 @@ export function useAgentChat() {
       setConversationTitle(session.title);
       setHasMoreMessages(session.messages.length >= 50);
       if (session.imageModel) setImageModelState(session.imageModel as ModelId);
+      // 初始加载会话压缩摘要（驱动压缩分隔条，ADR-44）
+      void refreshConversationSummary(session.conversationId ?? getActiveConversation() ?? undefined);
 
       if (pending) {
         // 恢复待确认的提案，使用户刷新后仍可看到「等待你确认」卡片
@@ -337,6 +351,38 @@ export function useAgentChat() {
     void putMessage(message);
   }, []);
 
+  /** WIN-41（T9）：仅本地追加（用户/助手消息由后端托管流落库，避免重复持久化）。 */
+  const appendLocalMessage = useCallback((message: AgentMessage) => {
+    setMessages(prev => [...prev, message]);
+  }, []);
+
+  /** 刷新会话压缩摘要（流结束后/切换会话时调用，驱动压缩分隔条，ADR-44）。 */
+  const refreshConversationSummary = useCallback(async (targetId?: string) => {
+    const id = targetId ?? conversationId;
+    if (!id) return;
+    try {
+      const conv = await getConversation(id);
+      setContextSummary(conv.contextSummary ?? null);
+    } catch {
+      // 尽力而为：会话不存在/网络抖动时保留旧摘要
+    }
+  }, [conversationId]);
+
+  /**
+   * 图片描述分发（WIN-41 T9 后端托管 describe；回退开关开启时走旧浏览器直连）。
+   */
+  const describeAgentImage = useCallback(async (
+    assetId: string,
+    legacyDataUrl: string,
+    configured: TextModelConfig,
+    signal?: AbortSignal,
+  ): Promise<string> => {
+    if (rawStreamFallback) {
+      return describeImageLegacy(configured.id, configured.modelId, configured.protocol, legacyDataUrl, signal);
+    }
+    return describeAsset(assetId, configured.id);
+  }, [rawStreamFallback]);
+
   const registerImage = useCallback((record: AgentImageRecord) => {
     setImages(prev => [...prev, record]);
     void putImageRecord(record);
@@ -360,13 +406,7 @@ export function useAgentChat() {
     let description = '';
     try {
       const configured = getAgentTextModelConfig();
-      description = await describeImage(
-        configured.id,
-        configured.modelId,
-        configured.protocol,
-        previewDataUrl,
-        describeSignal,
-      );
+      description = await describeAgentImage(imgId, previewDataUrl, configured, describeSignal);
     } catch {
       description = '(图片描述生成失败)';
     }
@@ -385,28 +425,22 @@ export function useAgentChat() {
     };
     registerImage(record);
     return record;
-  }, [registerImage]);
+  }, [registerImage, describeAgentImage, getAgentTextModelConfig]);
 
   /** 重新生成已有图片的描述 */
   const redescribeImage = useCallback(async (imgId: string): Promise<string> => {
     const record = images.find(img => img.imgId === imgId);
     if (!record) throw new Error(`图片 ${imgId} 不存在`);
     const configured = getAgentTextModelConfig();
-    const newDescription = await describeImage(
-      configured.id,
-      configured.modelId,
-      configured.protocol,
-      record.thumbnail,
-      undefined,
-    );
+    const newDescription = await describeAgentImage(imgId, record.thumbnail, configured, undefined);
     const description = newDescription || '(无描述)';
     const updated: AgentImageRecord = { ...record, description };
     setImages(prev => prev.map(img => img.imgId === imgId ? updated : img));
     void putImageRecord(updated);
     return description;
-  }, [getAgentTextModelConfig, images]);
+  }, [getAgentTextModelConfig, images, describeAgentImage]);
 
-  const runChat = useCallback((history: AgentMessage[], catalog: AgentImageRecord[]) => {
+  const runChat = useCallback((userMessage: AgentMessage) => {
     const configured = getAgentTextModelConfig();
     const modelCatalog = buildModelCatalog();
     setPhase('streaming');
@@ -415,88 +449,154 @@ export function useAgentChat() {
     setStreamingReasoning('');
 
     let reasoningBuf = '';
+    let textBuf = '';
+    let proposalBuf: AgentProposal | null = null;
+    let doneMessageId = '';
 
-    const handle = streamAgentChat(
-      {
-        modelRef: configured.id,
-        model: configured.modelId,
-        protocol: configured.protocol,
-        history,
-        webSearch: webSearchEnabled && supportsAgentNativeWebSearch(configured.protocol),
-        catalog: catalog.map(img => ({ imgId: img.imgId, description: img.description })),
+    const finishProposal = (parsedProposal: AgentProposal, text: string, reasoning: string) => {
+      // 模型自动选择：Agent 指定模型 id 或用户要求分辨率档位时自动切换
+      const resolvedModel = resolveAgentModel(
+        imageModelRef.current,
+        parsedProposal.requestedModelId,
+        parsedProposal.requestedOutputSize,
         modelCatalog,
-      },
-      {
-        onDelta: token => appendStreamingToken('text', token),
-        onReasoning: token => {
-          reasoningBuf += token;
-          appendStreamingToken('reasoning', token);
-        },
-        onResetAttempt: () => {
-          reasoningBuf = '';
-          flushAndCancelRaf();
-          setStreamingText('');
-          setStreamingReasoning('');
-        },
-        onDone: (fullText, parsedProposal) => {
-          streamHandleRef.current = null;
-          flushAndCancelRaf();
-          setStreamingText('');
-          setStreamingReasoning('');
-          const text = fullText.trim();
-          const reasoning = reasoningBuf.trim();
-          if (parsedProposal) {
-            // 模型自动选择：Agent 指定模型 id 或用户要求分辨率档位时自动切换
-            const resolvedModel = resolveAgentModel(
-              imageModelRef.current,
-              parsedProposal.requestedModelId,
-              parsedProposal.requestedOutputSize,
+      );
+      if (resolvedModel !== imageModelRef.current) {
+        imageModelRef.current = resolvedModel;
+        setImageModelState(resolvedModel);
+        void saveImageModel(resolvedModel);
+      }
+      // 有提案：不保存为单独消息，暂存分析文本供生图成功后合并
+      pendingAnalysisRef.current = text;
+      pendingReasoningRef.current = reasoning;
+      isReeditRef.current = false;
+      setProposal(parsedProposal);
+      setPhase('proposal');
+      // 持久化 pending proposal，刷新页面后可以恢复
+      void savePendingProposal({
+        proposal: parsedProposal,
+        pendingAnalysis: text,
+        pendingReasoning: reasoning,
+        isReedit: false,
+      });
+    };
+
+    const finishText = (text: string, reasoning: string) => {
+      // 纯文本回复：后端已落库（messageId=done.messageId），前端仅本地展示（T9）
+      if (text.length > 0) {
+        appendLocalMessage({
+          id: doneMessageId || generateUUID(),
+          role: 'assistant',
+          text,
+          reasoning: reasoning.length > 0 ? reasoning : undefined,
+          createdAt: Date.now(),
+        });
+      }
+      setPhase('idle');
+    };
+
+    const finishStream = () => {
+      streamHandleRef.current = null;
+      flushAndCancelRaf();
+      setStreamingText('');
+      setStreamingReasoning('');
+      const text = textBuf.trim();
+      const reasoning = reasoningBuf.trim();
+      if (proposalBuf) {
+        finishProposal(proposalBuf, text, reasoning);
+      } else {
+        finishText(text, reasoning);
+      }
+      // 流结束后刷新会话摘要（后端可能已触发自动压缩，ADR-44）
+      void refreshConversationSummary();
+    };
+
+    const handle = rawStreamFallback
+      ? // 回退模式（T11 开关联动）：旧浏览器直连 4 协议客户端（raw 透传/对拍应急，G.3）
+        (() => {
+          const fullHistory = [...messages, userMessage];
+          const fullCatalog = [...images, ...(userMessage.imageIds ?? []).map(id => images.find(i => i.imgId === id)).filter((i): i is AgentImageRecord => Boolean(i))];
+          const { history, catalog } = sliceActiveContext(fullHistory, fullCatalog);
+          return streamAgentChat(
+            {
+              modelRef: configured.id,
+              model: configured.modelId,
+              protocol: configured.protocol,
+              history,
+              webSearch: webSearchEnabled && supportsAgentNativeWebSearch(configured.protocol),
+              catalog: catalog.map(img => ({ imgId: img.imgId, description: img.description })),
               modelCatalog,
-            );
-            if (resolvedModel !== imageModelRef.current) {
-              imageModelRef.current = resolvedModel;
-              setImageModelState(resolvedModel);
-              void saveImageModel(resolvedModel);
-            }
-            // 有提案：不保存为单独消息，暂存分析文本供生图成功后合并
-            pendingAnalysisRef.current = text;
-            pendingReasoningRef.current = reasoning;
-            isReeditRef.current = false;
-            setProposal(parsedProposal);
-            setPhase('proposal');
-            // 持久化 pending proposal，刷新页面后可以恢复
-            void savePendingProposal({
-              proposal: parsedProposal,
-              pendingAnalysis: text,
-              pendingReasoning: reasoning,
-              isReedit: false,
-            });
-          } else {
-            // 纯文本回复：正常保存为消息
-            if (text.length > 0) {
-              appendMessage({
-                id: generateUUID(),
-                role: 'assistant',
-                text,
-                reasoning: reasoning.length > 0 ? reasoning : undefined,
-                createdAt: Date.now(),
-              });
-            }
-            setPhase('idle');
-          }
-        },
-        onError: err => {
-          streamHandleRef.current = null;
-          flushAndCancelRaf();
-          setStreamingText('');
-          setStreamingReasoning('');
-          setError(err.message);
-          setPhase('idle');
-        },
-      },
-    );
+            },
+            {
+              onDelta: token => { textBuf += token; appendStreamingToken('text', token); },
+              onReasoning: token => {
+                reasoningBuf += token;
+                appendStreamingToken('reasoning', token);
+              },
+              onResetAttempt: () => {
+                reasoningBuf = '';
+                textBuf = '';
+                flushAndCancelRaf();
+                setStreamingText('');
+                setStreamingReasoning('');
+              },
+              onDone: (fullText, parsedProposal) => {
+                textBuf = fullText;
+                proposalBuf = parsedProposal;
+                finishStream();
+              },
+              onError: err => {
+                streamHandleRef.current = null;
+                flushAndCancelRaf();
+                setStreamingText('');
+                setStreamingReasoning('');
+                setError(err.message);
+                setPhase('idle');
+              },
+            },
+          );
+        })()
+      : // 后端化托管（T9/T10）：统一事件流，前端不传历史/协议/重试逻辑
+        streamBackendChat(
+          conversationId ?? '',
+          {
+            text: userMessage.text,
+            imageAssetIds: userMessage.imageIds ?? [],
+            webSearch: webSearchEnabled,
+            model: configured.id,
+            clientMessageId: userMessage.id,
+          },
+          {
+            onDelta: token => { textBuf += token; appendStreamingToken('text', token); },
+            onReasoning: token => {
+              reasoningBuf += token;
+              appendStreamingToken('reasoning', token);
+            },
+            onRetry: () => {
+              reasoningBuf = '';
+              textBuf = '';
+              flushAndCancelRaf();
+              setStreamingText('');
+              setStreamingReasoning('');
+            },
+            onProposal: proposal => { proposalBuf = proposal; },
+            onDone: done => {
+              doneMessageId = done.messageId;
+              finishStream();
+            },
+            onError: err => {
+              streamHandleRef.current = null;
+              flushAndCancelRaf();
+              setStreamingText('');
+              setStreamingReasoning('');
+              setError(err.message);
+              setPhase('idle');
+            },
+          },
+        );
     streamHandleRef.current = handle;
-  }, [appendMessage, appendStreamingToken, flushAndCancelRaf, getAgentTextModelConfig, webSearchEnabled]);
+  }, [appendLocalMessage, appendStreamingToken, flushAndCancelRaf, getAgentTextModelConfig,
+    webSearchEnabled, rawStreamFallback, conversationId, messages, images, refreshConversationSummary]);
 
   const sendMessage = useCallback(async (text: string, uploads: PendingUpload[], imageReferences?: string[]) => {
     if (phase !== 'idle') return;
@@ -560,13 +660,10 @@ export function useAgentChat() {
       imageIds: uploadedIds.length > 0 ? uploadedIds : undefined,
       createdAt: Date.now(),
     };
-    appendMessage(userMessage);
-
-    const fullHistory = [...messages, userMessage];
-    const fullCatalog = [...images, ...uploadedRecords];
-    const { history, catalog } = sliceActiveContext(fullHistory, fullCatalog);
-    runChat(history, catalog);
-  }, [phase, messages, images, appendMessage, ingestImage, runChat]);
+    // WIN-41（T9）：用户消息由后端托管流落库（clientMessageId 保证 id 一致），前端仅本地展示
+    appendLocalMessage(userMessage);
+    runChat(userMessage);
+  }, [phase, images, appendLocalMessage, ingestImage, runChat]);
 
   const cancelProposal = useCallback(() => {
     setProposal(null);
@@ -1008,6 +1105,7 @@ export function useAgentChat() {
     setMessages([]);
     setImages([]);
     setProposal(null);
+    setContextSummary(null);
     flushAndCancelRaf();
     setStreamingText('');
     setStreamingReasoning('');
@@ -1141,6 +1239,7 @@ export function useAgentChat() {
     describeAbortRef.current?.abort();
     setActiveConversation(targetId);
     setConversationId(targetId);
+    setContextSummary(null);
     setPhase('loading');
     try {
       const [session, pending, generation] = await Promise.all([
@@ -1153,6 +1252,8 @@ export function useAgentChat() {
       setConversationTitle(session.title);
       setHasMoreMessages(session.messages.length >= 50);
       if (session.imageModel) setImageModelState(session.imageModel as ModelId);
+      // 切换会话后刷新压缩摘要（驱动压缩分隔条）
+      void refreshConversationSummary(targetId);
       setProposal(null);
       setGenerationDraft(null);
       setGeneratingTaskId(null);
@@ -1185,7 +1286,7 @@ export function useAgentChat() {
     } catch {
       setPhase('idle');
     }
-  }, [conversationId]);
+  }, [conversationId, refreshConversationSummary]);
 
   /** 滚动加载更早消息（before 游标，FR-1.3 懒加载）。 */
   const loadMoreMessages = useCallback(async () => {
@@ -1203,6 +1304,31 @@ export function useAgentChat() {
     });
     setHasMoreMessages(!!older.nextBefore);
   }, [messages, hasMoreMessages, phase]);
+
+  /**
+   * WIN-41（T11，ADR-44）：跳转到最早未压缩消息。锚点（foldedBeforeMessageId）未加载时
+   * 循环加载更早分页直到命中或到底；返回锚点消息 id（供分隔条滚动定位），未命中返回 null。
+   */
+  const jumpToEarliestUncompressed = useCallback(async (): Promise<string | null> => {
+    const anchor = contextSummary?.foldedBeforeMessageId;
+    if (!anchor) return null;
+    if (messages.some(m => m.id === anchor)) return anchor;
+    let cursor = messages[0] ? new Date(messages[0].createdAt).toISOString() : undefined;
+    let guard = 0;
+    while (cursor && guard < 10) {
+      const older = await loadEarlierMessages(cursor);
+      if (older.messages.length === 0) return null;
+      setMessages(prev => {
+        const existing = new Set(prev.map(m => m.id));
+        return [...older.messages.filter(m => !existing.has(m.id)), ...prev];
+      });
+      setHasMoreMessages(!!older.nextBefore);
+      if (older.messages.some(m => m.id === anchor)) return anchor;
+      cursor = older.nextBefore ?? undefined;
+      guard++;
+    }
+    return null;
+  }, [contextSummary, messages]);
 
   return {
     ready,
@@ -1244,5 +1370,9 @@ export function useAgentChat() {
     clearContext,
     redescribeImage,
     dismissError: () => setError(null),
+    // WIN-41（T11）：压缩摘要 + 跳转最早未压缩消息（压缩分隔条）
+    contextSummary,
+    rawStreamFallback,
+    jumpToEarliestUncompressed,
   };
 }

@@ -33,6 +33,7 @@ import { ConfirmDialog } from '@/components/workspace/dialogs/ConfirmDialog';
 import { Toast, type ToastData } from '@/components/workspace/Toast';
 import { AgentProposalCard } from '@/components/agent/AgentProposalCard';
 import { MemoizedAgentMessageBubble } from '@/components/agent/AgentMessageBubble';
+import { ContextCompressionDivider } from '@/components/agent/ContextCompressionDivider';
 import { ConversationListPanel } from '@/components/agent/ConversationListPanel';
 import { MigrationBanner } from '@/components/MigrationBanner';
 import { AgentInputEditor, type AgentInputEditorHandle } from '@/components/agent/AgentInputEditor';
@@ -639,6 +640,14 @@ export function AgentChatWorkspace({ wideMode = false, disabled = false }: Agent
             <p className="text-xs opacity-70">我会判断你的意图，并在生成前请你确认。</p>
           </div>
         )}
+
+        {/* WIN-41（T10/T11，ADR-44）：自动上下文压缩分隔条（已压缩 N 条较早消息 + 跳转最早未压缩消息） */}
+        {agent.contextSummary?.foldedCount ? (
+          <ContextCompressionDivider
+            summary={agent.contextSummary}
+            onJumpToEarliest={agent.jumpToEarliestUncompressed}
+          />
+        ) : null}
 
         {agent.messages.map(message => (
           <MemoizedAgentMessageBubble

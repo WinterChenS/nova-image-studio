@@ -190,7 +190,7 @@ export function AgentMessageBubble({
     .filter((img): img is AgentImageRecord => Boolean(img));
 
   return (
-    <div className={cn('flex gap-2.5 group/message', isUser && 'flex-row-reverse')}>
+    <div data-message-id={message.id} className={cn('flex gap-2.5 group/message', isUser && 'flex-row-reverse')}>
       <div className={cn(
         'flex h-7 w-7 shrink-0 items-center justify-center rounded-full',
         isUser ? 'bg-foreground/10 text-foreground' : 'bg-primary/10 text-primary'
