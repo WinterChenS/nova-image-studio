@@ -6,8 +6,9 @@
  * 后登录页不再挂载 WorkspaceShell → 遮罩永不移除。
  *
  * 本脚本自包含：内置一个极简静态服务器（托管 frontend/out 静态导出 + 桩 /api/auth/me
- * 返回 401 → AuthGate 渲染 LoginPage；桩 /api/auth/login 记录请求并返回 401 →
- * 登录表单收到点击后显示错误，证明鼠标点击真正到达交互元素）。
+ * 与 /api/auth/login）。无 token 时 getMe() 短路直接返回 null（不请求 /me），
+ * AuthGate 水合完成即渲染 LoginPage；/me 桩仅为「已有 token 但后端拒识」场景兜底。
+ * 登录桩记录请求并返回 401 → 登录表单收到点击后显示错误，证明鼠标点击真正到达交互元素。
  *
  * 运行前置：
  *   1) cd frontend && npm run build   （生成 frontend/out 静态导出）
@@ -113,7 +114,8 @@ try {
   console.log(`== WIN-46 BUG-5 登录页遮罩回归 E2E（BASE=${BASE}）==`);
   await page.goto(BASE + '/', { waitUntil: 'load', timeout: 30000 });
   await page.waitForSelector('button:has-text("登录")', { timeout: 20000 });
-  await page.waitForTimeout(1200); // 等待 AuthGate 水合完成（/api/auth/me 401 → LoginPage）
+  // 轮询等待 AuthGate 水合完成且遮罩被移除（替代固定延时，消除时序假设）
+  await page.waitForFunction(() => !document.getElementById('app-boot-loader'), { timeout: 15000 });
 
   // A. 遮罩已从 DOM 移除
   const loaderGone = await page.evaluate(() => !document.getElementById('app-boot-loader'));
@@ -157,7 +159,11 @@ try {
     return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
   });
   await page.mouse.click(btnBox2.x, btnBox2.y);
-  await page.waitForTimeout(1500);
+  // 轮询等待登录请求到达桩服务器（替代固定延时）
+  const deadline = Date.now() + 10000;
+  while (Date.now() < deadline && loginPosts < 1) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
   results.push([
     'D. 登录请求真实发出（桩收到 POST /api/auth/login）',
     check('D. 登录请求真实发出（桩收到 POST /api/auth/login）', loginPosts >= 1, `posts=${loginPosts}, /api/auth/me=${meCalls}`),

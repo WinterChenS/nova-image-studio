@@ -64,7 +64,7 @@ describe('AuthGate 登录页 #app-boot-loader 遮罩（WIN-46 BUG-5 回归）', 
     // 遮罩必须被移除 —— 否则其 z-[99999] 全屏拦截登录按钮的鼠标点击
     expect(document.getElementById('app-boot-loader')).toBeNull()
     // 页面上不得残留任何 z-[99999] 全屏 fixed 覆盖层（拦截 pointer events 的等价条件；
-    // 真实命中测试由浏览器 E2E frontend/e2e/boot-loader.e2e.cjs 覆盖）
+    // 真实命中测试由浏览器 E2E frontend/e2e/boot-loader.e2e.mjs 覆盖）
     const fixedOverlays = [...document.querySelectorAll('*')].filter((el) =>
       typeof el.className === 'string' &&
       /fixed/.test(el.className) &&
