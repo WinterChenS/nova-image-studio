@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import { dismissBootLoader } from '@/lib/boot-loader';
 
 export const WIDE_MODE_STORAGE_KEY = 'nova-wide-mode';
 
@@ -34,11 +35,6 @@ function writeStoredWideMode(enabled: boolean): void {
 function viewportAllowsWide(): boolean {
   if (typeof window === 'undefined') return true;
   return window.innerWidth >= WIDE_MODE_MIN_WIDTH;
-}
-
-function dismissBootLoader(): void {
-  const el = document.getElementById('app-boot-loader');
-  if (el) el.remove();
 }
 
 /** 将宽度模式状态同步到 <html> 属性，确保 CSS 选择器始终有效 */
