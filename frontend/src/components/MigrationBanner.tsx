@@ -12,9 +12,13 @@ import { isLoggedIn } from '@/lib/auth';
 import {
   hasLocalAgentData,
   hasLocalCanvasData,
+  hasLocalGifData,
+  hasLocalReverseData,
   isFeatureMigrated,
   runAgentMigration,
   runCanvasMigration,
+  runGifMigration,
+  runReverseMigration,
   type MigrationFeature,
 } from '@/lib/migration';
 
@@ -41,7 +45,11 @@ export function MigrationBanner({ features, onMigrated }: MigrationBannerProps) 
       const found: MigrationFeature[] = [];
       for (const feature of features) {
         if (isFeatureMigrated(feature)) continue;
-        const has = feature === 'agent' ? await hasLocalAgentData() : await hasLocalCanvasData();
+        const has = feature === 'agent' ? await hasLocalAgentData()
+          : feature === 'canvas' ? await hasLocalCanvasData()
+            : feature === 'reverse' ? await hasLocalReverseData()
+              : feature === 'gif' ? hasLocalGifData()
+                : false;
         if (has) found.push(feature);
       }
       setPending(found);
@@ -59,8 +67,12 @@ export function MigrationBanner({ features, onMigrated }: MigrationBannerProps) 
       for (const feature of todo) {
         if (feature === 'agent') {
           await runAgentMigration(progress);
-        } else {
+        } else if (feature === 'canvas') {
           await runCanvasMigration(progress);
+        } else if (feature === 'reverse') {
+          await runReverseMigration(progress);
+        } else if (feature === 'gif') {
+          await runGifMigration(progress);
         }
         setPending(prev => prev.filter(f => f !== feature));
         onMigrated?.(feature);
@@ -86,7 +98,11 @@ export function MigrationBanner({ features, onMigrated }: MigrationBannerProps) 
   const label = done ? null
     : pending.includes('agent') && pending.includes('canvas')
       ? '检测到本地 Agent 会话与画布历史数据'
-      : pending.includes('agent') ? '检测到本地 Agent 会话历史数据' : '检测到本地画布历史数据';
+      : pending.includes('agent') ? '检测到本地 Agent 会话历史数据'
+        : pending.includes('reverse') && pending.includes('gif') ? '检测到本地反推与 GIF 历史数据'
+          : pending.includes('reverse') ? '检测到本地反推历史数据'
+            : pending.includes('gif') ? '检测到本地 GIF 任务数据'
+              : '检测到本地画布历史数据';
 
   return (
     <div className="flex items-center gap-2 border-b border-border bg-primary/5 px-4 py-2 text-xs">

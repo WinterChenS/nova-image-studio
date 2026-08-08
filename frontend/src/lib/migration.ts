@@ -422,3 +422,158 @@ function dataUrlToBlob(dataUrl: string): Blob | null {
     return null;
   }
 }
+
+// ===== 反推/GIF 存量迁移（WIN-41 T14，AC-5 覆盖四功能）=====
+
+/** 本地是否存在反推存量（nova-reverse-db）。 */
+export async function hasLocalReverseData(): Promise<boolean> {
+  if (isFeatureMigrated('reverse')) return false;
+  try {
+    const { hasLocalReverseData: detect } = await import('@/lib/reverse-prompt-store');
+    return await detect();
+  } catch {
+    return false;
+  }
+}
+
+/** 本地是否存在 GIF 存量（localStorage nova-gif-active-job）。 */
+export function hasLocalGifData(): boolean {
+  if (isFeatureMigrated('gif')) return false;
+  if (typeof window === 'undefined') return false;
+  try {
+    return !!window.localStorage.getItem('nova-gif-active-job');
+  } catch {
+    return false;
+  }
+}
+
+/** 读取本地 GIF 网格图 blob（nova-image-db blobs，index 0）。 */
+async function readGifGridBlob(jobId: string): Promise<Blob | null> {
+  try {
+    const blobStore = await openImageDb();
+    if (!blobStore) return null;
+    const blobs = await getAllFromStore<{ jobId: string; index: number; blob: unknown }>(blobStore, 'blobs');
+    const target = blobs.find(b => b.jobId === jobId && isBlobLike(b.blob));
+    blobStore.close();
+    return target ? (target.blob as Blob) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 迁移反推存量（nova-reverse-db）→ histories type=reverse：
+ * completed 双槽（最近两条）+ 草稿（输入图上传 assets → PUT draft）。幂等：迁移标记 + 双槽语义。
+ */
+export async function runReverseMigration(onProgress?: (percent: number, message: string) => void): Promise<number> {
+  if (!isLoggedIn()) throw new Error('请先登录');
+  onProgress?.(10, '正在读取本地反推结果...');
+  const { readLocalReverseData } = await import('@/lib/reverse-prompt-store');
+  const { saveReverseRecord, saveReverseDraft } = await import('@/lib/histories-api');
+  const { createImageAsset } = await import('@/lib/assets-api');
+  let data;
+  try {
+    data = await readLocalReverseData();
+  } catch (e) {
+    throw new Error(`读取本地反推数据失败（数据已保留，可重试）: ${e instanceof Error ? e.message : e}`);
+  }
+  if (!data?.current?.text && !data?.previous?.text && !data?.draft?.file) {
+    markFeatureMigrated('reverse');
+    return 0;
+  }
+
+  let migrated = 0;
+  const records = [data.previous, data.current].filter((r): r is NonNullable<typeof r> => !!r?.text);
+  onProgress?.(40, `正在导入反推结果 ${migrated}/${records.length}...`);
+  for (const record of records) {
+    await saveReverseRecord({ text: record.text, model: record.model, mode: record.mode });
+    migrated += 1;
+    onProgress?.(40 + Math.floor((migrated / Math.max(records.length, 1)) * 40), `正在导入反推结果 ${migrated}/${records.length}`);
+  }
+
+  // 草稿输入图 → assets（source_kind='reverse-prompt'）+ 云端 draft
+  if (data.draft?.file) {
+    onProgress?.(85, '正在同步反推草稿...');
+    const file = data.draft.file;
+    const blob = file.dataUrl.startsWith('data:') ? dataUrlToBlob(file.dataUrl) : null;
+    if (blob) {
+      const asset = await createImageAsset({
+        file: blob,
+        projectId: '',
+        name: file.name || '反推草稿图',
+        sourceKind: 'reverse-prompt',
+        sourceLabel: '反推提示词上传图',
+      });
+      await saveReverseDraft({ text: '', imageIds: [asset.id] });
+    }
+  }
+
+  markFeatureMigrated('reverse');
+  onProgress?.(100, '反推历史迁移完成');
+  return migrated;
+}
+
+/**
+ * 迁移 GIF 存量（localStorage nova-gif-active-job）→ histories type=gif 状态机：
+ * 创建云端 job → 网格图上传（若本地 blob 存在）→ 按本地状态推进（含 done/failed）。
+ * 成品 GIF 字节不持久化于本地（内存态），迁移后历史列表可见任务与网格图；成品可重新编码。
+ */
+export async function runGifMigration(onProgress?: (percent: number, message: string) => void): Promise<number> {
+  if (!isLoggedIn()) throw new Error('请先登录');
+  onProgress?.(10, '正在读取本地 GIF 任务...');
+  const { loadActiveGifJob } = await import('@/lib/gif-job-store');
+  const { createGifJob, patchGifJob } = await import('@/lib/histories-api');
+  const job = loadActiveGifJob();
+  if (!job) {
+    markFeatureMigrated('gif');
+    return 0;
+  }
+
+  onProgress?.(35, '正在创建云端 GIF 任务...');
+  const row = await createGifJob({
+    prompt: job.prompt,
+    model: job.model,
+    loop: job.loop,
+    closedLoop: job.closedLoop,
+    frameDelayMs: job.frameDelayMs,
+    loopCount: job.loopCount,
+    framePadding: job.framePadding,
+    gptImageQuality: job.gptImageQuality,
+    gptImageStyle: job.gptImageStyle,
+    gptImageBackground: job.gptImageBackground,
+  });
+
+  // 网格图上传（尽力而为；本地 blob 不存在则跳过，不影响状态迁移）
+  let gridImageAssetId: string | undefined;
+  if (job.gridImageRef) {
+    onProgress?.(55, '正在上传 GIF 网格图...');
+    try {
+      const blob = await readGifGridBlob(job.id);
+      if (blob) {
+        gridImageAssetId = await uploadMigrationImage(blob, 'gif');
+      }
+    } catch {
+      // 网格图上传失败不阻塞迁移
+    }
+  }
+
+  // 按本地状态推进云端状态机（非法迁移由服务端 409 拒绝并中止迁移）
+  onProgress?.(75, '正在同步 GIF 状态...');
+  const states = job.status === 'done'
+    ? ['generating_grid', 'review_grid', 'generating_gif', 'done']
+    : job.status === 'failed'
+      ? ['generating_grid', 'failed']
+      : [job.status];
+  for (const status of states) {
+    await patchGifJob(row.id, {
+      status,
+      ...(job.serverTaskId ? { taskId: job.serverTaskId } : {}),
+      ...(gridImageAssetId ? { gridImageAssetId } : {}),
+      ...(status === 'failed' && job.error ? { error: job.error } : {}),
+    });
+  }
+
+  markFeatureMigrated('gif');
+  onProgress?.(100, 'GIF 任务迁移完成');
+  return 1;
+}

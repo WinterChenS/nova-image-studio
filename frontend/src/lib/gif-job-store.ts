@@ -25,6 +25,10 @@ export interface ActiveGifJob {
   gptImageBackground?: GptImageBackground;
   refImages: RefImageData[];
   serverTaskId?: string;
+  /** WIN-41（T13）：云端 GIF job id（histories type=gif，状态机/中断恢复/历史列表） */
+  serverJobId?: string;
+  /** WIN-41（T13）：网格图 assets id（换端可从历史图片接口取回） */
+  gridImageAssetId?: string;
   gridImageRef?: string;
   frameDelayMs: number;
   loopCount: number;
