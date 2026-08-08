@@ -3,6 +3,7 @@ package com.nova.studio.agent;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.node.ObjectNode;
+import org.springframework.stereotype.Component;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -22,6 +23,7 @@ import java.util.Map;
  * google-gemini。每个数据行经 {@link #handle} 处理，产出 0..n 个统一事件；
  * 协议内错误事件抛 {@link UpstreamError}，由调用方（AgentChatService）分类重试。
  */
+@Component
 public class AgentStreamTranslator {
 
     /** 统一事件名（ARCH Part G.3）。 */

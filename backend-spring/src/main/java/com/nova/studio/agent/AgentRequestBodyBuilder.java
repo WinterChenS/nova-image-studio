@@ -4,6 +4,7 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.node.ArrayNode;
 import tools.jackson.databind.node.ObjectNode;
+import org.springframework.stereotype.Component;
 
 import java.util.List;
 
@@ -14,6 +15,7 @@ import java.util.List;
  * {@code buildAgentRequestBody} + {@code agent-chat-config.ts} 的指令/工具 schema
  * （前端不再传协议与完整历史，T9 会话托管）。
  */
+@Component
 public class AgentRequestBodyBuilder {
 
     /** 系统指令（迁移自 agent-chat-config.ts AGENT_SYSTEM_INSTRUCTIONS）。 */
