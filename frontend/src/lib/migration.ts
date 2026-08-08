@@ -9,7 +9,8 @@
  * 迁移在「已登录」前提下进行（FR-7.1：未登录不迁移）；重复登录不重复迁移（标记 + 服务端去重）。
  */
 
-import { authFetch, readApiError, isLoggedIn } from '@/lib/auth';
+import { authFetch, readApiError, isLoggedIn, getCachedUser, getMe } from '@/lib/auth';
+import { openImageDb } from '@/lib/image-db';
 import type { AgentMessage, AgentImageRecord } from '@/lib/agent-chat-config';
 
 // ===== 迁移标记（localStorage）=====
@@ -137,7 +138,21 @@ export interface AgentMigrationInput {
   }>;
 }
 
-export async function readLocalAgentData(): Promise<AgentMigrationInput | null> {
+/** 解析当前登录用户 id（迁移会话幂等键的每用户前缀，BUG-3 修复）。 */
+async function resolveMigrationUserId(): Promise<string | null> {
+  const cached = getCachedUser();
+  if (cached?.id) return cached.id;
+  if (!isLoggedIn()) return null;
+  const user = await getMe();
+  return user?.id ?? null;
+}
+
+/**
+ * 读取本地 Agent 会话（nova-agent-db）。
+ * BUG-3 修复：会话 id 按用户唯一（local-agent-session-<userId>），
+ * 避免多用户共享实例下硬编码 id 触发服务端主键冲突。
+ */
+export async function readLocalAgentData(userId?: string | null): Promise<AgentMigrationInput | null> {
   const db = await openDB('nova-agent-db', 1);
   if (!db) return null;
   const [messages, images, meta] = await Promise.all([
@@ -151,7 +166,7 @@ export async function readLocalAgentData(): Promise<AgentMigrationInput | null> 
   const imageModel = meta.find(m => m.key === 'imageModel')?.value ?? null;
 
   const conversation = {
-    id: 'local-agent-session',          // 幂等唯一键（同用户去重）
+    id: userId ? `local-agent-session-${userId}` : 'local-agent-session',   // 幂等唯一键（每用户去重，BUG-3）
     title: '迁移的 Agent 会话',
     imageModel,
     messages: messages.sort((a, b) => a.createdAt - b.createdAt).map(m => ({
@@ -171,10 +186,12 @@ export async function readLocalAgentData(): Promise<AgentMigrationInput | null> 
 /** 迁移 Agent 会话：图片上传 → 引用改写 → 导入。返回迁移条数。 */
 export async function runAgentMigration(onProgress?: (percent: number, message: string) => void): Promise<number> {
   if (!isLoggedIn()) throw new Error('请先登录');
+  const userId = await resolveMigrationUserId();
+  if (!userId) throw new Error('无法获取当前用户信息，迁移已取消（本地数据已保留）');
   onProgress?.(5, '正在读取本地 Agent 会话...');
   let data: AgentMigrationInput | null;
   try {
-    data = await readLocalAgentData();
+    data = await readLocalAgentData(userId);
   } catch (e) {
     // G1-2：读取异常 ≠ 无存量 —— 不写迁移标记（避免阶段3 清理误删未迁移数据）
     throw new Error(`读取本地会话失败（数据已保留，可重试）: ${e instanceof Error ? e.message : e}`);
@@ -186,14 +203,20 @@ export async function runAgentMigration(onProgress?: (percent: number, message: 
 
   // 1) 收集并上传图片（nova-image-db blobs 优先，缩略图兜底）
   onProgress?.(15, '正在上传会话图片...');
-  const blobStore = await openDB('nova-image-db', 2);
+  // BUG-2 修复：复用 openImageDb（统一 onupgradeneeded 建 store，空库不再抛
+  // 'object store not found'）；图片读取失败仅降级（缩略图/跳过），不阻塞会话迁移。
   const imageBlobMap = new Map<string, Blob | null>();
-  if (blobStore) {
-    const blobs = await getAllFromStore<{ jobId: string; index: number; blob: unknown }>(blobStore, 'blobs');
-    for (const b of blobs) {
-      if (b.blob && isBlobLike(b.blob) && !imageBlobMap.has(b.jobId)) imageBlobMap.set(b.jobId, b.blob as Blob);
+  try {
+    const blobStore = await openImageDb();
+    if (blobStore) {
+      const blobs = await getAllFromStore<{ jobId: string; index: number; blob: unknown }>(blobStore, 'blobs');
+      for (const b of blobs) {
+        if (b.blob && isBlobLike(b.blob) && !imageBlobMap.has(b.jobId)) imageBlobMap.set(b.jobId, b.blob as Blob);
+      }
+      blobStore.close();
     }
-    blobStore.close();
+  } catch {
+    // 图片库缺失/损坏 → 降级处理，会话文本仍可迁移
   }
   const imageRecords = await readAgentImageRecords();
   const imgIdToAssetId = new Map<string, string>();
@@ -229,7 +252,12 @@ export async function runAgentMigration(onProgress?: (percent: number, message: 
     body: JSON.stringify(data),
   });
   if (!response.ok) throw await readApiError(response);
-  const summary = (await response.json()) as { created: number; skipped: number };
+  const summary = (await response.json()) as { created: number; skipped: number; failed?: number };
+  // BUG-3 修复：单条导入失败（failed>0）视为整体失败 —— 不写迁移标记（可重试，
+  // 已导入的按幂等键跳过），避免静默标记已迁移后阶段3 清理删除本地数据。
+  if ((summary.failed ?? 0) > 0) {
+    throw new Error(`会话导入失败 ${summary.failed} 条（本地数据已保留，可重试）`);
+  }
   markFeatureMigrated('agent');
   onProgress?.(100, 'Agent 会话迁移完成');
   return summary.created ?? 0;
@@ -354,7 +382,11 @@ export async function runCanvasMigration(onProgress?: (percent: number, message:
     body: JSON.stringify(data),
   });
   if (!response.ok) throw await readApiError(response);
-  const summary = (await response.json()) as { created: number; skipped: number };
+  const summary = (await response.json()) as { created: number; skipped: number; failed?: number };
+  // BUG-3 同型防护：单条失败视为整体失败，不写迁移标记（可重试，已导入幂等跳过）
+  if ((summary.failed ?? 0) > 0) {
+    throw new Error(`画布导入失败 ${summary.failed} 条（本地数据已保留，可重试）`);
+  }
   markFeatureMigrated('canvas');
   onProgress?.(100, '画布迁移完成');
   return summary.created ?? 0;

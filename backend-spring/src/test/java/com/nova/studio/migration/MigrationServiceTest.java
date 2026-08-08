@@ -3,6 +3,8 @@ package com.nova.studio.migration;
 import com.nova.studio.asset.AssetRepository;
 import com.nova.studio.asset.AssetService;
 import com.nova.studio.canvas.CanvasProjectRepository;
+import com.nova.studio.conversation.ConversationEntity;
+import com.nova.studio.conversation.ConversationMessageEntity;
 import com.nova.studio.conversation.ConversationRepository;
 import com.nova.studio.conversation.ConversationMessageRepository;
 import com.nova.studio.history.HistoryRepository;
@@ -21,6 +23,8 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+
+import org.mockito.ArgumentCaptor;
 
 /**
  * WIN-40 T7 — 迁移框架：Agent/画布/历史批量导入幂等（唯一键去重，FR-7.2/7.3）、
@@ -80,6 +84,71 @@ class MigrationServiceTest {
         org.assertj.core.api.Assertions.assertThatThrownBy(() ->
                 service.importConversations(USER_ID, mapper.createObjectNode()))
                 .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void agentImportRegeneratesIdTakenByAnotherUser() {
+        // WIN-44 BUG-3：多用户共享实例 — id 已被其他用户占用（findByIdAndOwner 未命中，但全局存在）
+        // → 服务端重新生成唯一 id 导入，而不是主键冲突 failed；消息挂到新会话 id 下
+        when(conversationRepository.findByIdAndOwner("local-agent-session", USER_ID)).thenReturn(Optional.empty());
+        when(conversationRepository.existsById("local-agent-session")).thenReturn(true);
+        ObjectMapper mapper = new ObjectMapper();
+        var body = mapper.createObjectNode();
+        var conv = body.putArray("conversations").addObject();
+        conv.put("id", "local-agent-session").put("title", "迁移会话");
+        var msg = conv.putArray("messages").addObject();
+        msg.put("id", "m1").put("role", "user").put("text", "hi");
+
+        MigrationService.MigrationSummary summary = service.importConversations(USER_ID, body);
+
+        assertThat(summary.created()).isEqualTo(1);
+        assertThat(summary.failed()).isZero();
+        ArgumentCaptor<ConversationEntity> convCaptor = ArgumentCaptor.forClass(ConversationEntity.class);
+        verify(conversationRepository).insert(convCaptor.capture());
+        assertThat(convCaptor.getValue().getId()).isNotEqualTo("local-agent-session");
+        ArgumentCaptor<ConversationMessageEntity> msgCaptor = ArgumentCaptor.forClass(ConversationMessageEntity.class);
+        verify(messageRepository).insert(msgCaptor.capture());
+        assertThat(msgCaptor.getValue().getConversationId()).isEqualTo(convCaptor.getValue().getId());
+    }
+
+    @Test
+    void agentImportDoesNotRegenerateIdWhenFree() {
+        // WIN-44 BUG-3：id 全局空闲 → 保留客户端 id（幂等键稳定，同用户重试去重）
+        when(conversationRepository.findByIdAndOwner("conv-1", USER_ID)).thenReturn(Optional.empty());
+        when(conversationRepository.existsById("conv-1")).thenReturn(false);
+        ObjectMapper mapper = new ObjectMapper();
+        var body = mapper.createObjectNode();
+        body.putArray("conversations").addObject()
+                .put("id", "conv-1")
+                .put("title", "导入会话")
+                .putArray("messages").addObject().put("id", "msg-1").put("role", "user").put("text", "你好");
+
+        MigrationService.MigrationSummary summary = service.importConversations(USER_ID, body);
+        assertThat(summary.created()).isEqualTo(1);
+        ArgumentCaptor<ConversationEntity> captor = ArgumentCaptor.forClass(ConversationEntity.class);
+        verify(conversationRepository).insert(captor.capture());
+        assertThat(captor.getValue().getId()).isEqualTo("conv-1");
+    }
+
+    @Test
+    void agentImportRegeneratesMessageIdTakenByAnotherUser() {
+        // WIN-44 BUG-3：conversation_messages.id 为全局主键，被其他用户占用时重新生成（不 failed）
+        when(conversationRepository.findByIdAndOwner("conv-1", USER_ID)).thenReturn(Optional.empty());
+        when(conversationRepository.existsById("conv-1")).thenReturn(false);
+        when(messageRepository.existsById("m1")).thenReturn(true);
+        ObjectMapper mapper = new ObjectMapper();
+        var body = mapper.createObjectNode();
+        body.putArray("conversations").addObject()
+                .put("id", "conv-1")
+                .put("title", "导入会话")
+                .putArray("messages").addObject().put("id", "m1").put("role", "user").put("text", "你好");
+
+        MigrationService.MigrationSummary summary = service.importConversations(USER_ID, body);
+        assertThat(summary.created()).isEqualTo(1);
+        assertThat(summary.failed()).isZero();
+        ArgumentCaptor<ConversationMessageEntity> msgCaptor = ArgumentCaptor.forClass(ConversationMessageEntity.class);
+        verify(messageRepository).insert(msgCaptor.capture());
+        assertThat(msgCaptor.getValue().getId()).isNotEqualTo("m1");
     }
 
     @Test

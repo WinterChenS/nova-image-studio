@@ -133,6 +133,47 @@ class MigrationE2EIntegrationTest {
     }
 
     @Test
+    void agentImportCrossUserConflictRegeneratesId() {
+        // WIN-44 BUG-3：多用户共享实例 — 用户 A 导入硬编码 id 'local-agent-session' 后，
+        // 用户 B 导入同一 id → 服务端重新生成 id（created=1 而非 failed），B 会话可查
+        ObjectNode body = mapper.createObjectNode();
+        ArrayNode conversations = body.putArray("conversations");
+        ObjectNode conv = conversations.addObject();
+        conv.put("id", "local-agent-session").put("title", "迁移会话");
+        conv.putArray("messages").addObject()
+                .put("id", "mig-msg-c-" + UUID.randomUUID().toString().substring(0, 8))
+                .put("role", "user").put("text", "你好");
+
+        // 用户 A（setUp 用户）导入
+        JsonNode first = postJson("/api/nova/migration/agent/import", body, token);
+        assertThat(first.get("created").asInt()).isEqualTo(1);
+
+        // 用户 B：注册第二个账号，导入同一 payload
+        String usernameB = "mig_e2e_b_" + UUID.randomUUID().toString().substring(0, 8);
+        String tokenB = registerAndLogin(usernameB);
+        try {
+            JsonNode second = postJson("/api/nova/migration/agent/import", body, tokenB);
+            assertThat(second.get("created").asInt()).isEqualTo(1);
+            assertThat(second.get("failed").asInt()).isZero();
+
+            // B 的会话使用重新生成的 id（非硬编码值），会话列表可查
+            String convId = jdbcTemplate.queryForObject(
+                    "SELECT id FROM conversations WHERE user_id = "
+                            + "(SELECT id::text FROM users WHERE username = ?) AND title = '迁移会话'",
+                    String.class, usernameB);
+            assertThat(convId).isNotNull().isNotEqualTo("local-agent-session");
+        } finally {
+            String userIdB = jdbcTemplate.queryForObject(
+                    "SELECT id::text FROM users WHERE username = ?", String.class, usernameB);
+            if (userIdB != null) {
+                jdbcTemplate.update("DELETE FROM conversation_messages WHERE user_id = ?", userIdB);
+                jdbcTemplate.update("DELETE FROM conversations WHERE user_id = ?", userIdB);
+            }
+            jdbcTemplate.update("DELETE FROM users WHERE username = ?", usernameB);
+        }
+    }
+
+    @Test
     void canvasImportIsIdempotentWithNodeRefs() {
         ObjectNode body = mapper.createObjectNode();
         ArrayNode projects = body.putArray("projects");

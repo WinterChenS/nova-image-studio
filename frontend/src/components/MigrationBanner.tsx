@@ -27,6 +27,7 @@ interface MigrationBannerProps {
 export function MigrationBanner({ features, onMigrated }: MigrationBannerProps) {
   const [pending, setPending] = useState<MigrationFeature[]>([]);
   const [running, setRunning] = useState(false);
+  const [done, setDone] = useState(false);
   const [percent, setPercent] = useState(0);
   const [message, setMessage] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -51,6 +52,7 @@ export function MigrationBanner({ features, onMigrated }: MigrationBannerProps) 
   const runAll = useCallback(async () => {
     setRunning(true);
     setError(null);
+    setDone(false);
     const todo = [...pending];
     const progress = (p: number, m: string) => { setPercent(p); setMessage(m); };
     try {
@@ -63,8 +65,12 @@ export function MigrationBanner({ features, onMigrated }: MigrationBannerProps) 
         setPending(prev => prev.filter(f => f !== feature));
         onMigrated?.(feature);
       }
+      // BUG-4 修复：成功提示由独立 done 态承载，先置 done 再清 pending ——
+      // 避免 pending 清空后横幅提前 return null 导致「历史数据已同步到云端」不可见
       setPercent(100);
       setMessage('历史数据已同步到云端');
+      setDone(true);
+      setPending([]);
       setTimeout(() => setDismissed(true), 3000);
     } catch (e) {
       setError(e instanceof Error ? e.message : '迁移失败，可稍后重试（本地数据已保留）');
@@ -74,28 +80,36 @@ export function MigrationBanner({ features, onMigrated }: MigrationBannerProps) 
     }
   }, [pending, onMigrated]);
 
-  if (dismissed || pending.length === 0 || !isLoggedIn()) return null;
+  if (dismissed || !isLoggedIn()) return null;
+  if (!running && !done && pending.length === 0) return null;
 
-  const label = pending.includes('agent') && pending.includes('canvas')
-    ? '检测到本地 Agent 会话与画布历史数据'
-    : pending.includes('agent') ? '检测到本地 Agent 会话历史数据' : '检测到本地画布历史数据';
+  const label = done ? null
+    : pending.includes('agent') && pending.includes('canvas')
+      ? '检测到本地 Agent 会话与画布历史数据'
+      : pending.includes('agent') ? '检测到本地 Agent 会话历史数据' : '检测到本地画布历史数据';
 
   return (
     <div className="flex items-center gap-2 border-b border-border bg-primary/5 px-4 py-2 text-xs">
       <CloudUpload className="h-3.5 w-3.5 shrink-0 text-primary" />
       <div className="min-w-0 flex-1">
-        <span className="text-muted-foreground">{label}，可一键同步到云端（幂等，可重试）：</span>
-        {running && (
-          <span className="ml-2 text-primary">
-            {message || '迁移中...'}
-            {percent > 0 && percent < 100 && `（${percent}%）`}
-          </span>
+        {done ? (
+          <span className="text-primary">{message}</span>
+        ) : (
+          <>
+            <span className="text-muted-foreground">{label}，可一键同步到云端（幂等，可重试）：</span>
+            {running && (
+              <span className="ml-2 text-primary">
+                {message || '迁移中...'}
+                {percent > 0 && percent < 100 && `（${percent}%）`}
+              </span>
+            )}
+            {error && <span className="ml-2 text-destructive">{error}</span>}
+          </>
         )}
-        {error && <span className="ml-2 text-destructive">{error}</span>}
       </div>
-      <Button variant="outline" size="xs" disabled={running} onClick={() => void runAll()}>
+      <Button variant="outline" size="xs" disabled={running || done} onClick={() => void runAll()}>
         {running ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
-        {running ? '迁移中' : error ? '重试' : '开始迁移'}
+        {running ? '迁移中' : done ? '已完成' : error ? '重试' : '开始迁移'}
       </Button>
       {!running && (
         <button type="button" className="rounded p-1 text-muted-foreground hover:bg-muted" onClick={() => setDismissed(true)} title="稍后再说（数据保留在本地）">

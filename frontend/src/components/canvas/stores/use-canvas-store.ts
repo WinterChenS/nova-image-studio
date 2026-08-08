@@ -13,7 +13,7 @@ import {
   softDeleteCanvasProject,
   type ServerCanvasProject,
 } from "@/lib/canvas-api";
-import { isLoggedIn } from "@/lib/auth";
+import { isLoggedIn, onAuthChange } from "@/lib/auth";
 
 export type CanvasProject = {
   id: string;
@@ -269,3 +269,17 @@ export const useCanvasStore = create<CanvasStore>()(
     },
   ),
 );
+
+// WIN-44 BUG-1 修复：persist 在模块加载（登录前）水合，未登录时回落本地缓存；
+// 登录后不会重新拉取服务端。订阅 nova-auth-changed：登录成功后重新
+// loadProjectsFromServer 刷新 store（服务端为登录态唯一数据源，与 getItem 语义一致）。
+if (typeof window !== "undefined") {
+  onAuthChange(() => {
+    if (!isLoggedIn()) return;
+    void loadProjectsFromServer().then((projects) => {
+      if (projects) {
+        useCanvasStore.setState({ projects, hydrated: true });
+      }
+    });
+  });
+}

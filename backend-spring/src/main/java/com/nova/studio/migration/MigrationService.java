@@ -79,6 +79,12 @@ public class MigrationService {
                     skipped++;
                     continue;
                 }
+                // WIN-44 BUG-3：id 已被其他用户占用（多用户共享实例，旧前端硬编码
+                // 'local-agent-session'）→ 重新生成唯一 id 导入，避免主键冲突 failed；
+                // 新前端已按用户唯一前缀生成 id，正常路径不会走到这里。
+                if (conversationRepository.existsById(convId)) {
+                    convId = UUID.randomUUID().toString();
+                }
                 Instant now = Instant.now();
                 ConversationEntity conv = new ConversationEntity();
                 conv.setId(convId);
@@ -103,9 +109,15 @@ public class MigrationService {
                 // 消息
                 if (convNode.has("messages") && convNode.get("messages").isArray()) {
                     for (JsonNode msgNode : convNode.get("messages")) {
+                        String msgId = msgNode.hasNonNull("id") ? msgNode.get("id").asText()
+                                : UUID.randomUUID().toString();
+                        // WIN-44 BUG-3 同型防护：conversation_messages.id 为全局主键，
+                        // 被其他用户占用（多用户共享实例导入相同 payload）时重新生成唯一 id
+                        if (messageRepository.existsById(msgId)) {
+                            msgId = UUID.randomUUID().toString();
+                        }
                         ConversationMessageEntity msg = new ConversationMessageEntity();
-                        msg.setId(msgNode.hasNonNull("id") ? msgNode.get("id").asText()
-                                : UUID.randomUUID().toString());
+                        msg.setId(msgId);
                         msg.setConversationId(convId);
                         msg.setUserId(userId.toString());
                         msg.setRole(msgNode.hasNonNull("role") ? msgNode.get("role").asText() : "user");

@@ -41,6 +41,16 @@ public class ConversationRepository {
     }
 
     /**
+     * id 全局是否存在（跨用户）——迁移导入的跨用户冲突检测（WIN-44 BUG-3）：
+     * 硬编码 id 已被其他用户占用时，服务端据此重新生成唯一 id 而非主键冲突失败。
+     */
+    public boolean existsById(String id) {
+        Long count = mapper.selectCount(new LambdaQueryWrapper<ConversationEntity>()
+                .eq(ConversationEntity::getId, id));
+        return count != null && count > 0;
+    }
+
+    /**
      * Owner-scoped conversation list, last_message_at DESC.
      *
      * @param status active|archived|deleted|recycle（deleted+archived）；null/blank = 全部非 deleted

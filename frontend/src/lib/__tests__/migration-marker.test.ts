@@ -5,6 +5,8 @@ vi.mock('@/lib/auth', () => ({
   isLoggedIn: () => true,
   authFetch: vi.fn(),
   readApiError: vi.fn(),
+  getCachedUser: () => ({ id: 'user-42', username: 'alice', role: 'user' }),
+  getMe: vi.fn(async () => ({ id: 'user-42', username: 'alice', role: 'user' })),
 }));
 
 import { isFeatureMigrated, runAgentMigration, runCanvasMigration } from '@/lib/migration';
