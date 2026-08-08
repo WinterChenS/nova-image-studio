@@ -33,6 +33,8 @@ import { ConfirmDialog } from '@/components/workspace/dialogs/ConfirmDialog';
 import { Toast, type ToastData } from '@/components/workspace/Toast';
 import { AgentProposalCard } from '@/components/agent/AgentProposalCard';
 import { MemoizedAgentMessageBubble } from '@/components/agent/AgentMessageBubble';
+import { ConversationListPanel } from '@/components/agent/ConversationListPanel';
+import { MigrationBanner } from '@/components/MigrationBanner';
 import { AgentInputEditor, type AgentInputEditorHandle } from '@/components/agent/AgentInputEditor';
 import { AgentAssetPickerDialog, AgentTextAssetPickerDialog } from '@/components/agent/AgentAssetPickerDialog';
 import { cn } from '@/lib/utils';
@@ -116,6 +118,8 @@ export function AgentChatWorkspace({ wideMode = false, disabled = false }: Agent
   const [clearDialogOpen, setClearDialogOpen] = useState(false);
   const [stopConfirmOpen, setStopConfirmOpen] = useState(false);
   const [skipConfirmOpen, setSkipConfirmOpen] = useState(false);
+  // WIN-39（T4）：会话列表刷新信号（清空重开后重载）
+  const [conversationRefreshToken, setConversationRefreshToken] = useState(0);
 
   const [toasts, setToasts] = useState<ToastData[]>([]);
   const toastIdRef = useRef(0);
@@ -605,10 +609,29 @@ export function AgentChatWorkspace({ wideMode = false, disabled = false }: Agent
         </div>
       </div>
 
+      {/* WIN-39（T7）：本地 Agent 会话存量迁移入口 */}
+      <MigrationBanner features={['agent']} onMigrated={() => setConversationRefreshToken(t => t + 1)} />
+
+      {/* WIN-39（T4）：多会话列表（新建/切换/重命名/归档/软删/回收站） */}
+      <ConversationListPanel
+        activeConversationId={agent.conversationId}
+        onSwitch={(id) => agent.switchConversation(id)}
+        onNewConversation={(id) => agent.switchConversation(id)}
+        refreshToken={conversationRefreshToken}
+      />
+
       <div
         ref={scrollRef}
         className="flex-1 space-y-4 overflow-y-auto px-4 py-4"
       >
+        {agent.hasMoreMessages && agent.messages.length > 0 && (
+          <div className="flex justify-center">
+            <Button variant="ghost" size="xs" className="gap-1 text-muted-foreground" onClick={() => void agent.loadMoreMessages()}>
+              <RotateCcw className="h-3 w-3" />
+              加载更早消息
+            </Button>
+          </div>
+        )}
         {agent.messages.length === 0 && !agent.streamingText && (
           <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-muted-foreground">
             <Sparkles className="h-8 w-8 opacity-40" />
@@ -1159,7 +1182,7 @@ export function AgentChatWorkspace({ wideMode = false, disabled = false }: Agent
           confirmText="清空"
           onConfirm={() => {
             setClearDialogOpen(false);
-            void agent.clearSession();
+            void agent.clearSession().then(() => setConversationRefreshToken(t => t + 1));
           }}
           onCancel={() => setClearDialogOpen(false)}
         />,

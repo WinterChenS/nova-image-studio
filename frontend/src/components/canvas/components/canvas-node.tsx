@@ -4,6 +4,7 @@ import React, { useEffect, useState } from "react";
 import { AlertCircle, Clock, FileText, Hash, Images, RefreshCw, Save, Sparkles, Upload } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { AuthenticatedImage } from "@/components/AuthenticatedImage";
 import { canvasTheme } from "../lib/canvas-theme";
 import { formatBytes } from "../lib/image-utils";
 import { CanvasNodeType, type CanvasNodeData } from "../types";
@@ -257,9 +258,13 @@ function ImageNodeBody({
 
   return (
     <div className="relative h-full w-full">
-      {/* 有图片时显示图片 */}
+      {/* 有图片时显示图片（服务端图片经鉴权渲染，WIN-39） */}
       {url && (
-        <img src={url} alt={data.title} className="h-full w-full object-contain" draggable={false} onDoubleClick={() => onOpenImage?.(data)} />
+        url.startsWith('/api/') ? (
+          <AuthenticatedImage src={url} alt={data.title} className="h-full w-full object-contain" placeholderClassName="h-full w-full" />
+        ) : (
+          <img src={url} alt={data.title} className="h-full w-full object-contain" draggable={false} onDoubleClick={() => onOpenImage?.(data)} />
+        )
       )}
 
       {/* 空状态：无图片且不在生成中 */}

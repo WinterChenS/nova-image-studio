@@ -44,10 +44,10 @@ public class AssetService {
     public static final Set<String> IMAGE_MIME_TYPES = Set.of(
             "image/png", "image/jpeg", "image/webp", "image/gif");
 
-    /** Normalized 9-value source enum (PRD §8.3 / AssetSourceKind). */
+    /** Normalized source enum (PRD §8.3 / AssetSourceKind) — WIN-39 新增 'canvas'/'conversation'（ADR-36）。 */
     public static final Set<String> SOURCE_KINDS = Set.of(
             "text-to-image", "image-to-image", "agent", "reverse-prompt", "gif",
-            "upload", "random", "prompt-gallery", "manual");
+            "upload", "random", "prompt-gallery", "manual", "canvas", "conversation");
 
     public static final String UNCLASSIFIED = "__unclassified__";
 
@@ -68,16 +68,25 @@ public class AssetService {
 
     // ===== create =====
 
+    public AssetRow createImage(UUID userId, String projectId, String name, List<String> tags,
+                                String note, String sourceKind, String sourceLabel, String sourceRef,
+                                String prompt, byte[] fileBytes, String mimeType,
+                                Integer width, Integer height, Instant now) {
+        return createImage(userId, projectId, name, tags, note, sourceKind, sourceLabel, sourceRef,
+                prompt, fileBytes, mimeType, width, height, now, null);
+    }
+
     /**
      * Creates an image asset from uploaded bytes. {@code projectId} null →
      * the user's default project (ADR-17 fallback); explicit ids are ownership
      * validated (404 on cross-user). Key: {@code assets/{userId}/{assetId}.{ext}}
      * (D13, server-generated — client filenames never enter the key, ADR-16).
+     * {@code extra} 为 WIN-39 类型扩展 JSONB（目录描述/缩略图/子类型等，ADR-36）。
      */
     public AssetRow createImage(UUID userId, String projectId, String name, List<String> tags,
                                 String note, String sourceKind, String sourceLabel, String sourceRef,
                                 String prompt, byte[] fileBytes, String mimeType,
-                                Integer width, Integer height, Instant now) {
+                                Integer width, Integer height, Instant now, String extra) {
         if (fileBytes == null || fileBytes.length == 0) {
             throw new IllegalArgumentException("文件内容不能为空");
         }
@@ -121,6 +130,8 @@ public class AssetService {
             entity.setPrompt(blankToNull(prompt));
             entity.setStorageKey(storageKey);
             entity.setHash(hash);
+            entity.setExtra(validExtra(extra));
+            entity.setRefCount(0L);
             entity.setCreatedAt(now);
             entity.setUpdatedAt(now);
             entity.setLastUsedAt(now);
@@ -143,6 +154,14 @@ public class AssetService {
     public AssetRow createText(UUID userId, String projectId, String content, String name,
                                List<String> tags, String note, String sourceKind, String sourceLabel,
                                String sourceRef, Instant now) {
+        return createText(userId, projectId, content, name, tags, note, sourceKind, sourceLabel,
+                sourceRef, now, null);
+    }
+
+    /** Creates a text asset (新建提示词 / manual / migration import). {@code extra} WIN-39 扩展。 */
+    public AssetRow createText(UUID userId, String projectId, String content, String name,
+                               List<String> tags, String note, String sourceKind, String sourceLabel,
+                               String sourceRef, Instant now, String extra) {
         if (content == null || content.trim().isEmpty()) {
             throw new IllegalArgumentException("内容不能为空");
         }
@@ -174,6 +193,8 @@ public class AssetService {
         entity.setPrompt(content.trim());           // text content lives in prompt (新建提示词)
         entity.setStorageKey(null);                 // text assets have no object (E.2)
         entity.setHash(hash);
+        entity.setExtra(validExtra(extra));
+        entity.setRefCount(0L);
         entity.setCreatedAt(now);
         entity.setUpdatedAt(now);
         entity.setLastUsedAt(now);
@@ -184,10 +205,18 @@ public class AssetService {
     // ===== read =====
 
     public AssetRepository.AssetPage list(UUID userId, String projectId, String source, String q,
-                          String tag, String sort, int page, int size) {
+                          String tag, String sort, int page, int size,
+                          boolean excludeWorking, boolean includeDeleted) {
         int safeSize = Math.min(Math.max(size <= 0 ? 48 : size, 1), 200);
         int safePage = Math.max(page <= 0 ? 1 : page, 1);
-        return repository.search(userId, projectId, source, q, tag, sort, safePage, safeSize);
+        return repository.search(userId, projectId, source, q, tag, sort, safePage, safeSize,
+                excludeWorking, includeDeleted);
+    }
+
+    /** WIN-22 兼容签名（不排除工作态、不含软删）。 */
+    public AssetRepository.AssetPage list(UUID userId, String projectId, String source, String q,
+                          String tag, String sort, int page, int size) {
+        return list(userId, projectId, source, q, tag, sort, page, size, false, false);
     }
 
     public AssetRow get(UUID userId, String id) {
@@ -233,16 +262,68 @@ public class AssetService {
 
     // ===== delete =====
 
-    /** Deletes DB row first, then the object (N-5/F-38) with one retry + warn log. */
+    /**
+     * 删除素材（WIN-39 语义：一律软删进回收站，ADR-42）；引用中的素材（ref_count&gt;0）
+     * 即使后续硬删路径也必须降级软删（A7 引用保护）。硬删由每日清理任务按保留期执行。
+     */
     public void delete(UUID userId, String id) {
         AssetRepository.AssetRow row = get(userId, id);
-        repository.delete(id);
-        if (row.storageKey() != null) {
-            deleteObjectWithRetry(row.storageKey());
+        if (row.deletedAt() != null) {
+            return; // 已在回收站，幂等
         }
-        log.info("[asset] 删除素材: user={}, asset={}", userId, id);
+        if (row.refCount() != null && row.refCount() > 0) {
+            log.info("[asset] 引用保护降级软删: user={}, asset={}, refCount={}", userId, id, row.refCount());
+        }
+        repository.softDelete(id, Instant.now());
+        log.info("[asset] 软删素材(回收站): user={}, asset={}, refCount={}", userId, id, row.refCount());
     }
 
+    /** 恢复回收站素材（ADR-42 restore）。 */
+    public void restore(UUID userId, String id) {
+        AssetRepository.AssetRow row = get(userId, id);
+        if (row.deletedAt() == null) {
+            return; // 未删除，幂等
+        }
+        repository.restore(id);
+        log.info("[asset] 恢复素材: user={}, asset={}", userId, id);
+    }
+
+    /** 回收站列表（includeDeleted=true，ADR-42）。 */
+    public AssetRepository.AssetPage listDeleted(UUID userId, String projectId, int page, int size) {
+        int safeSize = Math.min(Math.max(size <= 0 ? 48 : size, 1), 200);
+        int safePage = Math.max(page <= 0 ? 1 : page, 1);
+        return repository.search(userId, projectId, null, null, null, "newest", safePage, safeSize,
+                false, true);
+    }
+
+    /** 引用计数调整（画布/会话引用变更时调用，A7 尽力而为）。 */
+    public void adjustRefCounts(UUID userId, List<String> assetIds, int delta) {
+        repository.adjustRefCounts(userId, assetIds, delta);
+    }
+
+    /** WIN-39: 合并更新素材 extra JSONB（会话图片目录 description 等，ADR-36）。 */
+    public AssetRepository.AssetRow updateExtra(UUID userId, String id, Map<String, Object> extraPatch) {
+        AssetRepository.AssetRow row = get(userId, id);
+        Map<String, Object> merged = new LinkedHashMap<>(parseExtra(row.extra()));
+        if (extraPatch != null) {
+            merged.putAll(extraPatch);
+        }
+        AssetEntity patch = new AssetEntity();
+        patch.setId(id);
+        patch.setExtra(toJsonObject(merged));
+        patch.setUpdatedAt(Instant.now());
+        repository.update(patch);
+        return get(userId, id);
+    }
+
+    /** WIN-39: 会话图片目录 = assets WHERE source_kind='conversation' AND source_ref=<conversation_id>（ADR-36）。 */
+    public List<AssetRepository.AssetRow> listConversationImages(UUID userId, String conversationId) {
+        return repository.findBySourceRef(userId, "conversation", conversationId);
+    }
+
+    /**
+     * 批量删除（WIN-39 语义：一律软删进回收站，ADR-42；对象保留至清理任务硬删）。
+     */
     public int batchDelete(UUID userId, List<String> ids) {
         if (ids == null || ids.isEmpty()) {
             return 0;
@@ -252,14 +333,13 @@ public class AssetService {
         for (String id : bounded) {
             repository.findByIdAndOwner(id, userId).ifPresent(rows::add);
         }
-        repository.deleteByIdsAndOwner(userId, rows.stream().map(AssetRepository.AssetRow::id).toList());
-        int objectFailures = 0;
+        Instant now = Instant.now();
         for (AssetRepository.AssetRow row : rows) {
-            if (row.storageKey() != null) {
-                deleteObjectWithRetry(row.storageKey());
+            if (row.deletedAt() == null) {
+                repository.softDelete(row.id(), now);
             }
         }
-        log.info("[asset] 批量删除: user={}, count={}, objectFailures={}", userId, rows.size(), objectFailures);
+        log.info("[asset] 批量软删(回收站): user={}, count={}", userId, rows.size());
         return rows.size();
     }
 
@@ -359,6 +439,25 @@ public class AssetService {
         log.warn("[asset] 对象删除最终失败（孤儿对象，P1 兜底扫描）: {}", key);
     }
 
+    /**
+     * WIN-39 (T7 幂等修复, S2): 迁移幂等上传 —— 同 hash 素材已存在（同用户任意项目）时直接返回
+     * 已有素材，否则创建。避免「失败重试 / 会话内同图」时 409 导致引用悬挂（FR-7.2 可重试 + 引用改写）。
+     */
+    public AssetRow createImageIdempotent(UUID userId, String projectId, String name, List<String> tags,
+                                          String note, String sourceKind, String sourceLabel, String sourceRef,
+                                          String prompt, byte[] fileBytes, String mimeType,
+                                          Integer width, Integer height, Instant now, String extra) {
+        String hash = sha256(fileBytes);
+        Optional<AssetRepository.AssetRow> existing = repository.findByHash(userId, hash);
+        if (existing.isPresent()) {
+            log.info("[asset] 幂等上传命中已有素材: user={}, asset={}, hash={}",
+                    userId, existing.get().id(), hash.substring(0, Math.min(12, hash.length())));
+            return existing.get();
+        }
+        return createImage(userId, projectId, name, tags, note, sourceKind, sourceLabel, sourceRef,
+                prompt, fileBytes, mimeType, width, height, now, extra);
+    }
+
     private static String sha256(byte[] data) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
@@ -404,6 +503,30 @@ public class AssetService {
         return value == null || value.isBlank() ? null : value;
     }
 
+    /** extra JSON 校验/归一：非法输入降级为 '{}'，不阻塞上传。 */
+    private static String validExtra(String extra) {
+        if (extra == null || extra.isBlank()) {
+            return "{}";
+        }
+        try {
+            var node = new tools.jackson.databind.ObjectMapper().readTree(extra);
+            if (node != null && node.isObject()) {
+                return node.toString();
+            }
+            return "{}";
+        } catch (Exception e) {
+            return "{}";
+        }
+    }
+
+    private static String toJsonObject(Map<String, Object> map) {
+        try {
+            return new tools.jackson.databind.ObjectMapper().writeValueAsString(map);
+        } catch (Exception e) {
+            return "{}";
+        }
+    }
+
     /** Public JSON shape (storage_key deliberately omitted — internal detail, ADR-20). */
     public static Map<String, Object> toJson(AssetRepository.AssetRow row) {
         Map<String, Object> map = new LinkedHashMap<>();
@@ -424,11 +547,32 @@ public class AssetService {
         if (KIND_TEXT.equals(row.kind())) {
             map.put("content", row.prompt());   // text content surfaces as content
         }
+        map.put("extra", parseExtra(row.extra()));
+        map.put("deletedAt", row.deletedAt() == null ? null : row.deletedAt().toString());
+        map.put("refCount", row.refCount() == null ? 0L : row.refCount());
         map.put("hash", row.hash());
         map.put("createdAt", row.createdAt() == null ? null : row.createdAt().toString());
         map.put("updatedAt", row.updatedAt() == null ? null : row.updatedAt().toString());
         map.put("lastUsedAt", row.lastUsedAt() == null ? null : row.lastUsedAt().toString());
         return map;
+    }
+
+    /** extra JSONB → Map（失效时返回空 map，不阻塞读取）。 */
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> parseExtra(String extra) {
+        if (extra == null || extra.isBlank() || "{}".equals(extra)) {
+            return Map.of();
+        }
+        try {
+            var node = new tools.jackson.databind.ObjectMapper().readTree(extra);
+            if (node != null && node.isObject()) {
+                return new tools.jackson.databind.ObjectMapper()
+                        .convertValue(node, Map.class);
+            }
+            return Map.of();
+        } catch (Exception e) {
+            return Map.of();
+        }
     }
 
     private static List<String> parseTags(String jsonArray) {

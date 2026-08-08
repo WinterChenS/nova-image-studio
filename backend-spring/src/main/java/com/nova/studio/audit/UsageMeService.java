@@ -92,6 +92,7 @@ public class UsageMeService {
                                        Map<UUID, String> accounts) {
         Map<String, Object> dto = new LinkedHashMap<>();
         dto.put("id", row.id());
+        dto.put("refId", row.refId());   // WIN-40 复测修复：与 admin 用量导出（AuditQueryService）一致，供前端对账
         dto.put("modelId", row.modelId() == null ? null : row.modelId().toString());
         dto.put("modelName", name(models, row.modelId(),
                 id -> catalogRepository.findById(id).map(m -> m.name()).orElse("")));

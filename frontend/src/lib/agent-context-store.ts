@@ -1,49 +1,54 @@
-// Agent 模式自建上下文系统的 IndexedDB 持久化层
-// 数据库: nova-agent-db (v1)
-//   store: messages (keyPath 'id')        —— 对话消息，靠 createdAt 排序
-//   store: images   (keyPath 'imgId')     —— 图片登记表（仅描述 + 缩略图 + 字节引用）
-//   store: meta      (keyPath 'key')       —— 会话元信息（模型选择等）
-// 图片真实字节不在这里，存于 nova-image-db 的 blobs store（复用 image-downloader）。
+// Agent 模式上下文持久化层 —— WIN-39（WIN-40 T4）由 IndexedDB（nova-agent-db）切换为服务端 API。
+// 接口签名与旧版一致（减少 useAgentChat 改动）；会话/消息/pending/图片目录以服务端为唯一数据源（FR-1.1）。
+// 会话图片：上传字节经 /api/nova/agent/images → assets（source_kind='conversation'），
+// 前端 imgId 即 assetId（统一素材引用，ADR-36）；图片字节经鉴权 URL / 对象读取。
+// 本地 IndexedDB 读取能力保留在 backup-utils（迁移工具 T7 使用）。
 
-import { storeImageBlob, getStoredBlob, deleteStoredBlobs } from '@/lib/image-downloader';
 import type { AgentMessage, AgentImageRecord, AgentProposal } from '@/lib/agent-chat-config';
 import type { GptImageBackground, GptImageQuality, GptImageStyle } from '@/lib/model-capabilities';
+import {
+  appendMessage,
+  batchDeleteMessages,
+  createConversation,
+  getConversation,
+  listMessages,
+  patchConversation,
+  softDeleteConversation,
+  toAgentImageRecord,
+  toAgentMessage,
+  updateAgentImageDescription,
+  uploadAgentImage,
+  type ServerConversation,
+  type ServerPending,
+} from '@/lib/agent-api';
+import { deleteAsset } from '@/lib/assets-api';
 
-const DB_NAME = 'nova-agent-db';
-const DB_VERSION = 1;
-const MESSAGES_STORE = 'messages';
-const IMAGES_STORE = 'images';
-const META_STORE = 'meta';
+// ===== 当前会话（多会话：切换页面恢复，C1/ADR-38）=====
 
-function openAgentDB(): Promise<IDBDatabase | null> {
-  if (typeof indexedDB === 'undefined') return Promise.resolve(null);
+let activeConversationId: string | null = null;
 
-  return new Promise((resolve) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onerror = () => resolve(null);
-    req.onsuccess = () => resolve(req.result);
-    req.onupgradeneeded = (e) => {
-      const db = (e.target as IDBOpenDBRequest).result;
-      if (!db.objectStoreNames.contains(MESSAGES_STORE)) {
-        db.createObjectStore(MESSAGES_STORE, { keyPath: 'id' });
-      }
-      if (!db.objectStoreNames.contains(IMAGES_STORE)) {
-        db.createObjectStore(IMAGES_STORE, { keyPath: 'imgId' });
-      }
-      if (!db.objectStoreNames.contains(META_STORE)) {
-        db.createObjectStore(META_STORE, { keyPath: 'key' });
-      }
-    };
-  });
+export function setActiveConversation(id: string | null): void {
+  activeConversationId = id;
 }
 
-function getAll<T>(db: IDBDatabase, storeName: string): Promise<T[]> {
-  return new Promise((resolve) => {
-    const tx = db.transaction(storeName, 'readonly');
-    const req = tx.objectStore(storeName).getAll();
-    req.onsuccess = () => resolve((req.result as T[]) || []);
-    req.onerror = () => resolve([]);
-  });
+export function getActiveConversation(): string | null {
+  return activeConversationId;
+}
+
+/**
+ * 确保存在当前会话：无 active 时新建（进入 Agent 模式默认加载最近会话，无会话则新建）。
+ */
+export async function ensureAgentConversation(): Promise<string> {
+  if (activeConversationId) return activeConversationId;
+  const { listConversations } = await import('@/lib/agent-api');
+  const page = await listConversations({ status: 'active', limit: 1 });
+  if (page.items.length > 0) {
+    activeConversationId = page.items[0].id;
+    return activeConversationId;
+  }
+  const created = await createConversation();
+  activeConversationId = created.id;
+  return activeConversationId;
 }
 
 // ===== 加载完整会话 =====
@@ -52,122 +57,167 @@ export interface AgentSessionSnapshot {
   messages: AgentMessage[];
   images: AgentImageRecord[];
   imageModel: string | null;
+  conversationId: string | null;
+  title: string | null;
 }
 
 export async function loadAgentSession(): Promise<AgentSessionSnapshot> {
-  const db = await openAgentDB();
-  if (!db) return { messages: [], images: [], imageModel: null };
+  const conversationId = activeConversationId;
+  if (!conversationId) return { messages: [], images: [], imageModel: null, conversationId: null, title: null };
+  try {
+    const detail = await getConversation(conversationId);
+    const page = await listMessages(conversationId, { limit: 50 });   // 首屏最近 50 条（懒加载 FR-1.3）
+    const messages = page.items.map(toAgentMessage).sort((a, b) => a.createdAt - b.createdAt);
+    const images = (detail.images ?? []).map(toAgentImageRecord);
+    return {
+      messages,
+      images,
+      imageModel: detail.imageModel,
+      conversationId: detail.id,
+      title: detail.title,
+    };
+  } catch {
+    // 会话已删除/不存在 → 空态
+    return { messages: [], images: [], imageModel: null, conversationId, title: null };
+  }
+}
 
-  const [messages, images, meta] = await Promise.all([
-    getAll<AgentMessage>(db, MESSAGES_STORE),
-    getAll<AgentImageRecord>(db, IMAGES_STORE),
-    getAll<{ key: string; value: string }>(db, META_STORE),
-  ]);
-
-  messages.sort((a, b) => a.createdAt - b.createdAt);
-  images.sort((a, b) => a.createdAt - b.createdAt);
-  const imageModel = meta.find(item => item.key === 'imageModel')?.value ?? null;
-
-  return { messages, images, imageModel };
+/** 懒加载更早消息（滚动加载，before 游标）。返回是否还有更早数据。 */
+export async function loadEarlierMessages(before: string, limit = 50): Promise<{ messages: AgentMessage[]; nextBefore: string | null }> {
+  const conversationId = activeConversationId;
+  if (!conversationId) return { messages: [], nextBefore: null };
+  const page = await listMessages(conversationId, { before, limit });
+  return {
+    messages: page.items.map(toAgentMessage),
+    nextBefore: page.nextBefore,
+  };
 }
 
 // ===== 消息读写 =====
 
 export async function putMessage(message: AgentMessage): Promise<void> {
-  const db = await openAgentDB();
-  if (!db) return;
-
-  return new Promise((resolve) => {
-    const tx = db.transaction(MESSAGES_STORE, 'readwrite');
-    tx.objectStore(MESSAGES_STORE).put(message);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => resolve();
+  const conversationId = activeConversationId;
+  if (!conversationId) return;
+  await appendMessage(conversationId, {
+    role: message.role,
+    text: message.text,
+    reasoning: message.reasoning,
+    imageIds: message.imageIds,
+    taskId: message.taskId,
+    proposalData: message.proposalData,
+    webSearchUsed: message.webSearchUsed,
+    withdrawable: message.withdrawable,
   });
 }
 
-// ===== 图片登记表读写 =====
+// ===== 图片登记表读写（服务端 assets 目录，imgId=assetId）=====
 
 export async function putImageRecord(record: AgentImageRecord): Promise<void> {
-  const db = await openAgentDB();
-  if (!db) return;
+  // 登记元数据（description 等）更新到 assets.extra（ADR-36）
+  if (record.imgId && record.description) {
+    try {
+      await updateAgentImageDescription(record.imgId, record.description);
+    } catch {
+      // 描述更新失败不阻塞（尽力而为）
+    }
+  }
+}
 
-  return new Promise((resolve) => {
-    const tx = db.transaction(IMAGES_STORE, 'readwrite');
-    tx.objectStore(IMAGES_STORE).put(record);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => resolve();
+export async function getAgentImageRecord(imgId: string): Promise<AgentImageRecord | null> {
+  const conversationId = activeConversationId;
+  if (!conversationId || !imgId) return null;
+  try {
+    const detail = await getConversation(conversationId);
+    const found = (detail.images ?? []).find(img => img.assetId === imgId);
+    return found ? toAgentImageRecord(found) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 图片字节读取（经鉴权对象 URL），imgId=assetId。 */
+export async function getAgentImageBytes(imgId: string): Promise<Blob | null> {
+  if (!imgId) return null;
+  try {
+    const response = await fetch(`/api/nova/agent/images/${encodeURIComponent(imgId)}`, {
+      credentials: 'include',
+      headers: await authHeaders(),
+    });
+    if (!response.ok) return null;
+    return await response.blob();
+  } catch {
+    return null;
+  }
+}
+
+/** 图片字节 → base64（不含 data: 前缀），供生图上游引用。 */
+export async function getAgentImageBase64(imgId: string): Promise<{ data: string; mimeType: string } | null> {
+  const blob = await getAgentImageBytes(imgId);
+  if (!blob) return null;
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
   });
+  const base64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+  return { data: base64, mimeType: blob.type || 'image/png' };
+}
+
+/** 上传图片字节到 assets（返回 assetId）；调用方应将其作为 record.imgId。 */
+export async function storeAgentImageBytes(imgId: string, blob: Blob, source: AgentImageRecord['source'] = 'uploaded'): Promise<string> {
+  const conversationId = activeConversationId;
+  if (!conversationId) throw new Error('当前无会话');
+  const asset = await uploadAgentImage(conversationId, blob, source);
+  return asset.assetId ?? asset.id;
 }
 
 // ===== 元信息 =====
 
 export async function saveImageModel(model: string): Promise<void> {
-  const db = await openAgentDB();
-  if (!db) return;
-
-  return new Promise((resolve) => {
-    const tx = db.transaction(META_STORE, 'readwrite');
-    tx.objectStore(META_STORE).put({ key: 'imageModel', value: model });
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => resolve();
-  });
+  const conversationId = activeConversationId;
+  if (!conversationId) return;
+  await patchConversation(conversationId, { imageModel: model });
 }
 
-// ===== 撤回消息 =====
+// ===== 撤回 / 删除消息 =====
 
 export async function deleteMessages(ids: string[]): Promise<void> {
-  if (ids.length === 0) return;
-  const db = await openAgentDB();
-  if (!db) return;
-
-  return new Promise((resolve) => {
-    const tx = db.transaction(MESSAGES_STORE, 'readwrite');
-    const store = tx.objectStore(MESSAGES_STORE);
-    for (const id of ids) store.delete(id);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => resolve();
-  });
+  const conversationId = activeConversationId;
+  if (!conversationId || ids.length === 0) return;
+  // 优先服务端撤回语义（withdrawable），否则批量删除
+  await batchDeleteMessages(conversationId, ids);
 }
 
-/** 从 nova-agent-db 中删除图片登记记录 */
+/** 从会话目录移除图片（assets 软删，回收站可恢复，ADR-42）。 */
 export async function deleteImageRecords(imgIds: string[]): Promise<void> {
   if (imgIds.length === 0) return;
-  const db = await openAgentDB();
-  if (!db) return;
-
-  return new Promise((resolve) => {
-    const tx = db.transaction(IMAGES_STORE, 'readwrite');
-    const store = tx.objectStore(IMAGES_STORE);
-    for (const id of imgIds) store.delete(id);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => resolve();
-  });
+  await Promise.all(imgIds.map(id => deleteAsset(id).catch(() => {})));
 }
 
-/** 从 nova-image-db 中删除 agent 图片的 blob 字节 */
-export async function deleteAgentImageBytes(imgId: string): Promise<void> {
-  await deleteStoredBlobs(imgId, 1);
+/** 图片字节删除（软删后对象保留至清理任务，此处无需额外操作）。 */
+export async function deleteAgentImageBytes(_imgId: string): Promise<void> {
+  // assets 软删语义：对象由每日清理任务按保留期硬删（ADR-42）；_imgId 保留签名兼容
+  void _imgId;
 }
 
-// ===== 清空会话（清空重开） =====
+// ===== 清空会话（清空重开：软删旧会话 + 新建）=====
 
-export async function clearAgentSession(): Promise<void> {
-  const db = await openAgentDB();
-  if (!db) return;
-
-  return new Promise((resolve) => {
-    const tx = db.transaction([MESSAGES_STORE, IMAGES_STORE, META_STORE], 'readwrite');
-    tx.objectStore(MESSAGES_STORE).clear();
-    tx.objectStore(IMAGES_STORE).clear();
-    tx.objectStore(META_STORE).clear();
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => resolve();
-  });
+export async function clearAgentSession(): Promise<string | null> {
+  const conversationId = activeConversationId;
+  if (conversationId) {
+    try {
+      await softDeleteConversation(conversationId);
+    } catch {
+      // 尽力软删
+    }
+  }
+  const created = await createConversation();
+  activeConversationId = created.id;
+  return created.id;
 }
 
-// ===== Pending Proposal 持久化（刷新恢复「等待你确认」状态）=====
-// 将待确认的提案、分析文本、推理文本和 reedit 标志存入 meta store，
-// 页面刷新后自动恢复 proposal 阶段，避免丢失。
+// ===== Pending Proposal 持久化（FR-1.2 中断恢复，落 conversations.pending）=====
 
 export interface PendingProposalData {
   proposal: AgentProposal;
@@ -176,55 +226,33 @@ export interface PendingProposalData {
   isReedit: boolean;
 }
 
-const PENDING_PROPOSAL_KEY = 'pendingProposal';
-
 export async function savePendingProposal(data: PendingProposalData): Promise<void> {
-  const db = await openAgentDB();
-  if (!db) return;
-
-  return new Promise((resolve) => {
-    const tx = db.transaction(META_STORE, 'readwrite');
-    tx.objectStore(META_STORE).put({ key: PENDING_PROPOSAL_KEY, value: JSON.stringify(data) });
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => resolve();
-  });
+  const conversationId = activeConversationId;
+  if (!conversationId) return;
+  await patchConversation(conversationId, { pending: { kind: 'proposal', ...data } as unknown as ServerPending });
 }
 
 export async function loadPendingProposal(): Promise<PendingProposalData | null> {
-  const db = await openAgentDB();
-  if (!db) return null;
-
-  return new Promise((resolve) => {
-    const tx = db.transaction(META_STORE, 'readonly');
-    const req = tx.objectStore(META_STORE).get(PENDING_PROPOSAL_KEY);
-    req.onsuccess = () => {
-      const entry = req.result as { key: string; value: string } | undefined;
-      if (!entry?.value) { resolve(null); return; }
-      try {
-        resolve(JSON.parse(entry.value) as PendingProposalData);
-      } catch {
-        resolve(null);
-      }
-    };
-    req.onerror = () => resolve(null);
-  });
+  const conversationId = activeConversationId;
+  if (!conversationId) return null;
+  try {
+    const detail = await getConversation(conversationId);
+    if (!detail.pending || detail.pending.kind !== 'proposal') return null;
+    const p = detail.pending as unknown as PendingProposalData;
+    if (!p.proposal) return null;
+    return { proposal: p.proposal, pendingAnalysis: p.pendingAnalysis, pendingReasoning: p.pendingReasoning, isReedit: !!p.isReedit };
+  } catch {
+    return null;
+  }
 }
 
 export async function clearPendingProposal(): Promise<void> {
-  const db = await openAgentDB();
-  if (!db) return;
-
-  return new Promise((resolve) => {
-    const tx = db.transaction(META_STORE, 'readwrite');
-    tx.objectStore(META_STORE).delete(PENDING_PROPOSAL_KEY);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => resolve();
-  });
+  const conversationId = activeConversationId;
+  if (!conversationId) return;
+  await patchConversation(conversationId, { pending: null }).catch(() => {});
 }
 
-// ===== Pending Generation 持久化（刷新恢复「正在生图」状态）=====
-// 将 taskId、proposal、分析文本等存入 meta store，
-// 页面刷新后自动恢复轮询，避免生成中的图片丢失。
+// ===== Pending Generation 持久化（FR-1.2 中断恢复，落 conversations.pending）=====
 
 export interface PendingGenerationData {
   taskId: string;
@@ -244,142 +272,65 @@ export interface PendingGenerationData {
   startedAt: number;
 }
 
-const PENDING_GENERATION_KEY = 'pendingGeneration';
-
 export async function savePendingGeneration(data: PendingGenerationData): Promise<void> {
-  const db = await openAgentDB();
-  if (!db) return;
-
-  return new Promise((resolve) => {
-    const tx = db.transaction(META_STORE, 'readwrite');
-    tx.objectStore(META_STORE).put({ key: PENDING_GENERATION_KEY, value: JSON.stringify(data) });
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => resolve();
-  });
+  const conversationId = activeConversationId;
+  if (!conversationId) return;
+  await patchConversation(conversationId, { pending: { kind: 'generation', ...data } as unknown as ServerPending });
 }
 
 export async function loadPendingGeneration(): Promise<PendingGenerationData | null> {
-  const db = await openAgentDB();
-  if (!db) return null;
-
-  return new Promise((resolve) => {
-    const tx = db.transaction(META_STORE, 'readonly');
-    const req = tx.objectStore(META_STORE).get(PENDING_GENERATION_KEY);
-    req.onsuccess = () => {
-      const entry = req.result as { key: string; value: string } | undefined;
-      if (!entry?.value) { resolve(null); return; }
-      try {
-        resolve(JSON.parse(entry.value) as PendingGenerationData);
-      } catch {
-        resolve(null);
-      }
-    };
-    req.onerror = () => resolve(null);
-  });
+  const conversationId = activeConversationId;
+  if (!conversationId) return null;
+  try {
+    const detail = await getConversation(conversationId);
+    if (!detail.pending || detail.pending.kind !== 'generation') return null;
+    return detail.pending as unknown as PendingGenerationData;
+  } catch {
+    return null;
+  }
 }
 
 export async function clearPendingGeneration(): Promise<void> {
-  const db = await openAgentDB();
-  if (!db) return;
-
-  return new Promise((resolve) => {
-    const tx = db.transaction(META_STORE, 'readwrite');
-    tx.objectStore(META_STORE).delete(PENDING_GENERATION_KEY);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => resolve();
-  });
+  const conversationId = activeConversationId;
+  if (!conversationId) return;
+  await patchConversation(conversationId, { pending: null }).catch(() => {});
 }
 
-// ===== 图片字节存取（复用 nova-image-db 的 blobs store）=====
-// 约定：每张 agent 图片用 imgId 作为 jobId 命名空间，imageIndex 固定 0。
+// ===== 会话级工具 =====
 
-export async function storeAgentImageBytes(imgId: string, blob: Blob): Promise<void> {
-  await storeImageBlob(imgId, 0, blob);
-}
-
-/** 查询 nova-upload-cache 中缓存的图片记录 */
-interface UploadCacheRecord {
-  key: string;
-  name: string;
-  mimeType: string;
-  dataUrl: string;
-  originalSize: number;
-  processedSize: number;
-  width: number;
-  height: number;
-  createdAt: number;
-}
-
-function openUploadCacheDB(): Promise<IDBDatabase | null> {
-  if (typeof indexedDB === 'undefined') return Promise.resolve(null);
-  return new Promise((resolve) => {
-    const req = indexedDB.open('nova-upload-cache', 1);
-    req.onerror = () => resolve(null);
-    req.onsuccess = () => resolve(req.result);
-  });
-}
-
-function getFromUploadCache(db: IDBDatabase, key: string): Promise<UploadCacheRecord | null> {
-  return new Promise((resolve) => {
-    const tx = db.transaction('images', 'readonly');
-    const req = tx.objectStore('images').get(key);
-    req.onsuccess = () => resolve((req.result as UploadCacheRecord) || null);
-    req.onerror = () => resolve(null);
-  });
-}
-
-/** 从 nova-agent-db 的 images store 中查询单条图片登记记录 */
-export async function getAgentImageRecord(imgId: string): Promise<AgentImageRecord | null> {
-  const db = await openAgentDB();
-  if (!db) return null;
-  return new Promise((resolve) => {
-    const tx = db.transaction(IMAGES_STORE, 'readonly');
-    const req = tx.objectStore(IMAGES_STORE).get(imgId);
-    req.onsuccess = () => resolve((req.result as AgentImageRecord) || null);
-    req.onerror = () => resolve(null);
-  });
-}
-
-export async function getAgentImageBytes(imgId: string): Promise<Blob | null> {
-  // 1) 先查 nova-upload-cache（上传图片已压缩缓存于此，与其余模式共享）
-  const record = await getAgentImageRecord(imgId);
-  if (record?.contentHash) {
-    try {
-      const cacheDb = await openUploadCacheDB();
-      if (cacheDb) {
-        const cached = await getFromUploadCache(cacheDb, record.contentHash);
-        cacheDb.close();
-        if (cached?.dataUrl) {
-          const base64 = cached.dataUrl.includes(',') ? cached.dataUrl.split(',')[1] : cached.dataUrl;
-          if (base64) {
-            const mime = cached.mimeType || 'image/png';
-            const binary = atob(base64);
-            const bytes = new Uint8Array(binary.length);
-            for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-            return new Blob([bytes], { type: mime });
-          }
-        }
-      }
-    } catch {
-      // 读取上传缓存失败时静默降级到 nova-image-db
-    }
+/** 会话详情（含 context_summary，压缩分隔条用，ADR-44）。 */
+export async function getConversationDetail(conversationId: string): Promise<ServerConversation | null> {
+  try {
+    return await getConversation(conversationId);
+  } catch {
+    return null;
   }
-  // 2) 降级到 nova-image-db（生成图片走此路径）
-  return getStoredBlob(imgId, 0);
 }
 
-/** 把图片字节转成可直接喂给生图后端的 base64（不含 data: 前缀） */
-export async function getAgentImageBase64(imgId: string): Promise<{ data: string; mimeType: string } | null> {
-  const blob = await getAgentImageBytes(imgId);
-  if (!blob) return null;
-
-  const dataUrl = await new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ''));
-    reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(blob);
-  });
-
-  const base64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
-  return { data: base64, mimeType: blob.type || 'image/png' };
+/** 重命名会话。 */
+export async function renameConversation(conversationId: string, title: string): Promise<void> {
+  await patchConversation(conversationId, { title });
 }
+
+/** 归档会话。 */
+export async function archiveConversation(conversationId: string): Promise<void> {
+  await patchConversation(conversationId, { status: 'archived' });
+}
+
+/** 软删会话（回收站）。 */
+export async function removeConversation(conversationId: string): Promise<void> {
+  await softDeleteConversation(conversationId);
+}
+
+/** 恢复回收站会话。 */
+export async function restoreConversationFromTrash(conversationId: string): Promise<void> {
+  const { restoreConversation } = await import('@/lib/agent-api');
+  await restoreConversation(conversationId);
+}
+
+async function authHeaders(): Promise<Record<string, string>> {
+  const { getAuthHeaders } = await import('@/lib/auth');
+  return getAuthHeaders();
+}
+
+export type { ServerConversation };

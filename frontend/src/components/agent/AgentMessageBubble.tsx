@@ -18,6 +18,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { AgentGenerationResult } from '@/components/agent/AgentGenerationResult';
+import { AuthenticatedImage } from '@/components/AuthenticatedImage';
 import { HistoryImagePreview } from '@/components/workspace/results/HistoryImagePreview';
 import { ImageHoverActions } from '@/components/workspace/results/ImageHoverActions';
 import { cn, clampIndex } from '@/lib/utils';
@@ -238,7 +239,7 @@ export function AgentMessageBubble({
                   onClick={() => void openPreview(linkedImages, index)}
                   className="block h-full w-full"
                 >
-                  <img src={img.thumbnail} alt={img.imgId} className="h-full w-full object-cover" />
+                  <AuthenticatedImage src={img.thumbnail} alt={img.imgId} className="h-full w-full object-cover" placeholderClassName="h-full w-full" />
                 </button>
                 <span className="pointer-events-none absolute left-1 top-1 rounded bg-black/60 px-1 text-[9px] text-white">
                   {img.imgId}

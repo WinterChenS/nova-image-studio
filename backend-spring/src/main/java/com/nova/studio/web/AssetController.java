@@ -58,10 +58,13 @@ public class AssetController {
                                     @RequestParam(required = false) String sort,
                                     @RequestParam(defaultValue = "1") int page,
                                     @RequestParam(defaultValue = "48") int size,
+                                    @RequestParam(defaultValue = "true") boolean excludeWorking,
+                                    @RequestParam(defaultValue = "false") boolean includeDeleted,
                                     @AuthenticationPrincipal AuthUser authUser) {
         AuthSupport.requireAuth(authUser);
         AssetRepository.AssetPage pageResult = assetService.list(
-                authUser.id(), projectId, source, q, tag, sort, page, size);
+                authUser.id(), projectId, source, q, tag, sort, page, size,
+                excludeWorking, includeDeleted);
         List<Map<String, Object>> items = new ArrayList<>();
         for (AssetRepository.AssetRow row : pageResult.items()) {
             items.add(AssetService.toJson(row));
@@ -89,6 +92,7 @@ public class AssetController {
                                                                @RequestParam(required = false) String sourceLabel,
                                                                @RequestParam(required = false) String sourceRef,
                                                                @RequestParam(required = false) String prompt,
+                                                               @RequestParam(required = false) String extra,
                                                                @RequestParam(required = false) Integer width,
                                                                @RequestParam(required = false) Integer height,
                                                                @AuthenticationPrincipal AuthUser authUser) {
@@ -105,7 +109,7 @@ public class AssetController {
         Map<String, Object> created = AssetService.toJson(assetService.createImage(
                 authUser.id(), projectId, name, splitTags(tags), note,
                 sourceKind, sourceLabel, sourceRef, prompt,
-                bytes, file.getContentType(), width, height, Instant.now()));
+                bytes, file.getContentType(), width, height, Instant.now(), extra));
         return ResponseEntity.status(201).body(created);
     }
 
@@ -182,6 +186,34 @@ public class AssetController {
         AuthSupport.requireAuth(authUser);
         assetService.delete(authUser.id(), id);
         return Map.of("ok", true);
+    }
+
+    /** WIN-39 (ADR-42): 回收站恢复素材。 */
+    @PostMapping("/{id}/restore")
+    public Map<String, Object> restore(@PathVariable String id, @AuthenticationPrincipal AuthUser authUser) {
+        AuthSupport.requireAuth(authUser);
+        assetService.restore(authUser.id(), id);
+        return Map.of("ok", true);
+    }
+
+    /** WIN-39 (ADR-42): 回收站列表（含软删行）。 */
+    @GetMapping("/deleted")
+    public Map<String, Object> deleted(@RequestParam(required = false) String projectId,
+                                       @RequestParam(defaultValue = "1") int page,
+                                       @RequestParam(defaultValue = "48") int size,
+                                       @AuthenticationPrincipal AuthUser authUser) {
+        AuthSupport.requireAuth(authUser);
+        AssetRepository.AssetPage pageResult = assetService.listDeleted(authUser.id(), projectId, page, size);
+        List<Map<String, Object>> items = new ArrayList<>();
+        for (AssetRepository.AssetRow row : pageResult.items()) {
+            items.add(AssetService.toJson(row));
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("items", items);
+        body.put("total", pageResult.total());
+        body.put("page", Math.max(page, 1));
+        body.put("size", Math.min(Math.max(size <= 0 ? 48 : size, 1), 200));
+        return body;
     }
 
     @PostMapping("/batch-delete")

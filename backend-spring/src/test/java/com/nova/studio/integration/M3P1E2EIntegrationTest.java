@@ -123,6 +123,13 @@ class M3P1E2EIntegrationTest {
 
     @AfterEach
     void cleanup() {
+        // WIN-40 复测修复：先清依赖 users 的聚合/审计数据（原顺序在删用户之后执行，子查询失效导致残留）
+        jdbcTemplate.update("DELETE FROM usage_daily_agg WHERE user_id IN (SELECT id FROM users WHERE username LIKE 'm3_%')");
+        jdbcTemplate.update("DELETE FROM usage_records WHERE ref_id LIKE 'm3-%'");
+        jdbcTemplate.update("DELETE FROM audit_log WHERE target_id LIKE 'm3-%'");
+        jdbcTemplate.update("DELETE FROM ai_model_pricing WHERE model_id IN (SELECT id FROM ai_models WHERE name LIKE 'M3%')");
+        jdbcTemplate.update("DELETE FROM ai_accounts WHERE name LIKE 'M3-%'");
+        jdbcTemplate.update("DELETE FROM ai_models WHERE name LIKE 'M3%'");
         for (String username : createdUsers) {
             try {
                 jdbcTemplate.update("DELETE FROM user_roles WHERE user_id = (SELECT id FROM users WHERE username = ?)", username);
@@ -130,12 +137,6 @@ class M3P1E2EIntegrationTest {
             } catch (Exception ignored) {
             }
         }
-        jdbcTemplate.update("DELETE FROM usage_daily_agg WHERE user_id IN (SELECT id FROM users WHERE username LIKE 'm3_%')");
-        jdbcTemplate.update("DELETE FROM usage_records WHERE ref_id LIKE 'm3-%'");
-        jdbcTemplate.update("DELETE FROM audit_log WHERE target_id LIKE 'm3-%'");
-        jdbcTemplate.update("DELETE FROM ai_model_pricing WHERE model_id IN (SELECT id FROM ai_models WHERE name LIKE 'M3%')");
-        jdbcTemplate.update("DELETE FROM ai_accounts WHERE name LIKE 'M3-%'");
-        jdbcTemplate.update("DELETE FROM ai_models WHERE name LIKE 'M3%'");
         accountService.invalidateCaches();
         permissionService.invalidateAll();
     }
@@ -227,12 +228,31 @@ class M3P1E2EIntegrationTest {
                 .filter(r -> "user".equals(r.code())).findFirst().orElseThrow().id();
         UUID usagePermId = rbacRepository.listPermissions().stream()
                 .filter(p -> "usage.me".equals(p.code())).findFirst().orElseThrow().id();
+        // 自愈（WIN-40 复测修复）：直接 JDBC 恢复 user 角色 seed 权限 + 清理 audit 残留
+        // （不经 RbacService 以免写入 audit 行污染计数）
+        jdbcTemplate.update("DELETE FROM role_permissions WHERE role_id = ?::uuid", userRoleId.toString());
+        jdbcTemplate.update("""
+                INSERT INTO role_permissions (role_id, permission_id)
+                SELECT ?::uuid, id FROM permissions WHERE code IN ('workbench.view', 'usage.me')
+                """, userRoleId.toString());
+        jdbcTemplate.update("DELETE FROM audit_log WHERE target_type = 'role_permissions' AND target_id = ?",
+                userRoleId.toString());
+        permissionService.invalidateAll();
+
         rbacService.updateRolePermissions(actor, userRoleId, java.util.List.of(usagePermId));
 
         Long matrixAudits = jdbcTemplate.queryForObject("""
                 SELECT COUNT(*) FROM audit_log WHERE target_type = 'role_permissions' AND target_id = ? AND action = 'role_permissions.update'
                 """, Long.class, userRoleId.toString());
         assertThat(matrixAudits).isEqualTo(1);
+
+        // 恢复 user 角色 seed 权限（workbench.view + usage.me），避免污染其它用例/共享库
+        jdbcTemplate.update("DELETE FROM role_permissions WHERE role_id = ?::uuid", userRoleId.toString());
+        jdbcTemplate.update("""
+                INSERT INTO role_permissions (role_id, permission_id)
+                SELECT ?::uuid, id FROM permissions WHERE code IN ('workbench.view', 'usage.me')
+                """, userRoleId.toString());
+        permissionService.invalidateAll();
     }
 
     private UUID catalogSeed() {
