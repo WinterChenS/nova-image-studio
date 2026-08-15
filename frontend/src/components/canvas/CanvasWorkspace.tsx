@@ -75,6 +75,52 @@ export function CanvasWorkspace({ wideMode, onConfigureApiKey, onEnableWideMode,
     return list;
   }, [projects, sortMode]);
 
+  // WIN-42 (T16)：回收站 — 加载软删项目 / 恢复 / 清空（hooks 置于早期 return 之前）
+  const loadTrash = useCallback(async () => {
+    if (!trashOpen) return;
+    setTrashLoading(true);
+    try {
+      const all = await listCanvasProjects(true);
+      setTrashProjects(all.filter((p) => p.deletedAt));
+    } catch {
+      showToast("回收站加载失败", "error");
+    } finally {
+      setTrashLoading(false);
+    }
+  }, [trashOpen, showToast]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => void loadTrash(), 0);
+    return () => clearTimeout(timer);
+  }, [loadTrash, trashOpen]);
+
+  const handleRestoreTrash = async (id: string) => {
+    setTrashBusy(true);
+    try {
+      await restoreCanvasProject(id);
+      setTrashProjects((prev) => prev.filter((p) => p.id !== id));
+      showToast("画布已恢复", "success");
+    } catch {
+      showToast("恢复失败", "error");
+    } finally {
+      setTrashBusy(false);
+    }
+  };
+
+  const handleEmptyTrash = async () => {
+    if (!window.confirm("确定清空回收站？删除的画布将无法恢复。")) return;
+    setTrashBusy(true);
+    try {
+      const removed = await emptyCanvasTrash();
+      setTrashProjects([]);
+      showToast(`已清空 ${removed} 个画布`, "success");
+    } catch {
+      showToast("清空失败", "error");
+    } finally {
+      setTrashBusy(false);
+    }
+  };
+
   // 画布仅在宽屏模式下可用（按宽度模式判断，非检测设备），以降低适配成本。
   if (!wideMode) {
     return (
@@ -107,51 +153,6 @@ export function CanvasWorkspace({ wideMode, onConfigureApiKey, onEnableWideMode,
       showToast(`已导入 ${imported.length} 个画布`, "success");
     } catch {
       showToast("导入失败，请确认是导出的画布 zip", "error");
-    }
-  };
-
-  // WIN-42 (T16)：回收站 — 加载软删项目 / 恢复 / 清空
-  const loadTrash = useCallback(async () => {
-    if (!trashOpen) return;
-    setTrashLoading(true);
-    try {
-      const all = await listCanvasProjects(true);
-      setTrashProjects(all.filter((p) => p.deletedAt));
-    } catch {
-      showToast("回收站加载失败", "error");
-    } finally {
-      setTrashLoading(false);
-    }
-  }, [trashOpen, showToast]);
-
-  useEffect(() => {
-    void loadTrash();
-  }, [loadTrash, trashOpen]);
-
-  const handleRestoreTrash = async (id: string) => {
-    setTrashBusy(true);
-    try {
-      await restoreCanvasProject(id);
-      setTrashProjects((prev) => prev.filter((p) => p.id !== id));
-      showToast("画布已恢复", "success");
-    } catch {
-      showToast("恢复失败", "error");
-    } finally {
-      setTrashBusy(false);
-    }
-  };
-
-  const handleEmptyTrash = async () => {
-    if (!window.confirm("确定清空回收站？删除的画布将无法恢复。")) return;
-    setTrashBusy(true);
-    try {
-      const removed = await emptyCanvasTrash();
-      setTrashProjects([]);
-      showToast(`已清空 ${removed} 个画布`, "success");
-    } catch {
-      showToast("清空失败", "error");
-    } finally {
-      setTrashBusy(false);
     }
   };
 
