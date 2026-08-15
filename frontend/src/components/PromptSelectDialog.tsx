@@ -6,7 +6,8 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { fetchAllPromptSources, DEFAULT_CATEGORIES, ALL_CATEGORY, type PromptWithKey } from '@/lib/prompt-gallery-data';
+import { DEFAULT_CATEGORIES, ALL_CATEGORY, type PromptWithKey } from '@/lib/prompt-gallery-data';
+import { fetchAllPromptSources } from '@/lib/prompt-gallery-api';
 
 const PAGE_SIZE = 12;
 

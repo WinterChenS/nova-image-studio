@@ -11,10 +11,10 @@ import {
   ALL_CATEGORY,
   DEFAULT_CATEGORIES,
   PROMPT_DATA_SOURCES,
-  fetchAllPromptSources,
   getPromptSourceLabel,
   type PromptWithKey,
 } from '@/lib/prompt-gallery-data';
+import { fetchAllPromptSources } from '@/lib/prompt-gallery-api';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { seededShuffle } from '@/lib/seeded-shuffle';
 
