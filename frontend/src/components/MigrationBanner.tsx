@@ -18,6 +18,7 @@ import {
   runAgentMigration,
   runCanvasMigration,
   runGifMigration,
+  runLegacyCleanup,
   runReverseMigration,
   type MigrationFeature,
 } from '@/lib/migration';
@@ -83,6 +84,10 @@ export function MigrationBanner({ features, onMigrated }: MigrationBannerProps) 
       setMessage('历史数据已同步到云端');
       setDone(true);
       setPending([]);
+      // WIN-42 (T17, ADR-41)：迁移稳定后清理已迁移功能的本地存量（C10：仅迁移标记存在时执行）
+      void runLegacyCleanup().catch(() => {
+        // 清理失败不影响使用（云端为唯一数据源）
+      });
       setTimeout(() => setDismissed(true), 3000);
     } catch (e) {
       setError(e instanceof Error ? e.message : '迁移失败，可稍后重试（本地数据已保留）');
