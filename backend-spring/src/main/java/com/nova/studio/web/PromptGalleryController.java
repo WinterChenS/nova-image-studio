@@ -31,11 +31,10 @@ import java.util.Map;
  * <ul>
  *   <li>{@code GET /api/nova/prompt-gallery/items} — 读库列表（source/category/q/tag 过滤 + 分页，AC-9/T16 服务端搜索）；</li>
  *   <li>{@code GET /api/nova/prompt-gallery/items/{id}} — 详情；</li>
- *   <li>{@code GET /api/nova/prompt-gallery/categories} — 分类列表（分类栏）；</li>
- *   <li>{@code GET /api/nova/admin/prompt-gallery/sync/status} — 同步状态（AC-12）；</li>
- *   <li>{@code POST /api/nova/admin/prompt-gallery/sync} — 手动同步（限频，A5）。</li>
+ *   <li>{@code GET /api/nova/prompt-gallery/categories} — 分类列表（分类栏）。</li>
  * </ul>
- * 读库接口公开（广场为全局数据）；管理端点 requireAdmin + @PreAuthorize。
+ * 管理端点（手动同步 / 同步状态）在 {@link PromptGalleryAdminController}（/api/nova/admin/*，requireAdmin）。
+ * 读库接口公开（广场为全局数据）。
  */
 @RestController
 @RequestMapping("/api/nova/prompt-gallery")
@@ -44,17 +43,10 @@ public class PromptGalleryController {
     private static final Logger log = LoggerFactory.getLogger(PromptGalleryController.class);
 
     private final PromptGalleryItemRepository repository;
-    private final PromptGallerySyncService syncService;
-    private final SettingsService settingsService;
     private final ObjectMapper objectMapper;
 
-    public PromptGalleryController(PromptGalleryItemRepository repository,
-                                   PromptGallerySyncService syncService,
-                                   SettingsService settingsService,
-                                   ObjectMapper objectMapper) {
+    public PromptGalleryController(PromptGalleryItemRepository repository, ObjectMapper objectMapper) {
         this.repository = repository;
-        this.syncService = syncService;
-        this.settingsService = settingsService;
         this.objectMapper = objectMapper;
     }
 
@@ -102,43 +94,6 @@ public class PromptGalleryController {
         return Map.of("categories", list);
     }
 
-    // ===== 管理端点（requireAdmin + @PreAuthorize）=====
-
-    /** 手动同步（限频 gallery.syncManualCooldownMinutes，A5）。 */
-    @PreAuthorize("hasAuthority('PERM_admin.console.view')")
-    @PostMapping("/sync")
-    public Map<String, Object> manualSync(@AuthenticationPrincipal AuthUser authUser) {
-        AuthSupport.requireAdmin(authUser);
-        int cooldown = settingsService.getInt(authUser.id(),
-                SettingsService.KEY_GALLERY_SYNC_MANUAL_COOLDOWN_MINUTES,
-                SettingsService.DEFAULT_GALLERY_SYNC_MANUAL_COOLDOWN_MINUTES);
-        PromptGallerySyncService.SyncResult result = syncService.manualSync(cooldown);
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("status", result.status());
-        body.put("totalUpserted", result.totalUpserted());
-        body.put("sources", result.sources().stream()
-                .map(s -> Map.of("source", s.source(), "status", s.status(),
-                        "upserted", s.upserted(),
-                        "error", s.error() == null ? "" : s.error()))
-                .toList());
-        return body;
-    }
-
-    /** 同步状态（最近运行/各源结果/失败，AC-12）。 */
-    @PreAuthorize("hasAuthority('PERM_admin.console.view')")
-    @GetMapping("/sync/status")
-    public Map<String, Object> syncStatus(@AuthenticationPrincipal AuthUser authUser) {
-        AuthSupport.requireAdmin(authUser);
-        try {
-            ObjectNode node = syncService.status();
-            @SuppressWarnings("unchecked")
-            Map<String, Object> map = objectMapper.convertValue(node, Map.class);
-            return map == null ? new LinkedHashMap<>() : map;
-        } catch (Exception e) {
-            return new LinkedHashMap<>();
-        }
-    }
-
     // ===== JSON shape =====
 
     private Map<String, Object> toJson(PromptGalleryItemEntity entity) {
@@ -178,3 +133,4 @@ public class PromptGalleryController {
         }
     }
 }
+

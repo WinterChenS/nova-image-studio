@@ -106,14 +106,14 @@ export async function fetchAllPromptSources(): Promise<{ prompts: PromptWithKey[
 
 /** 手动刷新（管理端）：触发服务端同步（限频由服务端校验，A5）。 */
 export async function triggerGallerySync(): Promise<{ status: string; totalUpserted: number }> {
-  const response = await authFetch('/api/nova/prompt-gallery/sync', { method: 'POST' });
+  const response = await authFetch('/api/nova/admin/prompt-gallery/sync', { method: 'POST' });
   if (!response.ok) throw await readApiError(response);
   return (await response.json()) as { status: string; totalUpserted: number };
 }
 
 /** 同步状态查询（管理端，AC-12）。 */
 export async function fetchGallerySyncStatus(): Promise<Record<string, unknown>> {
-  const response = await authFetch('/api/nova/prompt-gallery/sync/status', { cache: 'no-store' });
+  const response = await authFetch('/api/nova/admin/prompt-gallery/sync/status', { cache: 'no-store' });
   if (!response.ok) throw await readApiError(response);
   return (await response.json()) as Record<string, unknown>;
 }
