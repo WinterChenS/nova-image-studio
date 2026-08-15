@@ -134,6 +134,14 @@ public class AgentConversationController {
         return Map.of("ok", true);
     }
 
+    /** T16：清空回收站（硬删全部 status=deleted 会话 + 级联消息/素材）。 */
+    @DeleteMapping("/conversations/trash")
+    public Map<String, Object> emptyTrash(@AuthenticationPrincipal AuthUser authUser) {
+        AuthSupport.requireAuth(authUser);
+        int removed = conversationService.emptyTrash(authUser.id());
+        return Map.of("ok", true, "removed", removed);
+    }
+
     // ===== messages =====
 
     @GetMapping("/conversations/{id}/messages")

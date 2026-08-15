@@ -33,7 +33,7 @@ public class SettingsService {
     private static final Logger log = LoggerFactory.getLogger(SettingsService.class);
 
     /** Allowed key prefixes (ARCH C.4 settings namespace). */
-    static final Set<String> ALLOWED_PREFIXES = Set.of("registry.", "workbench.", "limit.", "gallery.", "agent.");
+    static final Set<String> ALLOWED_PREFIXES = Set.of("registry.", "workbench.", "limit.", "gallery.", "agent.", "canvas.");
 
     /** Node getLimitConfig defaults — used when a user has no limit.* rows. */
     public static final int DEFAULT_MAX_QUEUE_SIZE = 200;
@@ -63,6 +63,14 @@ public class SettingsService {
     public static final String KEY_ASSET_RECYCLE_DAYS = "limit.assetRecycleDays";
     public static final String KEY_AGENT_CONTEXT_COMPRESS_THRESHOLD = "agent.contextCompressThreshold";
     public static final String KEY_AGENT_CONTEXT_KEEP_RECENT = "agent.contextKeepRecent";
+
+    /** WIN-42 (T15, ADR-40) — 提示广场配置键（gallery.*，F.4）：手动刷新限频。 */
+    public static final String KEY_GALLERY_SYNC_MANUAL_COOLDOWN_MINUTES = "gallery.syncManualCooldownMinutes";
+    public static final int DEFAULT_GALLERY_SYNC_MANUAL_COOLDOWN_MINUTES = 10;
+
+    /** WIN-42 (T16, A8) — 画布版本冲突校验开关（阶段3 打开：409 + 前端提示）。 */
+    public static final String KEY_CANVAS_VERSION_CHECK = "canvas.versionCheckEnabled";
+    public static final boolean DEFAULT_CANVAS_VERSION_CHECK = true;
 
     public static final int DEFAULT_AGENT_CONVERSATION_CAP = 100;
     public static final int DEFAULT_AGENT_MESSAGE_CAP = 500;

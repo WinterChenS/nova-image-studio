@@ -90,17 +90,29 @@ public class CanvasService {
 
     /**
      * 整文档保存（PUT，防抖提交语义）：nodes/connections/viewport/背景；
-     * version 自增（A8：阶段1 不校验传入 version，last-write-wins）。
+     * version 自增（A8：阶段3 T16 打开冲突校验开关——请求携带的 version 小于
+     * 服务端当前 version 时返回 409 VERSION_CONFLICT + 前端提示）。
      */
     public CanvasProjectRepository.CanvasRow saveDocument(UUID userId, String projectId, JsonNode body) {
         CanvasProjectRepository.CanvasRow row = getOwned(userId, projectId);
         if (body == null || !body.isObject()) {
             throw new IllegalArgumentException("请求体不能为空");
         }
+        long currentVersion = row.version() == null ? 1L : row.version();
+        if (settingsService.getBoolean(userId, SettingsService.KEY_CANVAS_VERSION_CHECK,
+                SettingsService.DEFAULT_CANVAS_VERSION_CHECK)
+                && body.hasNonNull("version")) {
+            long clientVersion = body.get("version").asLong();
+            if (clientVersion < currentVersion) {
+                throw new HttpErrorException(409, "VERSION_CONFLICT",
+                        "画布已在其他设备被修改（服务端版本 " + currentVersion
+                                + " > 当前 " + clientVersion + "），请刷新后重试");
+            }
+        }
         CanvasProjectEntity patch = new CanvasProjectEntity();
         patch.setId(projectId);
         patch.setUpdatedAt(Instant.now());
-        patch.setVersion(row.version() == null ? 1L : row.version() + 1);
+        patch.setVersion(currentVersion + 1);
         if (body.has("nodes")) {
             patch.setNodes(validateJson(body.get("nodes"), "nodes"));
         }
@@ -172,6 +184,32 @@ public class CanvasService {
             repository.restore(projectId);
         }
         log.info("[canvas] 恢复项目: user={}, project={}", userId, projectId);
+    }
+
+    /**
+     * 清空回收站（T16「回收站可清空」）：硬删全部软删项目 +
+     * 节点引用素材 ref_count -1（尽力而为，A7）。返回清空条数。
+     */
+    public int emptyTrash(UUID userId) {
+        List<CanvasProjectRepository.CanvasRow> deleted = repository.listDeleted(userId);
+        int removed = 0;
+        for (CanvasProjectRepository.CanvasRow project : deleted) {
+            try {
+                List<String> assetIds = extractNodeAssetIds(project.nodes());
+                if (!assetIds.isEmpty()) {
+                    assetService.adjustRefCounts(userId, assetIds, -1);
+                }
+                repository.delete(project.id(), userId);
+                removed++;
+            } catch (Exception e) {
+                log.warn("[canvas] 清空回收站失败（尽力而为，单条跳过）: project={}: {}",
+                        project.id(), e.getMessage());
+            }
+        }
+        if (removed > 0) {
+            log.info("[canvas] 清空回收站: user={}, removed={}", userId, removed);
+        }
+        return removed;
     }
 
     // ===== 画布图片（assets source_kind='canvas'，ADR-35 素材引用化）=====

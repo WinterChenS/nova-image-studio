@@ -142,6 +142,20 @@ public class ConversationRepository {
                 .stream().map(ConversationRepository::toRow).toList();
     }
 
+    /** 回收站全部软删会话（T16「清空回收站」）。 */
+    public List<ConversationRow> listDeleted(UUID userId) {
+        return mapper.selectList(new LambdaQueryWrapper<ConversationEntity>()
+                        .eq(ConversationEntity::getUserId, userId.toString())
+                        .eq(ConversationEntity::getStatus, "deleted"))
+                .stream().map(ConversationRepository::toRow).toList();
+    }
+
+    public int delete(String id, UUID userId) {
+        return mapper.delete(new LambdaQueryWrapper<ConversationEntity>()
+                .eq(ConversationEntity::getId, id)
+                .eq(ConversationEntity::getUserId, userId.toString()));
+    }
+
     private static ConversationRow toRow(ConversationEntity e) {
         return new ConversationRow(e.getId(), e.getUserId(), e.getTitle(), e.getStatus(),
                 e.getImageModel(), e.getWebSearch(), e.getPending(), e.getContextSummary(),

@@ -85,6 +85,20 @@ public class CanvasProjectRepository {
                 .set(CanvasProjectEntity::getUpdatedAt, Instant.now()));
     }
 
+    /** 回收站全部软删项目（T16「清空回收站」）。 */
+    public List<CanvasRow> listDeleted(UUID userId) {
+        return mapper.selectList(new LambdaQueryWrapper<CanvasProjectEntity>()
+                        .eq(CanvasProjectEntity::getUserId, userId.toString())
+                        .isNotNull(CanvasProjectEntity::getDeletedAt))
+                .stream().map(CanvasProjectRepository::toRow).toList();
+    }
+
+    public int delete(String id, UUID userId) {
+        return mapper.delete(new LambdaQueryWrapper<CanvasProjectEntity>()
+                .eq(CanvasProjectEntity::getId, id)
+                .eq(CanvasProjectEntity::getUserId, userId.toString()));
+    }
+
     private static CanvasRow toRow(CanvasProjectEntity e) {
         return new CanvasRow(e.getId(), e.getUserId(), e.getTitle(), e.getNodes(), e.getConnections(),
                 e.getBackgroundMode(), e.getShowImageInfo(), e.getViewport(), e.getVersion(),
