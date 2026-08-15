@@ -11,6 +11,7 @@ import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import {
   createConversation,
+  emptyConversationTrash,
   listConversations,
   patchConversation,
   restoreConversation,
@@ -131,6 +132,20 @@ export function ConversationListPanel({
     }
   }, [load]);
 
+  // WIN-42 (T16)：清空回收站（硬删全部 deleted 会话）
+  const handleEmptyTrash = useCallback(async () => {
+    if (!window.confirm('确定清空回收站？删除的会话将无法恢复。')) return;
+    setBusyId('__empty_trash__');
+    try {
+      const removed = await emptyConversationTrash();
+      setTrash([]);
+      await load();
+      window.dispatchEvent(new CustomEvent('agent-trash-cleared', { detail: { removed } }));
+    } finally {
+      setBusyId(null);
+    }
+  }, [load]);
+
   const activeCount = conversations.filter(c => c.status === 'active').length;
 
   return (
@@ -231,7 +246,18 @@ export function ConversationListPanel({
 
           {trash.length > 0 && (
             <>
-              <p className="px-2 pt-2 text-[10px] uppercase tracking-wide text-muted-foreground">回收站</p>
+              <div className="flex items-center justify-between px-2 pt-2">
+                <p className="text-[10px] uppercase tracking-wide text-muted-foreground">回收站</p>
+                <button
+                  type="button"
+                  className="rounded p-0.5 text-muted-foreground hover:text-destructive"
+                  title="清空回收站（不可恢复）"
+                  disabled={busyId === '__empty_trash__'}
+                  onClick={() => void handleEmptyTrash()}
+                >
+                  <Trash2 className={cn('h-3 w-3', busyId === '__empty_trash__' && 'animate-pulse')} />
+                </button>
+              </div>
               {trash.map(conv => (
                 <div key={conv.id} className="group flex items-center gap-1 rounded-md px-2 py-1.5 text-sm hover:bg-muted/60">
                   <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground line-through">{conv.title}</span>

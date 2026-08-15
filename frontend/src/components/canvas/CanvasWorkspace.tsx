@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Download, FolderOpen, Frame, Layers, PanelLeftOpen, Plus, Trash2, Upload } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Download, FolderOpen, Frame, Layers, PanelLeftOpen, Plus, RotateCcw, Trash2, Trash, Upload } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -13,6 +13,7 @@ import { CanvasEditor } from "./CanvasEditor";
 import { CanvasThumbnail } from "./components/canvas-thumbnail";
 import { useCanvasStore } from "./stores/use-canvas-store";
 import { exportCanvasProjects, importCanvasProjectsFromZip } from "./utils/canvas-export";
+import { emptyCanvasTrash, listCanvasProjects, restoreCanvasProject, type ServerCanvasProject } from "@/lib/canvas-api";
 
 type CanvasWorkspaceProps = {
   wideMode?: boolean;
@@ -45,11 +46,26 @@ export function CanvasWorkspace({ wideMode, onConfigureApiKey, onEnableWideMode,
   const [sortMode, setSortMode] = useState<SortMode>("updated");
   const [mounted, setMounted] = useState(false);
   const importInputRef = useRef<HTMLInputElement>(null);
+  // WIN-42 (T16)：画布回收站（软删项目列表 + 恢复 + 清空）
+  const [trashOpen, setTrashOpen] = useState(false);
+  const [trashProjects, setTrashProjects] = useState<ServerCanvasProject[]>([]);
+  const [trashLoading, setTrashLoading] = useState(false);
+  const [trashBusy, setTrashBusy] = useState(false);
 
   useEffect(() => {
     const id = requestAnimationFrame(() => setMounted(true));
     return () => cancelAnimationFrame(id);
   }, []);
+
+  // WIN-42 (T16, A8)：画布版本冲突 → 前端提示（保存已被服务端 409 拦截，本地已刷新为最新版）
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<{ message?: string }>).detail;
+      showToast(detail?.message || '画布已在其他设备被修改，已刷新为服务端最新版本。', 'error');
+    };
+    window.addEventListener('canvas-version-conflict', handler);
+    return () => window.removeEventListener('canvas-version-conflict', handler);
+  }, [showToast]);
 
   const sortedProjects = useMemo(() => {
     const list = [...projects];
@@ -94,6 +110,51 @@ export function CanvasWorkspace({ wideMode, onConfigureApiKey, onEnableWideMode,
     }
   };
 
+  // WIN-42 (T16)：回收站 — 加载软删项目 / 恢复 / 清空
+  const loadTrash = useCallback(async () => {
+    if (!trashOpen) return;
+    setTrashLoading(true);
+    try {
+      const all = await listCanvasProjects(true);
+      setTrashProjects(all.filter((p) => p.deletedAt));
+    } catch {
+      showToast("回收站加载失败", "error");
+    } finally {
+      setTrashLoading(false);
+    }
+  }, [trashOpen, showToast]);
+
+  useEffect(() => {
+    void loadTrash();
+  }, [loadTrash, trashOpen]);
+
+  const handleRestoreTrash = async (id: string) => {
+    setTrashBusy(true);
+    try {
+      await restoreCanvasProject(id);
+      setTrashProjects((prev) => prev.filter((p) => p.id !== id));
+      showToast("画布已恢复", "success");
+    } catch {
+      showToast("恢复失败", "error");
+    } finally {
+      setTrashBusy(false);
+    }
+  };
+
+  const handleEmptyTrash = async () => {
+    if (!window.confirm("确定清空回收站？删除的画布将无法恢复。")) return;
+    setTrashBusy(true);
+    try {
+      const removed = await emptyCanvasTrash();
+      setTrashProjects([]);
+      showToast(`已清空 ${removed} 个画布`, "success");
+    } catch {
+      showToast("清空失败", "error");
+    } finally {
+      setTrashBusy(false);
+    }
+  };
+
   return (
     <div className="space-y-4">
       {/* WIN-39（T7）：本地画布存量迁移入口 */}
@@ -111,6 +172,10 @@ export function CanvasWorkspace({ wideMode, onConfigureApiKey, onEnableWideMode,
           <Button variant="outline" size="sm" onClick={() => importInputRef.current?.click()}>
             <Upload className="size-4" />
             导入
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => setTrashOpen(true)} title="回收站（软删项目）">
+            <Trash className="size-4" />
+            回收站
           </Button>
           <Button size="sm" onClick={() => setActiveProjectId(createProject())}>
             <Plus className="size-4" />
@@ -194,6 +259,46 @@ export function CanvasWorkspace({ wideMode, onConfigureApiKey, onEnableWideMode,
               删除
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* WIN-42 (T16)：回收站 — 恢复 / 清空 */}
+      <Dialog open={trashOpen} onOpenChange={(open) => !open && setTrashOpen(false)}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Trash2 className="size-4" />
+              回收站
+              {trashProjects.length > 0 && (
+                <span className="text-xs font-normal text-muted-foreground">（{trashProjects.length}）</span>
+              )}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="max-h-72 space-y-2 overflow-y-auto">
+            {trashLoading ? (
+              <p className="py-8 text-center text-sm text-muted-foreground">加载中…</p>
+            ) : trashProjects.length === 0 ? (
+              <p className="py-8 text-center text-sm text-muted-foreground">回收站为空</p>
+            ) : (
+              trashProjects.map((project) => (
+                <div key={project.id} className="flex items-center gap-2 rounded-lg border border-border p-2">
+                  <span className="min-w-0 flex-1 truncate text-sm text-muted-foreground line-through">{project.title}</span>
+                  <Button variant="outline" size="sm" disabled={trashBusy} onClick={() => void handleRestoreTrash(project.id)}>
+                    <RotateCcw className="size-3.5" />
+                    恢复
+                  </Button>
+                </div>
+              ))
+            )}
+          </div>
+          {trashProjects.length > 0 && (
+            <DialogFooter>
+              <Button variant="destructive" size="sm" disabled={trashBusy} onClick={() => void handleEmptyTrash()}>
+                <Trash2 className="size-3.5" />
+                清空回收站
+              </Button>
+            </DialogFooter>
+          )}
         </DialogContent>
       </Dialog>
     </div>
