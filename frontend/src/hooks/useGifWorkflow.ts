@@ -78,6 +78,17 @@ function buildImageReferences(template: { data: string; mimeType: string }, refs
   return result;
 }
 
+/** 拉取图片字节（GIF 网格上传云端用；与 fetchImageAsBlob 同语义，跟随应用代理）。 */
+async function fetchBlob(url: string): Promise<Blob | null> {
+  try {
+    const response = await fetch(url);
+    if (!response.ok) return null;
+    return await response.blob();
+  } catch {
+    return null;
+  }
+}
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -94,11 +105,34 @@ export function useGifWorkflow(): UseGifWorkflowResult {
   const subscriptionRef = useRef<(() => void) | null>(null);
   const resolvedBlobUrlsRef = useRef<string[]>([]);
 
+  /**
+   * WIN-41（T13）：GIF job 状态同步到云端（histories type=gif 状态机，AC-4）。
+   * 仅在已有 serverJobId 时 PATCH（状态变迁服务端校验非法迁移 → 409）。
+   */
+  const syncJobToServer = useCallback((job: ActiveGifJob | null) => {
+    if (!job?.serverJobId) return;
+    void (async () => {
+      try {
+        const { patchGifJob } = await import('@/lib/histories-api');
+        await patchGifJob(job.serverJobId!, {
+          status: job.status,
+          ...(job.serverTaskId ? { taskId: job.serverTaskId } : {}),
+          ...(job.gridImageAssetId ? { gridImageAssetId: job.gridImageAssetId } : {}),
+          ...(job.error ? { error: job.error } : {}),
+        });
+      } catch {
+        // 云端同步失败不阻塞本地流程（下轮状态变迁重试）
+      }
+    })();
+  }, []);
+
   const persistJob = useCallback((next: ActiveGifJob | null) => {
     jobRef.current = next;
     setJobState(next);
     saveActiveGifJob(next);
-  }, []);
+    // WIN-41（T13）：云端状态机同步（fire-and-forget，失败不阻塞本地流程）
+    syncJobToServer(next);
+  }, [syncJobToServer]);
 
   const updateJob = useCallback((updater: (prev: ActiveGifJob) => ActiveGifJob) => {
     const current = jobRef.current;
@@ -166,10 +200,33 @@ export function useGifWorkflow(): UseGifWorkflowResult {
       }
     }
 
+    // WIN-41（T13）：网格图上传 assets（source_kind=gif）→ 云端 job 关联 gridImageAssetId
+    let gridAssetId = target.gridImageAssetId;
+    if (target.serverJobId && first.startsWith('URL:')) {
+      try {
+        const blob = await fetchBlob(first.slice(4));
+        if (blob) {
+          const { createImageAsset } = await import('@/lib/assets-api');
+          const asset = await createImageAsset({
+            file: blob,
+            projectId: '',
+            name: 'GIF 网格图',
+            sourceKind: 'gif',
+            sourceLabel: 'GIF 网格图',
+            sourceRef: target.serverJobId,
+          });
+          gridAssetId = asset.id;
+        }
+      } catch {
+        // 网格上传失败不阻塞本地流程（历史列表仍可见状态）
+      }
+    }
+
     const completed: ActiveGifJob = {
       ...target,
       status: 'review_grid',
       gridImageRef: nextRef,
+      gridImageAssetId: gridAssetId ?? undefined,
       error: undefined,
       updatedAt: nowIso(),
     };
@@ -253,6 +310,33 @@ export function useGifWorkflow(): UseGifWorkflowResult {
         .catch(() => subscribeServerTask(initial.serverTaskId!));
     }
 
+    // WIN-41（T13）：按云端状态恢复（刷新/换端按服务端状态机，AC-4）
+    if (initial.serverJobId) {
+      void (async () => {
+        try {
+          const { getGifJob } = await import('@/lib/histories-api');
+          const serverRow = await getGifJob(initial.serverJobId!);
+          const current = jobRef.current;
+          if (!current || current.serverJobId !== initial.serverJobId) return;
+          if (serverRow.status === 'done' || serverRow.status === 'failed') {
+            persistJob({
+              ...current,
+              status: serverRow.status,
+              error: serverRow.error ?? current.error,
+              updatedAt: nowIso(),
+            });
+          } else if (serverRow.status === 'review_grid' && current.status === 'generating_grid') {
+            // 网格已生成但本地尚未拿到（换端/异常刷新）→ 以服务端状态为准
+            persistJob({ ...current, status: 'review_grid', updatedAt: nowIso() });
+          } else if (serverRow.status === 'generating_gif' && current.status === 'review_grid') {
+            persistJob({ ...current, status: 'generating_gif', updatedAt: nowIso() });
+          }
+        } catch {
+          // 云端不可用忽略（保留本地状态）
+        }
+      })();
+    }
+
       setIsApiKeyMissing(false);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -325,6 +409,27 @@ export function useGifWorkflow(): UseGifWorkflowResult {
     void cleanupJobAssets(previousJob);
 
     try {
+      // WIN-41（T13）：创建云端 GIF job（histories type=gif 状态机 + 历史列表）
+      let serverJobId: string | undefined;
+      try {
+        const { createGifJob } = await import('@/lib/histories-api');
+        const serverRow = await createGifJob({
+          prompt: input.prompt,
+          model: input.model,
+          loop: input.loop,
+          closedLoop: input.closedLoop,
+          frameDelayMs: input.frameDelayMs,
+          loopCount: input.loopCount,
+          framePadding: input.framePadding,
+          gptImageQuality: advancedParams.quality,
+          gptImageStyle: advancedParams.style,
+          gptImageBackground: advancedParams.background,
+        });
+        serverJobId = serverRow.id;
+      } catch {
+        // 云端 job 创建失败不阻塞本地 GIF 流程（降级为本地模式）
+      }
+
       const serverTaskId = await createNovaTask({
         mode: 'image-to-image',
         prompt: finalPrompt,
@@ -340,7 +445,12 @@ export function useGifWorkflow(): UseGifWorkflowResult {
         images: buildImageReferences(template, refsForSubmit),
       });
 
-      const withTaskId: ActiveGifJob = { ...next, serverTaskId, updatedAt: nowIso() };
+      const withTaskId: ActiveGifJob = {
+        ...next,
+        serverJobId,
+        serverTaskId,
+        updatedAt: nowIso(),
+      };
       persistJob(withTaskId);
       subscribeServerTask(serverTaskId);
     } catch (error) {
@@ -390,6 +500,17 @@ export function useGifWorkflow(): UseGifWorkflowResult {
       setGifBlob(blob);
       triggerGifDownload(blob, `gif-${current.id}.gif`);
       updateJob(prev => ({ ...prev, status: 'done', updatedAt: nowIso() }));
+      // WIN-41（T13）：成品上传云端（assets source_kind=gif，历史结果可跨端取回，AC-4）
+      if (current.serverJobId) {
+        void (async () => {
+          try {
+            const { uploadGifResult } = await import('@/lib/histories-api');
+            await uploadGifResult(current.serverJobId!, blob);
+          } catch {
+            // 成品上传失败不阻塞本地（历史列表仍可见 done 状态）
+          }
+        })();
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       updateJob(prev => ({ ...prev, status: 'failed', error: message, updatedAt: nowIso() }));
@@ -418,6 +539,17 @@ export function useGifWorkflow(): UseGifWorkflowResult {
       setGifBlob(blob);
       triggerGifDownload(blob, `gif-${current.id}.gif`);
       updateJob(prev => ({ ...prev, status: 'done', updatedAt: nowIso() }));
+      // WIN-41（T13）：成品上传云端
+      if (current.serverJobId) {
+        void (async () => {
+          try {
+            const { uploadGifResult } = await import('@/lib/histories-api');
+            await uploadGifResult(current.serverJobId!, blob);
+          } catch {
+            // 成品上传失败不阻塞本地
+          }
+        })();
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       updateJob(prev => ({ ...prev, status: 'failed', error: message, updatedAt: nowIso() }));

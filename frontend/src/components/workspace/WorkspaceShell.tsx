@@ -23,6 +23,8 @@ import { ProjectSwitcher } from '@/components/workspace/ProjectSwitcher';
 import { WorkspaceHeader, type WorkspaceHeaderRef } from '@/components/workspace/WorkspaceHeader';
 import { WorkspaceModeTabs } from '@/components/workspace/WorkspaceModeTabs';
 import { HistoryJobList, type GenerationHistoryFilter, type HistoryClearScope } from '@/components/workspace/results/HistoryJobList';
+import { HistoryListPanel } from '@/components/workspace/results/HistoryListPanel';
+import { MigrationBanner } from '@/components/MigrationBanner';
 import { PromptGalleryAccessDialog, usePromptGalleryAccess } from '@/components/workspace/PromptGalleryAccess';
 import { usePromptGalleryConfig } from '@/hooks/usePromptGalleryConfig';
 import { ConfirmDialog } from '@/components/workspace/dialogs/ConfirmDialog';
@@ -422,14 +424,20 @@ export function WorkspaceShell() {
               </TabsContent>
 
               <TabsContent value="reverse-prompt" keepMounted className={cn(wideMode ? 'space-y-6 xl:min-h-0 xl:flex xl:flex-col' : 'space-y-6')}>
+                {/* WIN-41（T14）：反推存量迁移入口 */}
+                <MigrationBanner features={['reverse']} />
                 <ReversePromptForm
                   wideMode={wideMode}
                   disabled={!workspace.hasApiKey}
                   onConfigureApiKey={() => setSettingsOpen(true)}
                 />
+                {/* WIN-41（T12，C5）：反推历史列表（云端双槽 + 可查看/删除） */}
+                <HistoryListPanel type="reverse" className="rounded-xl border border-border bg-card/50 p-3" />
               </TabsContent>
 
               <TabsContent value="gif" keepMounted className={cn(wideMode ? 'space-y-6 xl:min-h-0 xl:flex xl:flex-col' : 'space-y-6')}>
+                {/* WIN-41（T14）：GIF 存量迁移入口 */}
+                <MigrationBanner features={['gif']} />
                 <GifGenerationWorkspace
                   wideMode={wideMode}
                   hasApiKey={workspace.hasApiKey}
@@ -437,6 +445,8 @@ export function WorkspaceShell() {
                   onError={message => showToast(message, 'error')}
                   showToast={showToast}
                 />
+                {/* WIN-41（T13，C6）：GIF 历史结果列表（状态/成品预览 + 删除） */}
+                <HistoryListPanel type="gif" className="rounded-xl border border-border bg-card/50 p-3" />
               </TabsContent>
 
               {promptGallery.showPromptGallery && (

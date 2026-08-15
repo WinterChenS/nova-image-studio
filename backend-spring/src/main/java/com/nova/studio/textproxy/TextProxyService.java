@@ -126,9 +126,17 @@ public class TextProxyService {
      * the upstream status (Node {@code sendJson(res, status, ...)}).
      */
     public ProxyExchange exchange(Target target, JsonNode forwardedBody) {
+        return exchange(target, forwardedBody, Duration.ofMillis(requestTimeoutMs));
+    }
+
+    /**
+     * Exchange with an explicit per-attempt timeout (WIN-41 T10: Agent 流式
+     * 单次尝试 45s 超时，镜像前端 AGENT_CHAT_ATTEMPT_TIMEOUT_MS）。
+     */
+    public ProxyExchange exchange(Target target, JsonNode forwardedBody, Duration timeout) {
         try {
             HttpRequest request = HttpRequest.newBuilder(URI.create(target.url()))
-                    .timeout(Duration.ofMillis(requestTimeoutMs))
+                    .timeout(timeout)
                     .headers(headersToArray(target.headers()))
                     .POST(HttpRequest.BodyPublishers.ofString(toJson(forwardedBody), StandardCharsets.UTF_8))
                     .build();

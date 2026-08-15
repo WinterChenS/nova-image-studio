@@ -29,6 +29,18 @@ public class UsageCollector {
                              boolean retried, boolean failed, Long inputTokens, Long outputTokens, long durationMs) {
     }
 
+    /** Agent 文本请求结果（WIN-41 T9：ref_type='agent'，ref_id=messageId，AC-7）。 */
+    public record AgentUsage(String refId, UUID userId, UUID modelId, UUID accountId, String protocol,
+                             boolean retried, boolean failed, Long inputTokens, Long outputTokens, long durationMs) {
+    }
+
+    public void recordAgentUsage(AgentUsage u) {
+        String status = u.failed() ? "failed" : (u.retried() ? "retried" : "success");
+        usageRecordService.record(new UsageRecordService.UsageRecord(
+                u.userId(), u.accountId(), u.modelId(), u.protocol(), "text", "agent", u.refId(),
+                status, u.inputTokens(), u.outputTokens(), null, "CNY", u.durationMs()));
+    }
+
     public void recordTaskUsage(TaskUsage t) {
         String status = t.failed() ? "failed" : (t.retried() ? "retried" : "success");
         usageRecordService.record(new UsageRecordService.UsageRecord(
