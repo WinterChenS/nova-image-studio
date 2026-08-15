@@ -54,6 +54,13 @@ export function MigrationBanner({ features, onMigrated }: MigrationBannerProps) 
         if (has) found.push(feature);
       }
       setPending(found);
+      // WIN-42 (T17, C10)：若已有功能迁移标记（此前已迁移过），本次启动即清理本地存量
+      const migratedAny = features.some(isFeatureMigrated);
+      if (migratedAny) {
+        void runLegacyCleanup().catch(() => {
+          // 清理失败不影响使用（云端为唯一数据源）
+        });
+      }
     };
     void run();
   }, [features]);
