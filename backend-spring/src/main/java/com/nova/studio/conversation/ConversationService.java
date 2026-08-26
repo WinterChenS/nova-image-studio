@@ -209,6 +209,39 @@ public class ConversationService {
         log.info("[conversation] 恢复会话: user={}, conversation={}", userId, conversationId);
     }
 
+    /**
+     * 清空回收站（T16「回收站可清空」）：硬删全部 status=deleted 会话 +
+     * 级联删消息 + 引用素材 ref_count -1（尽力而为）。返回清空条数。
+     */
+    public int emptyTrash(UUID userId) {
+        List<ConversationRepository.ConversationRow> deleted = repository.listDeleted(userId);
+        int removed = 0;
+        for (ConversationRepository.ConversationRow conv : deleted) {
+            try {
+                // 级联：先收集消息引用素材，再删消息，再删会话
+                List<ConversationMessageRepository.MessageRow> messages =
+                        messageRepository.listByConversation(conv.id(), userId.toString(), null, 200).items();
+                List<String> assetIds = new ArrayList<>();
+                for (ConversationMessageRepository.MessageRow msg : messages) {
+                    assetIds.addAll(parseJsonArray(msg.imageIds()));
+                }
+                if (!assetIds.isEmpty()) {
+                    assetService.adjustRefCounts(userId, assetIds.stream().distinct().toList(), -1);
+                }
+                messageRepository.deleteByConversation(conv.id(), userId);
+                repository.delete(conv.id(), userId);
+                removed++;
+            } catch (Exception e) {
+                log.warn("[conversation] 清空回收站失败（尽力而为，单条跳过）: conversation={}: {}",
+                        conv.id(), e.getMessage());
+            }
+        }
+        if (removed > 0) {
+            log.info("[conversation] 清空回收站: user={}, removed={}", userId, removed);
+        }
+        return removed;
+    }
+
     // ===== messages =====
 
     /**

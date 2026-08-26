@@ -6,9 +6,17 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { fetchAllPromptSources, DEFAULT_CATEGORIES, ALL_CATEGORY, type PromptWithKey } from '@/lib/prompt-gallery-data';
+import { DEFAULT_CATEGORIES, ALL_CATEGORY, type PromptWithKey } from '@/lib/prompt-gallery-data';
+// WIN-42 复审修复②：服务端 ILIKE 搜索接线（不再全量拉取 + 客户端过滤）
+import { searchPromptGallery, toPromptWithKey } from '@/lib/prompt-gallery-api';
 
 const PAGE_SIZE = 12;
+/** 搜索输入防抖（ms） */
+const SEARCH_DEBOUNCE_MS = 300;
+
+function hasChinese(text: string): boolean {
+  return /[\u4e00-\u9fa5]/.test(text);
+}
 
 interface PromptSelectDialogProps {
   open: boolean;
@@ -21,80 +29,87 @@ export const PromptSelectDialog = memo(function PromptSelectDialog({
   onOpenChange,
   onSelect,
 }: PromptSelectDialogProps) {
-  const [allPrompts, setAllPrompts] = useState<PromptWithKey[]>([]);
+  const [items, setItems] = useState<PromptWithKey[]>([]);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedQuery, setDebouncedQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState(ALL_CATEGORY);
   const [categories, setCategories] = useState<string[]>(DEFAULT_CATEGORIES);
-  const [displayCount, setDisplayCount] = useState(PAGE_SIZE);
   const loadMoreRef = useRef<HTMLDivElement>(null);
+  const pageRef = useRef(1);
+  const requestIdRef = useRef(0);
 
-  useEffect(() => {
-    if (!open) return;
-
-    setLoading(true);
-    fetchAllPromptSources()
-      .then(result => {
-        setCategories(result.categories);
-        setAllPrompts(result.prompts);
-        setLoading(false);
-      })
-      .catch(() => {
-        setLoading(false);
-      });
-  }, [open]);
-
+  // 打开时重置并拉取第一页；关闭时清空条件
   useEffect(() => {
     if (!open) {
       setSearchQuery('');
+      setDebouncedQuery('');
       setSelectedCategory(ALL_CATEGORY);
-      setDisplayCount(PAGE_SIZE);
+      setItems([]);
+      setTotal(0);
+      pageRef.current = 1;
     }
   }, [open]);
 
-  const filteredPrompts = useMemo(() => {
-    let prompts = allPrompts;
+  useEffect(() => {
+    if (!open) return;
+    const timer = setTimeout(() => setDebouncedQuery(searchQuery.trim()), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [open, searchQuery]);
 
-    const hasChinese = (text: string) => /[\u4e00-\u9fa5]/.test(text);
-    prompts = prompts.filter(p => hasChinese(p.title) || hasChinese(p.content));
-
-    if (selectedCategory !== ALL_CATEGORY) {
-      prompts = prompts.filter(p => p.category === selectedCategory);
+  const loadPage = useCallback(async (page: number, replace: boolean) => {
+    const requestId = ++requestIdRef.current;
+    setLoading(true);
+    try {
+      const result = await searchPromptGallery({
+        category: selectedCategory === ALL_CATEGORY ? undefined : selectedCategory,
+        q: debouncedQuery || undefined,
+        page,
+        limit: PAGE_SIZE,
+      });
+      if (requestId !== requestIdRef.current) return;
+      pageRef.current = page;
+      setTotal(result.total);
+      if (Array.isArray(result.categories) && result.categories.length > 0) {
+        setCategories([ALL_CATEGORY, ...result.categories.filter((c) => c !== ALL_CATEGORY)]);
+      }
+      setItems((prev) => {
+        const mapped = result.items.map(toPromptWithKey);
+        return replace ? mapped : [...prev, ...mapped];
+      });
+    } catch {
+      // 服务端不可用 → 保留现有列表
+    } finally {
+      if (requestId === requestIdRef.current) setLoading(false);
     }
-
-    if (searchQuery) {
-      const query = searchQuery.toLowerCase();
-      prompts = prompts.filter(p =>
-        p.title.toLowerCase().includes(query) ||
-        p.content.toLowerCase().includes(query)
-      );
-    }
-
-    return prompts;
-  }, [allPrompts, searchQuery, selectedCategory]);
-
-  const displayedPrompts = useMemo(() => {
-    return filteredPrompts.slice(0, displayCount);
-  }, [filteredPrompts, displayCount]);
-
-  const hasMore = displayCount < filteredPrompts.length;
+  }, [selectedCategory, debouncedQuery]);
 
   useEffect(() => {
-    if (!loadMoreRef.current || !open) return;
+    if (!open) return;
+    void loadPage(1, true);
+  }, [open, loadPage]);
 
+  const filteredPrompts = useMemo(() => (
+    // 仅中文内容过滤保留在展示层（沿用既有行为）
+    items.filter((p) => hasChinese(p.title) || hasChinese(p.content))
+  ), [items]);
+  const displayedPrompts = filteredPrompts;
+  const hasMore = items.length < total;
+
+  useEffect(() => {
+    if (!loadMoreRef.current || !open || loading || !hasMore) return;
     const observer = new IntersectionObserver(
       (entries) => {
-        if (entries[0].isIntersecting && displayCount < filteredPrompts.length) {
-          setDisplayCount(prev => Math.min(prev + PAGE_SIZE, filteredPrompts.length));
+        if (entries[0]?.isIntersecting && items.length < total) {
+          void loadPage(pageRef.current + 1, false);
         }
       },
-      { rootMargin: '200px' }
+      { rootMargin: '200px' },
     );
-
     observer.observe(loadMoreRef.current);
-
     return () => observer.disconnect();
-  }, [displayCount, filteredPrompts.length, open]);
+  }, [open, loading, hasMore, items.length, total, loadPage]);
 
   const handleSelect = useCallback((prompt: PromptWithKey) => {
     onSelect(prompt.content);
@@ -108,7 +123,7 @@ export const PromptSelectDialog = memo(function PromptSelectDialog({
           <DialogTitle className="flex items-center gap-2">
             提示词库
             <span className="text-sm text-muted-foreground">
-              ({filteredPrompts.length} 条)
+              (共 {total} 条)
             </span>
           </DialogTitle>
         </DialogHeader>

@@ -20,6 +20,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -264,5 +265,35 @@ class ConversationServiceTest {
         when(repository.findByIdAndOwner("c1", OTHER_USER)).thenReturn(Optional.empty());
         assertThatThrownBy(() -> service.listImages(OTHER_USER, "c1"))
                 .isInstanceOfSatisfying(HttpErrorException.class, e -> assertThat(e.getStatusCode()).isEqualTo(404));
+    }
+
+    // ===== T16：清空回收站（级联消息 + ref_count）=====
+
+    @Test
+    void emptyTrashDeletesDeletedConversationsAndMessages() {
+        when(repository.listDeleted(USER_ID)).thenReturn(List.of(
+                row("c1", "deleted", "旧会话"), row("c2", "deleted", "旧会话2")));
+        when(messageRepository.listByConversation(anyString(), anyString(), any(), org.mockito.ArgumentMatchers.anyInt()))
+                .thenReturn(new ConversationMessageRepository.MessagePage(List.of(
+                        new ConversationMessageRepository.MessageRow("m1", "c1", USER_ID.toString(), "assistant",
+                                "text", null, "[\"aaaa\"]", null, null, null, false,
+                                Instant.parse("2026-08-01T00:00:00Z"))), null));
+        when(messageRepository.deleteByConversation("c1", USER_ID)).thenReturn(1);
+        when(messageRepository.deleteByConversation("c2", USER_ID)).thenReturn(0);
+        when(repository.delete(eq("c1"), eq(USER_ID))).thenReturn(1);
+        when(repository.delete(eq("c2"), eq(USER_ID))).thenReturn(1);
+
+        int removed = service.emptyTrash(USER_ID);
+
+        assertThat(removed).isEqualTo(2);
+        verify(assetService, times(2)).adjustRefCounts(USER_ID, List.of("aaaa"), -1);
+        verify(messageRepository, times(2)).deleteByConversation(anyString(), eq(USER_ID));
+        verify(repository, times(2)).delete(anyString(), eq(USER_ID));
+    }
+
+    @Test
+    void emptyTrashWithNoDeletedConversations() {
+        when(repository.listDeleted(USER_ID)).thenReturn(List.of());
+        assertThat(service.emptyTrash(USER_ID)).isZero();
     }
 }

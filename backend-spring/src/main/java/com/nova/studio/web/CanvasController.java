@@ -98,6 +98,14 @@ public class CanvasController {
         return Map.of("ok", true);
     }
 
+    /** T16：清空回收站（硬删全部软删项目）。 */
+    @DeleteMapping("/projects/trash")
+    public Map<String, Object> emptyTrash(@AuthenticationPrincipal AuthUser authUser) {
+        AuthSupport.requireAuth(authUser);
+        int removed = canvasService.emptyTrash(authUser.id());
+        return Map.of("ok", true, "removed", removed);
+    }
+
     /** 画布图片上传（multipart → assets source_kind='canvas'，返回 assetId 供节点引用）。 */
     @PostMapping("/images")
     public ResponseEntity<Map<String, Object>> uploadImage(

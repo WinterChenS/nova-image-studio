@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 import tools.jackson.databind.ObjectMapper;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -49,6 +50,8 @@ class CanvasServiceTest {
         settingsService = mock(SettingsService.class);
         service = new CanvasService(repository, assetService, settingsService, new ObjectMapper());
         when(settingsService.getInt(eq(USER_ID), eq("limit.canvasProjectCap"), eq(100))).thenReturn(100);
+        // T16 (A8)：版本冲突校验开关默认打开
+        when(settingsService.getBoolean(eq(USER_ID), eq("canvas.versionCheckEnabled"), eq(true))).thenReturn(true);
     }
 
     @Test
@@ -145,5 +148,73 @@ class CanvasServiceTest {
         service.saveDocument(USER_ID, "c1", body);
         verify(assetService).adjustRefCounts(USER_ID,
                 java.util.List.of("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"), 1);
+    }
+
+    // ===== T16 (A8)：画布版本冲突校验开关 =====
+
+    @Test
+    void saveDocumentReturns409WhenClientVersionStale() {
+        when(repository.findByIdAndOwner("c1", USER_ID)).thenReturn(Optional.of(row("c1", 5L)));
+        ObjectMapper mapper = new ObjectMapper();
+        var body = mapper.createObjectNode();
+        body.put("version", 3L);
+        body.putArray("nodes").addObject().put("id", "n1");
+        assertThatThrownBy(() -> service.saveDocument(USER_ID, "c1", body))
+                .isInstanceOfSatisfying(HttpErrorException.class, e -> {
+                    assertThat(e.getStatusCode()).isEqualTo(409);
+                    assertThat(e.getCode()).isEqualTo("VERSION_CONFLICT");
+                });
+        verify(repository, never()).saveDocument(any(CanvasProjectEntity.class));
+    }
+
+    @Test
+    void saveDocumentAcceptsWhenClientVersionMatches() {
+        when(repository.findByIdAndOwner("c1", USER_ID)).thenReturn(Optional.of(row("c1", 5L)));
+        ObjectMapper mapper = new ObjectMapper();
+        var body = mapper.createObjectNode();
+        body.put("version", 5L);
+        body.putArray("nodes").addObject().put("id", "n1");
+        service.saveDocument(USER_ID, "c1", body);
+        verify(repository).saveDocument(org.mockito.ArgumentMatchers.argThat(patch ->
+                patch.getVersion() != null && patch.getVersion() == 6L));
+    }
+
+    @Test
+    void saveDocumentSkipsCheckWhenSwitchDisabled() {
+        when(repository.findByIdAndOwner("c1", USER_ID)).thenReturn(Optional.of(row("c1", 9L)));
+        when(settingsService.getBoolean(eq(USER_ID), eq("canvas.versionCheckEnabled"), eq(true))).thenReturn(false);
+        ObjectMapper mapper = new ObjectMapper();
+        var body = mapper.createObjectNode();
+        body.put("version", 1L);
+        body.putArray("nodes").addObject().put("id", "n1");
+        service.saveDocument(USER_ID, "c1", body);
+        verify(repository).saveDocument(org.mockito.ArgumentMatchers.argThat(patch ->
+                patch.getVersion() != null && patch.getVersion() == 10L));
+    }
+
+    // ===== T16：清空回收站 =====
+
+    @Test
+    void emptyTrashDeletesSoftDeletedProjects() {
+        when(repository.listDeleted(USER_ID)).thenReturn(List.of(
+                new CanvasProjectRepository.CanvasRow("c1", USER_ID.toString(), "旧画布",
+                        "[{\"id\":\"n1\",\"metadata\":{\"storageKey\":\"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\"}}]",
+                        "[]", "lines", false, "{\"x\":0,\"y\":0,\"k\":1}", 2L,
+                        Instant.parse("2026-07-01T00:00:00Z"),
+                        Instant.parse("2026-08-01T00:00:00Z"), Instant.parse("2026-08-01T00:00:00Z"))));
+        when(repository.delete("c1", USER_ID)).thenReturn(1);
+
+        int removed = service.emptyTrash(USER_ID);
+
+        assertThat(removed).isEqualTo(1);
+        verify(assetService).adjustRefCounts(USER_ID,
+                java.util.List.of("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"), -1);
+        verify(repository).delete("c1", USER_ID);
+    }
+
+    @Test
+    void emptyTrashWithNoDeletedProjects() {
+        when(repository.listDeleted(USER_ID)).thenReturn(List.of());
+        assertThat(service.emptyTrash(USER_ID)).isZero();
     }
 }

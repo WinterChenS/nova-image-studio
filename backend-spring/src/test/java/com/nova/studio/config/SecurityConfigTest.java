@@ -153,6 +153,36 @@ class SecurityConfigTest {
                 .andExpect(jsonPath("$.username").value(org.hamcrest.Matchers.startsWith("alice_")));
     }
 
+    // ===== WIN-42 QA-P1 销项 — 广场读库鉴权契约（方案 B：读库需登录，前端 authFetch）=====
+    // 真实 HTTP 层（MockMvc 走完整 SecurityFilterChain）：锁定「匿名 401 / 带 Bearer 可达控制器」，
+    // 防止前端裸 fetch 与后端门禁的契约断裂再次逃逸出组件级 mock 测试。
+
+    @Test
+    void promptGalleryReadRequiresAuthAnonymousGetsNodeStyle401() throws Exception {
+        mockMvc.perform(get("/api/nova/prompt-gallery/items"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                .andExpect(jsonPath("$.error").value("请先登录"))
+                .andExpect(jsonPath("$.code").value("UNAUTHORIZED"));
+        mockMvc.perform(get("/api/nova/prompt-gallery/items/" + UUID.randomUUID()))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.code").value("UNAUTHORIZED"));
+    }
+
+    @Test
+    void promptGalleryReachableWithValidToken() throws Exception {
+        String token = registerAndLogin("gallery_" + UUID.randomUUID().toString().substring(0, 6));
+        // 读库列表：穿过鉴权层到达控制器（V7 表存在；空库返回空页）
+        mockMvc.perform(get("/api/nova/prompt-gallery/items").header("Authorization", "Bearer " + token))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.total").value(0));
+        // 详情：不存在 id → 控制器语义 404（非 401/403，证明鉴权通过）
+        mockMvc.perform(get("/api/nova/prompt-gallery/items/" + UUID.randomUUID())
+                        .header("Authorization", "Bearer " + token))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value("NOT_FOUND"));
+    }
+
     @Test
     void csrfDisabledForStatelessJwt() throws Exception {
         String token = registerAndLogin("bob_" + UUID.randomUUID().toString().substring(0, 6));

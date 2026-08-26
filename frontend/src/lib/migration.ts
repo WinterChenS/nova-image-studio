@@ -423,6 +423,138 @@ function dataUrlToBlob(dataUrl: string): Blob | null {
   }
 }
 
+// ===== 本地存量清理（WIN-42 T17，ADR-41：迁移稳定后按功能迁移标记清理）=====
+
+/**
+ * T17 — 本地存量清理：仅当对应功能迁移标记存在时执行（避免误删未迁移数据）。
+ * 清理对象：
+ *   - nova-agent-db（Agent 会话 IndexedDB，agent 标记）
+ *   - nova-image 画布（canvas_app_state + canvas_image_files，canvas 标记）
+ *   - nova-image-db（image blobs，canvas/agent/gif 共享）
+ *   - nova-reverse-db（反推，reverse 标记）
+ *   - nova-gif-active-job（localStorage，gif 标记）
+ *   - LEGACY_SETTING_KEYS_TO_CLEAR（迁移过的 legacy settings，四功能任一已迁移即清）
+ *
+ * 约束（C10）：清理失败不破坏新数据 —— 清理在隔离的 try/catch 中逐项执行，
+ * 失败仅记录并继续，不影响云端数据。
+ */
+export const LEGACY_DATABASES_TO_CLEAR: Array<{ name: string; feature: MigrationFeature }> = [
+  { name: 'nova-agent-db', feature: 'agent' },
+  { name: 'nova-reverse-db', feature: 'reverse' },
+  { name: 'nova-image', feature: 'canvas' },
+  { name: 'nova-image-db', feature: 'canvas' },
+  { name: 'nova-upload-cache', feature: 'agent' },
+];
+
+export interface CleanupResult {
+  cleanedDatabases: string[];
+  clearedSettings: string[];
+  clearedGifJob: boolean;
+}
+
+async function deleteDatabase(name: string): Promise<boolean> {
+  if (typeof indexedDB === 'undefined') return false;
+  return new Promise(resolve => {
+    try {
+      const req = indexedDB.deleteDatabase(name);
+      req.onsuccess = () => resolve(true);
+      req.onerror = () => resolve(false);
+      req.onblocked = () => resolve(false);
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+function clearLegacySettingKeys(anyMigrated: boolean): string[] {
+  if (!anyMigrated || typeof window === 'undefined') return [];
+  const cleared: string[] = [];
+  const keys = [
+    'nova-model-registry',
+    'nova-t2i-settings',
+    'nova-i2i-settings',
+    'nova-reverse-prompt-settings',
+    'nova-agent-params',
+    'nova-agent-web-search',
+    'nova-agent-intent-recognition',
+    'nova-gif-settings',
+  ];
+  for (const key of keys) {
+    try {
+      if (window.localStorage.getItem(key) !== null) {
+        window.localStorage.removeItem(key);
+        cleared.push(key);
+      }
+    } catch {
+      // 忽略单个 key 清理失败
+    }
+  }
+  return cleared;
+}
+
+function clearGifActiveJob(migrated: boolean): boolean {
+  if (!migrated || typeof window === 'undefined') return false;
+  try {
+    if (window.localStorage.getItem('nova-gif-active-job') !== null) {
+      window.localStorage.removeItem('nova-gif-active-job');
+      return true;
+    }
+  } catch {
+    // 忽略
+  }
+  return false;
+}
+
+/**
+ * 执行本地存量清理（T17）：按功能迁移标记逐项清理本地存量。
+ * 清理失败不抛出（尽力而为，不破坏新数据 —— 云端为唯一数据源）。
+ */
+export async function runLegacyCleanup(): Promise<CleanupResult> {
+  if (typeof window === 'undefined') return { cleanedDatabases: [], clearedSettings: [], clearedGifJob: false };
+  const migratedFeatures: MigrationFeature[] = (['agent', 'canvas', 'reverse', 'gif'] as MigrationFeature[])
+    .filter((f) => isFeatureMigrated(f));
+  if (migratedFeatures.length === 0) return { cleanedDatabases: [], clearedSettings: [], clearedGifJob: false };
+
+  const anyMigrated = migratedFeatures.length > 0;
+  const cleanedDatabases: string[] = [];
+  for (const db of LEGACY_DATABASES_TO_CLEAR) {
+    if (!migratedFeatures.includes(db.feature)) continue;
+    try {
+      const ok = await deleteDatabase(db.name);
+      if (ok) cleanedDatabases.push(db.name);
+    } catch {
+      // 清理失败不阻断后续（尽力而为）
+    }
+  }
+  const clearedSettings = clearLegacySettingKeys(anyMigrated);
+  const clearedGifJob = clearGifActiveJob(migratedFeatures.includes('gif'));
+  return { cleanedDatabases, clearedSettings, clearedGifJob };
+}
+
+/** 检测是否有待清理的本地存量（迁移标记已存在 + 本地数据仍在），供 UI 提示。 */
+export function hasLegacyDataToClean(): boolean {
+  if (typeof window === 'undefined') return false;
+  const migrated = (['agent', 'canvas', 'reverse', 'gif'] as MigrationFeature[]).filter((f) => isFeatureMigrated(f));
+  if (migrated.length === 0) return false;
+  const legacyKeys = [
+    'nova-gif-active-job',
+    'nova-model-registry',
+    'nova-t2i-settings',
+    'nova-i2i-settings',
+    'nova-reverse-prompt-settings',
+    'nova-agent-params',
+    'nova-gif-settings',
+  ];
+  try {
+    for (const key of legacyKeys) {
+      if (window.localStorage.getItem(key) !== null) return true;
+    }
+  } catch {
+    // 忽略
+  }
+  return migrated.length > 0;   // IndexedDB 存量无法同步检测，迁移标记存在即提示可清理
+}
+
 // ===== 反推/GIF 存量迁移（WIN-41 T14，AC-5 覆盖四功能）=====
 
 /** 本地是否存在反推存量（nova-reverse-db）。 */
