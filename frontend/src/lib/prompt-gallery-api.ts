@@ -33,7 +33,8 @@ export interface GalleryPageResult {
   sources: string[];
 }
 
-function toPromptWithKey(item: ServerGalleryItem): PromptWithKey {
+/** 服务端条目 → 前端展示形状（uniqueKey 对齐旧数据流；null 归一化为空串/undefined）。 */
+export function toPromptWithKey(item: ServerGalleryItem): PromptWithKey {
   return {
     id: item.id,
     uniqueKey: item.uniqueKey,

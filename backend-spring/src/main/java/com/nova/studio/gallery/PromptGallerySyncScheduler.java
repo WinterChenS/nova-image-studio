@@ -7,10 +7,11 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 /**
- * WIN-42 (T15, ADR-40) — 提示广场每日同步调度：默认每日 03:00
- * （settings {@code gallery.syncCron} 可配，此处经 env {@code NOVA_GALLERY_SYNC_CRON}
- * 覆盖；Spring {@code @Scheduled} 的 cron 表达式需固定，故 cron 走 env/property 而非
- * per-user settings）。失败不影响其他任务（尽力而为 + 状态落 JSON 可查询）。
+ * WIN-42 (T15, ADR-40) — 提示广场每日同步调度：默认每日 03:00。cron 经 Spring 属性
+ * {@code nova.gallery.sync-cron}（env {@code NOVA_GALLERY_SYNC_CRON} 覆盖）配置；
+ * settings 键 {@code gallery.syncCron}（{@link com.nova.studio.settings.SettingsService#KEY_GALLERY_SYNC_CRON}）
+ * 为文档约定保留（@Scheduled 表达式需静态 + settings 为 per-user 存储，P2 分布式调度时启用）。
+ * 失败不影响其他任务（尽力而为 + 状态落 JSON 可查询）。
  */
 @Component
 public class PromptGallerySyncScheduler {

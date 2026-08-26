@@ -68,6 +68,16 @@ public class SettingsService {
     public static final String KEY_GALLERY_SYNC_MANUAL_COOLDOWN_MINUTES = "gallery.syncManualCooldownMinutes";
     public static final int DEFAULT_GALLERY_SYNC_MANUAL_COOLDOWN_MINUTES = 10;
 
+    /**
+     * WIN-42 (T15/T18 核对修复②, ADR-40) — 广场每日同步 cron 配置键声明。
+     * 实际生效路径：Spring 属性 {@code nova.gallery.sync-cron}（env {@code NOVA_GALLERY_SYNC_CRON}
+     * 覆盖），见 {@code PromptGallerySyncScheduler}——Spring {@code @Scheduled} 的 cron
+     * 表达式需启动期静态确定，且 settings 为 per-user 存储、广场同步为全局任务，无读取主体。
+     * 本键为 ARCH F.4 文档约定<b>保留</b>，运行时暂不读取；P2 迁移分布式调度时启用。
+     */
+    public static final String KEY_GALLERY_SYNC_CRON = "gallery.syncCron";
+    public static final String DEFAULT_GALLERY_SYNC_CRON = "0 0 3 * * *";
+
     /** WIN-42 (T16, A8) — 画布版本冲突校验开关（阶段3 打开：409 + 前端提示）。 */
     public static final String KEY_CANVAS_VERSION_CHECK = "canvas.versionCheckEnabled";
     public static final boolean DEFAULT_CANVAS_VERSION_CHECK = true;

@@ -14,28 +14,100 @@ import {
   getPromptSourceLabel,
   type PromptWithKey,
 } from '@/lib/prompt-gallery-data';
-import { fetchAllPromptSources } from '@/lib/prompt-gallery-api';
+// WIN-42 复审修复②：三处 UI 切换服务端 ILIKE/tag 搜索（不再全量拉取 + 客户端过滤）
+import { searchPromptGallery, toPromptWithKey } from '@/lib/prompt-gallery-api';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
-import { seededShuffle } from '@/lib/seeded-shuffle';
 
 const PROMPT_GALLERY_STEP = 20;
 const PROMPT_GALLERY_WIDE_STEP = 30;
+/** 搜索输入防抖（ms），避免逐字符打服务端 */
+const SEARCH_DEBOUNCE_MS = 300;
+
+function hasChinese(text: string): boolean {
+  return /[\u4e00-\u9fa5]/.test(text);
+}
 
 const PromptGallery = memo(function PromptGallery({ wideMode = false }: { wideMode?: boolean }) {
   const pageStep = wideMode ? PROMPT_GALLERY_WIDE_STEP : PROMPT_GALLERY_STEP;
-  const [allPrompts, setAllPrompts] = useState<PromptWithKey[]>([]);
+  // 服务端分页结果（category/q 由服务端过滤；blacklist/中文过滤保留在展示层）
+  const [items, setItems] = useState<PromptWithKey[]>([]);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedQuery, setDebouncedQuery] = useState('');
   const [blacklist, setBlacklist] = useState<string[]>([]);
   const [selectedCategory, setSelectedCategory] = useState(ALL_CATEGORY);
   const [categories, setCategories] = useState<string[]>(DEFAULT_CATEGORIES);
   const [detailPrompt, setDetailPrompt] = useState<PromptWithKey | null>(null);
   const [imagePreview, setImagePreview] = useState<{ prompt: PromptWithKey; initialIndex: number } | null>(null);
   const [imageCache, setImageCache] = useState<Set<string>>(new Set());
-  const [displayCount, setDisplayCount] = useState(pageStep);
   const [showScrollTop, setShowScrollTop] = useState(false);
   const loadMoreRef = useRef<HTMLDivElement>(null);
+  const pageRef = useRef(1);
+  const requestIdRef = useRef(0);
+
+  // 搜索输入防抖 → 触发服务端重新检索
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedQuery(searchQuery.trim()), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
+  const loadPage = useCallback(async (page: number, replace: boolean) => {
+    const requestId = ++requestIdRef.current;
+    if (replace) setLoading(true); else setLoadingMore(true);
+    try {
+      const result = await searchPromptGallery({
+        category: selectedCategory === ALL_CATEGORY ? undefined : selectedCategory,
+        q: debouncedQuery || undefined,
+        page,
+        limit: pageStep,
+      });
+      if (requestId !== requestIdRef.current) return;   // 过期响应丢弃（竞态防护）
+      pageRef.current = page;
+      setTotal(result.total);
+      if (Array.isArray(result.categories) && result.categories.length > 0) {
+        setCategories([ALL_CATEGORY, ...result.categories.filter((c) => c !== ALL_CATEGORY)]);
+      }
+      setItems((prev) => {
+        const mapped = result.items.map(toPromptWithKey);
+        return replace ? mapped : [...prev, ...mapped];
+      });
+      setError(null);
+    } catch (err) {
+      if (requestId === requestIdRef.current) {
+        setError(err instanceof Error ? err.message : '提示词广场加载失败');
+      }
+    } finally {
+      if (requestId === requestIdRef.current) {
+        setLoading(false);
+        setLoadingMore(false);
+      }
+    }
+  }, [selectedCategory, debouncedQuery, pageStep]);
+
+  // 分类/搜索条件变化 → 重置回第 1 页（服务端检索）
+  useEffect(() => {
+    void loadPage(1, true);
+  }, [loadPage]);
+
+  const hasMore = items.length < total;
+
+  // 无限加载：触底拉取下一页（服务端分页）
+  useEffect(() => {
+    if (!loadMoreRef.current || loading || loadingMore || error) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting && items.length < total) {
+          void loadPage(pageRef.current + 1, false);
+        }
+      },
+      { rootMargin: '400px' },
+    );
+    observer.observe(loadMoreRef.current);
+    return () => observer.disconnect();
+  }, [items.length, total, loading, loadingMore, error, loadPage]);
 
   useEffect(() => {
     fetch('/api/nova/blacklist')
@@ -47,17 +119,6 @@ const PromptGallery = memo(function PromptGallery({ wideMode = false }: { wideMo
       })
       .catch(() => {
         setBlacklist([]);
-      });
-
-    fetchAllPromptSources()
-      .then((result) => {
-        setCategories(result.categories);
-        setAllPrompts(result.prompts);
-        setLoading(false);
-      })
-      .catch((err) => {
-        setError(err instanceof Error ? err.message : '提示词广场加载失败');
-        setLoading(false);
       });
   }, []);
 
@@ -78,11 +139,10 @@ const PromptGallery = memo(function PromptGallery({ wideMode = false }: { wideMo
     });
   }, []);
 
-  const baseFilteredPrompts = useMemo(() => {
-    let prompts = allPrompts;
-
-    if (blacklist.length > 0) {
-      prompts = prompts.filter((prompt) => {
+  // 展示层过滤：黑名单关键词 + 仅中文内容（沿用既有行为，不参与服务端检索）
+  const displayedPrompts = useMemo(() => {
+    return items.filter((prompt) => {
+      if (blacklist.length > 0) {
         const contentToCheck = [
           prompt.title.toLowerCase(),
           prompt.content.toLowerCase(),
@@ -90,54 +150,11 @@ const PromptGallery = memo(function PromptGallery({ wideMode = false }: { wideMo
           prompt.notes?.toLowerCase() || '',
           ...prompt.tags.map((tag) => tag.toLowerCase()),
         ].join(' ');
-
-        return !blacklist.some((keyword) => contentToCheck.includes(keyword));
-      });
-    }
-
-    const hasChinese = (text: string) => /[\u4e00-\u9fa5]/.test(text);
-    prompts = prompts.filter((prompt) => hasChinese(prompt.title) || hasChinese(prompt.content));
-
-    if (selectedCategory !== ALL_CATEGORY) {
-      prompts = prompts.filter((prompt) => prompt.category === selectedCategory);
-    }
-
-    if (searchQuery) {
-      const query = searchQuery.toLowerCase();
-      prompts = prompts.filter((prompt) => (
-        prompt.title.toLowerCase().includes(query)
-        || prompt.content.toLowerCase().includes(query)
-        || (prompt.contributor && prompt.contributor.toLowerCase().includes(query))
-      ));
-    }
-
-    return prompts;
-  }, [allPrompts, blacklist, searchQuery, selectedCategory]);
-
-  const filteredPrompts = useMemo(() => {
-    const seed = `${searchQuery}\0${blacklist.join('\0')}\0${baseFilteredPrompts.map((prompt) => prompt.uniqueKey).join('\0')}`;
-    return seededShuffle(baseFilteredPrompts, seed);
-  }, [baseFilteredPrompts, blacklist, searchQuery]);
-
-  useEffect(() => {
-    queueMicrotask(() => setDisplayCount(pageStep));
-  }, [pageStep, searchQuery, selectedCategory]);
-
-  useEffect(() => {
-    if (!loadMoreRef.current) return;
-
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries[0].isIntersecting && displayCount < filteredPrompts.length) {
-          setDisplayCount((prev) => Math.min(prev + pageStep, filteredPrompts.length));
-        }
-      },
-      { rootMargin: '400px' },
-    );
-
-    observer.observe(loadMoreRef.current);
-    return () => observer.disconnect();
-  }, [displayCount, filteredPrompts.length, pageStep]);
+        if (blacklist.some((keyword) => contentToCheck.includes(keyword))) return false;
+      }
+      return hasChinese(prompt.title) || hasChinese(prompt.content);
+    });
+  }, [items, blacklist]);
 
   useEffect(() => {
     const handleScroll = () => {
@@ -146,9 +163,6 @@ const PromptGallery = memo(function PromptGallery({ wideMode = false }: { wideMo
     window.addEventListener('scroll', handleScroll, { passive: true });
     return () => window.removeEventListener('scroll', handleScroll);
   }, []);
-
-  const displayedPrompts = useMemo(() => filteredPrompts.slice(0, displayCount), [displayCount, filteredPrompts]);
-  const hasMore = displayCount < filteredPrompts.length;
 
   if (loading) {
     return (
@@ -197,7 +211,7 @@ const PromptGallery = memo(function PromptGallery({ wideMode = false }: { wideMo
 
         <div className="flex items-center justify-between text-sm">
           <span className="text-muted-foreground">
-            找到 {filteredPrompts.length} 个提示词{displayedPrompts.length < filteredPrompts.length ? ` · 显示 ${displayedPrompts.length} 个` : ''}
+            共 {total} 个提示词 · 已加载 {items.length} 个
           </span>
           <Popover>
             <PopoverTrigger className="flex items-center gap-1 text-muted-foreground transition-colors hover:text-foreground">
@@ -239,11 +253,11 @@ const PromptGallery = memo(function PromptGallery({ wideMode = false }: { wideMo
 
         {hasMore && (
           <div ref={loadMoreRef} className="flex items-center justify-center py-8">
-            <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
+            <Loader2 className={`w-6 h-6 text-muted-foreground ${loadingMore ? 'animate-spin' : ''}`} />
           </div>
         )}
 
-        {filteredPrompts.length === 0 && (
+        {displayedPrompts.length === 0 && (
           <div className="py-12 text-center text-muted-foreground">
             没有找到匹配的提示词
           </div>
