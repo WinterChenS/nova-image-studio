@@ -7,7 +7,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const authState = vi.hoisted(() => ({ loggedIn: true }));
 const canvasApiState = vi.hoisted(() => ({
-  saveCanvasDocument: vi.fn<() => Promise<unknown>>(),
+  saveCanvasDocument: vi.fn<(id: string, input: { version?: number }) => Promise<unknown>>(),
   getCanvasProject: vi.fn<() => Promise<unknown>>(),
 }));
 
@@ -105,5 +105,63 @@ describe('WIN-42 T16 — 画布版本冲突（409 + 前端提示 + 服务端重�
     vi.runAllTimers();
     expect(canvasApiState.saveCanvasDocument).toHaveBeenCalled();
     expect(useCanvasStore.getState().openProject('p1')?.title).toBe('正常改名');
+  });
+
+  // ===== 核对报告 🔴 阻塞项复现：保存成功后必须回写服务端自增的 version =====
+
+  it('单设备连续两次保存携带递增 version（不触发 409 / 不重拉）', async () => {
+    // 服务端语义：PUT 成功 → 返回自增后的版本（3→4→5）
+    canvasApiState.saveCanvasDocument.mockImplementation(async (_id: string, input: { version?: number }) => ({
+      id: _id,
+      version: (input.version ?? 0) + 1,
+    }));
+
+    const renameAndFlush = async (title: string) => {
+      useCanvasStore.getState().renameProject('p1', title);
+      await flushPendingCanvasSave();
+      vi.runAllTimers();
+    };
+
+    await renameAndFlush('第一次改名');   // 携带 version=3，服务端 → 4
+    await renameAndFlush('第二次改名');   // 必须携带 version=4（回写后），服务端 → 5
+
+    const sentVersions = canvasApiState.saveCanvasDocument.mock.calls
+      .map(([, input]) => (input as { version?: number }).version);
+    expect(sentVersions).toEqual([3, 4]);
+    // 本地 version 已回写为服务端最新值
+    expect(useCanvasStore.getState().openProject('p1')?.version).toBe(5);
+    // 未发生冲突：不应派发冲突事件、不应触发兜底重拉
+    expect(canvasApiState.getCanvasProject).not.toHaveBeenCalled();
+  });
+
+  it('importProject 创建成功后回写服务端返回的 version', async () => {
+    const { createCanvasProject } = await import('@/lib/canvas-api');
+    vi.mocked(createCanvasProject).mockResolvedValue({
+      id: 'imp-1',
+      title: '导入画布',
+      nodes: [],
+      connections: [],
+      backgroundMode: 'lines',
+      showImageInfo: false,
+      viewport: { x: 0, y: 0, k: 1 },
+      version: 1,
+      deletedAt: null,
+      createdAt: '2026-08-02T08:00:00.000Z',
+      updatedAt: '2026-08-02T08:00:00.000Z',
+    });
+
+    const id = useCanvasStore.getState().importProject({ title: '导入画布' });
+    await vi.waitFor(() => {
+      expect(useCanvasStore.getState().openProject(id)?.version).toBe(1);
+    });
+    // 后续差异保存应携带服务端确认的 version=1（而非本地旧值）
+    canvasApiState.saveCanvasDocument.mockImplementation(async (_id: string, input: { version?: number }) => ({
+      version: (input.version ?? 0) + 1,
+    }));
+    useCanvasStore.getState().renameProject(id, '导入后改名');
+    await flushPendingCanvasSave();
+    vi.runAllTimers();
+    const firstSaveInput = canvasApiState.saveCanvasDocument.mock.calls[0]?.[1] as { version?: number };
+    expect(firstSaveInput?.version).toBe(1);
   });
 });

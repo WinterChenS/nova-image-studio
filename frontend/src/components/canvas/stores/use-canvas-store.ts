@@ -85,7 +85,7 @@ function toStoreProject(server: ServerCanvasProject): CanvasProject {
 /** 将项目整文档提交到服务端（新建走 create+PUT 幂等；已有走 PUT version 自增）。 */
 async function saveProjectToServer(project: CanvasProject): Promise<void> {
   try {
-    await saveCanvasDocument(project.id, {
+    const saved = await saveCanvasDocument(project.id, {
       title: project.title,
       nodes: project.nodes,
       connections: project.connections,
@@ -95,6 +95,9 @@ async function saveProjectToServer(project: CanvasProject): Promise<void> {
       version: project.version ?? 1,
     });
     lastSavedDocs.set(project.id, projectDocSnapshot(project));
+    // 核对报告 🔴：保存成功后必须回写服务端自增后的 version —— 否则下一次保存
+    // 仍携带过期版本，单设备第二次保存即被误判为 VERSION_CONFLICT。
+    syncServerVersion(project.id, saved);
   } catch (err) {
     // WIN-42 (T16, A8)：画布版本冲突 → 409（其他设备已修改）。前端提示 + 从服务端
     // 拉取最新版本并提示刷新，避免静默覆盖。冲突视为「已提示」，不再写入本地保存快照。
@@ -105,6 +108,20 @@ async function saveProjectToServer(project: CanvasProject): Promise<void> {
     }
     throw err;
   }
+}
+
+/**
+ * 服务端确认后回写本地 version（仅 version 字段，不动内容与 updatedAt；
+ * 本地无该项目或版本未变时不触发状态更新/持久化）。
+ */
+function syncServerVersion(projectId: string, server: ServerCanvasProject | null | undefined): void {
+  const serverVersion = server?.version;
+  if (typeof serverVersion !== "number") return;
+  const current = useCanvasStore.getState().projects.find((p) => p.id === projectId);
+  if (!current || current.version === serverVersion) return;
+  useCanvasStore.setState((state) => ({
+    projects: state.projects.map((p) => (p.id === projectId ? { ...p, version: serverVersion } : p)),
+  }));
 }
 
 /** 409 VERSION_CONFLICT 判定（服务端 HttpErrorException 形状 {error, code}）。 */
@@ -260,7 +277,11 @@ export const useCanvasStore = create<CanvasStore>()(
         set((state) => ({ projects: [project, ...state.projects] }));
         if (isLoggedIn()) {
           void createCanvasProject(project.title, project.id)
-            .then(() => { lastSavedDocs.set(project.id, projectDocSnapshot(project)); })
+            .then((server) => {
+              lastSavedDocs.set(project.id, projectDocSnapshot(project));
+              // 核对报告 🔴 同型修复：导入创建成功后回写服务端 version，避免后续差异保存携带过期版本
+              syncServerVersion(project.id, server);
+            })
             .catch(() => { /* 差异保存兜底 */ });
         }
         return project.id;
