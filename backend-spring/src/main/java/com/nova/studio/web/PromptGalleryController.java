@@ -34,7 +34,9 @@ import java.util.Map;
  *   <li>{@code GET /api/nova/prompt-gallery/categories} — 分类列表（分类栏）。</li>
  * </ul>
  * 管理端点（手动同步 / 同步状态）在 {@link PromptGalleryAdminController}（/api/nova/admin/*，requireAdmin）。
- * 读库接口公开（广场为全局数据）。
+ * 读库端点受全局门禁 {@code anyRequest().authenticated()} 保护（WIN-42 QA-P1 方案 B：
+ * 与 ADR-30 匿名只读边界收口一致；前端经 authFetch 注入 Bearer，匿名不可见广场——
+ * UI 侧 AuthGate 本就登录门禁，匿名放行无产品价值）。
  */
 @RestController
 @RequestMapping("/api/nova/prompt-gallery")

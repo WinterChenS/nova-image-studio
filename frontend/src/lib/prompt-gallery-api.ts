@@ -50,7 +50,7 @@ export function toPromptWithKey(item: ServerGalleryItem): PromptWithKey {
   };
 }
 
-/** 服务端读库搜索（T16：source/category 精确 + q ILIKE + tag 标签）。 */
+/** 服务端读库搜索（T16：source/category 精确 + q ILIKE + tag 标签）。经 authFetch 注入 Bearer（QA-P1）。 */
 export async function searchPromptGallery(params: {
   source?: string;
   category?: string;
@@ -67,20 +67,20 @@ export async function searchPromptGallery(params: {
   if (params.page) search.set('page', String(params.page));
   if (params.limit) search.set('limit', String(params.limit));
   const query = search.toString();
-  const response = await fetch(`/api/nova/prompt-gallery/items${query ? `?${query}` : ''}`, { cache: 'no-store' });
+  const response = await authFetch(`/api/nova/prompt-gallery/items${query ? `?${query}` : ''}`, { cache: 'no-store' });
   if (!response.ok) throw await readApiError(response);
   return (await response.json()) as GalleryPageResult;
 }
 
 export async function fetchPromptGalleryItem(id: string): Promise<ServerGalleryItem> {
-  const response = await fetch(`/api/nova/prompt-gallery/items/${encodeURIComponent(id)}`, { cache: 'no-store' });
+  const response = await authFetch(`/api/nova/prompt-gallery/items/${encodeURIComponent(id)}`, { cache: 'no-store' });
   if (!response.ok) throw await readApiError(response);
   return (await response.json()) as ServerGalleryItem;
 }
 
 /**
  * 兼容既有消费方的全量读库：分页拉取全部入库条目（服务端唯一数据源，无运行时远程 fetch）。
- * 返回形状与旧 fetchAllPromptSources 一致（{prompts, categories}）。
+ * 返回形状与旧 fetchAllPromptSources 一致（{prompts, categories}）。经 authFetch（QA-P1）。
  */
 export async function fetchAllPromptSources(): Promise<{ prompts: PromptWithKey[]; categories: string[] }> {
   const pageSize = 100;
