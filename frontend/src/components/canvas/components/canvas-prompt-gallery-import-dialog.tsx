@@ -1,13 +1,15 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, Check, ExternalLink, Image as ImageIcon, LibraryBig, Loader2, Search, X } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { ALL_CATEGORY, DEFAULT_CATEGORIES, PROMPT_DATA_SOURCES, fetchAllPromptSources, getPromptSourceLabel, type PromptWithKey } from "@/lib/prompt-gallery-data";
+import { ALL_CATEGORY, DEFAULT_CATEGORIES, PROMPT_DATA_SOURCES, getPromptSourceLabel, type PromptWithKey } from "@/lib/prompt-gallery-data";
+// WIN-42 复审修复②：服务端 ILIKE/tag 搜索接线（不再全量拉取 + 客户端过滤）
+import { searchPromptGallery, toPromptWithKey } from "@/lib/prompt-gallery-api";
 import { cn } from "@/lib/utils";
 
 type CanvasPromptGalleryImportDialogProps = {
@@ -18,26 +20,22 @@ type CanvasPromptGalleryImportDialogProps = {
 };
 
 const PAGE_STEP = 40;
+/** 搜索输入防抖（ms） */
+const SEARCH_DEBOUNCE_MS = 300;
 
-let cachedPromptData: { prompts: PromptWithKey[]; categories: string[] } | null = null;
 let cachedBlacklist: string[] | null = null;
 
-async function loadPromptGalleryData() {
-  if (!cachedPromptData) {
-    cachedPromptData = await fetchAllPromptSources();
-  }
-  if (!cachedBlacklist) {
-    cachedBlacklist = await fetchPromptBlacklist();
-  }
-  return { ...cachedPromptData, blacklist: cachedBlacklist };
-}
-
 async function fetchPromptBlacklist(): Promise<string[]> {
+  if (cachedBlacklist) return cachedBlacklist;
   try {
     const response = await fetch("/api/nova/blacklist");
     if (!response.ok) return [];
     const data = await response.json();
-    return Array.isArray(data.keywords) ? data.keywords.map((keyword: string) => keyword.toLowerCase()) : [];
+    const keywords: string[] = Array.isArray(data.keywords)
+      ? data.keywords.map((keyword: string) => keyword.toLowerCase())
+      : [];
+    cachedBlacklist = keywords;
+    return keywords;
   } catch {
     return [];
   }
@@ -59,97 +57,111 @@ function isBlacklisted(prompt: PromptWithKey, blacklist: string[]) {
   return blacklist.some((keyword) => content.includes(keyword));
 }
 
-function matchesPrompt(prompt: PromptWithKey, query: string) {
-  const q = query.trim().toLowerCase();
-  if (!q) return true;
-  return [
-    prompt.title,
-    prompt.content,
-    prompt.contributor || "",
-    prompt.notes || "",
-    prompt.tags.join(" "),
-    prompt.source || "",
-  ].some((value) => value.toLowerCase().includes(q));
-}
-
 export function CanvasPromptGalleryImportDialog({ open, importing, onOpenChange, onConfirm }: CanvasPromptGalleryImportDialogProps) {
-  const [prompts, setPrompts] = useState<PromptWithKey[]>([]);
+  const [items, setItems] = useState<PromptWithKey[]>([]);
+  const [total, setTotal] = useState(0);
   const [categories, setCategories] = useState<string[]>(DEFAULT_CATEGORIES);
   const [blacklist, setBlacklist] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
   const [selectedCategory, setSelectedCategory] = useState(ALL_CATEGORY);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
-  const [displayCount, setDisplayCount] = useState(PAGE_STEP);
   const scrollRef = useRef<HTMLDivElement>(null);
   const loadMoreRef = useRef<HTMLDivElement>(null);
-  const prevOpenRef = useRef(false);
+  const pageRef = useRef(1);
+  const requestIdRef = useRef(0);
 
+  // 搜索输入防抖 → 服务端重新检索
   useEffect(() => {
-    if (!open) {
-      if (prevOpenRef.current) {
-        setQuery("");
-        setSelectedCategory(ALL_CATEGORY);
-        setSelectedKey(null);
-        setDisplayCount(PAGE_STEP);
+    if (!open) return;
+    const timer = setTimeout(() => setDebouncedQuery(query.trim()), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [open, query]);
+
+  const loadPage = useCallback(async (page: number, replace: boolean) => {
+    const requestId = ++requestIdRef.current;
+    setLoading(true);
+    setError(null);
+    try {
+      const [result, keywords] = await Promise.all([
+        searchPromptGallery({
+          category: selectedCategory === ALL_CATEGORY ? undefined : selectedCategory,
+          q: debouncedQuery || undefined,
+          page,
+          limit: PAGE_STEP,
+        }),
+        fetchPromptBlacklist(),
+      ]);
+      if (requestId !== requestIdRef.current) return;
+      pageRef.current = page;
+      setBlacklist(keywords);
+      setTotal(result.total);
+      if (Array.isArray(result.categories) && result.categories.length > 0) {
+        setCategories([ALL_CATEGORY, ...result.categories.filter((c) => c !== ALL_CATEGORY)]);
       }
-      prevOpenRef.current = false;
-      return;
+      setItems((prev) => {
+        const mapped = result.items.map(toPromptWithKey);
+        return replace ? mapped : [...prev, ...mapped];
+      });
+    } catch (err) {
+      if (requestId === requestIdRef.current) {
+        setError(err instanceof Error ? err.message : "提示词广场加载失败");
+      }
+    } finally {
+      if (requestId === requestIdRef.current) setLoading(false);
     }
-    if (!prevOpenRef.current) {
-      prevOpenRef.current = true;
-      setLoading(true);
-      setError(null);
-      void loadPromptGalleryData()
-        .then((data) => {
-          setPrompts(data.prompts);
-          setCategories(data.categories);
-          setBlacklist(data.blacklist);
-        })
-        .catch((err) => {
-          setError(err instanceof Error ? err.message : "提示词广场加载失败");
-        })
-        .finally(() => {
-          setLoading(false);
-        });
-    }
+  }, [selectedCategory, debouncedQuery]);
+
+  // 打开时拉第一页（setTimeout 宏任务，避免 effect 内同步 setState）
+  useEffect(() => {
+    if (!open) return;
+    const timer = setTimeout(() => void loadPage(1, true), 0);
+    return () => clearTimeout(timer);
+  }, [open, loadPage]);
+
+  // 关闭时重置（保留缓存分类/黑名单；延迟到宏任务避免同步 setState）
+  useEffect(() => {
+    if (open) return;
+    const timer = setTimeout(() => {
+      setQuery("");
+      setDebouncedQuery("");
+      setSelectedCategory(ALL_CATEGORY);
+      setSelectedKey(null);
+      setItems([]);
+      setTotal(0);
+      pageRef.current = 1;
+    }, 0);
+    return () => clearTimeout(timer);
   }, [open]);
 
+  // 展示层过滤：黑名单 + 仅中文（沿用既有行为，不参与服务端检索）
   const filteredPrompts = useMemo(() => {
-    return prompts.filter((prompt) => {
+    return items.filter((prompt) => {
       if (isBlacklisted(prompt, blacklist)) return false;
-      if (!hasChinese(prompt.title) && !hasChinese(prompt.content)) return false;
-      if (selectedCategory !== ALL_CATEGORY && prompt.category !== selectedCategory) return false;
-      return matchesPrompt(prompt, query);
+      return hasChinese(prompt.title) || hasChinese(prompt.content);
     });
-  }, [blacklist, prompts, query, selectedCategory]);
+  }, [blacklist, items]);
 
-  const prevFilterKeyRef = useRef(`${query}|${selectedCategory}`);
-  useEffect(() => {
-    const key = `${query}|${selectedCategory}`;
-    if (prevFilterKeyRef.current !== key) {
-      prevFilterKeyRef.current = key;
-      requestAnimationFrame(() => setDisplayCount(PAGE_STEP));
-    }
-  }, [query, selectedCategory]);
+  const hasMore = items.length < total;
 
   useEffect(() => {
-    if (!open || !loadMoreRef.current || !scrollRef.current) return;
+    if (!open || !loadMoreRef.current || !scrollRef.current || loading || !hasMore) return;
     const observer = new IntersectionObserver(
       (entries) => {
-        if (entries[0]?.isIntersecting) {
-          setDisplayCount((count) => Math.min(count + PAGE_STEP, filteredPrompts.length));
+        if (entries[0]?.isIntersecting && items.length < total) {
+          void loadPage(pageRef.current + 1, false);
         }
       },
       { root: scrollRef.current, rootMargin: "360px" },
     );
     observer.observe(loadMoreRef.current);
     return () => observer.disconnect();
-  }, [filteredPrompts.length, open]);
+  }, [filteredPrompts.length, open, loading, hasMore, items.length, total, loadPage]);
 
-  const displayedPrompts = filteredPrompts.slice(0, displayCount);
-  const selectedPrompt = selectedKey ? prompts.find((prompt) => prompt.uniqueKey === selectedKey) || null : null;
+  const displayedPrompts = filteredPrompts;
+  const selectedPrompt = selectedKey ? items.find((prompt) => prompt.uniqueKey === selectedKey) || null : null;
 
   const handleConfirm = () => {
     if (!selectedPrompt || importing) return;
@@ -176,7 +188,7 @@ export function CanvasPromptGalleryImportDialog({ open, importing, onOpenChange,
               type="text"
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="搜索提示词、标题、标签或来源"
+              placeholder="搜索提示词、标题或作者"
               className="h-8 w-full rounded-md border border-input bg-background pr-8 pl-8 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
             />
             {query && (
@@ -246,7 +258,7 @@ export function CanvasPromptGalleryImportDialog({ open, importing, onOpenChange,
                 />
               ))}
             </div>
-            {displayCount < filteredPrompts.length && (
+            {hasMore && (
               <div ref={loadMoreRef} className="flex items-center justify-center py-5 text-muted-foreground">
                 <Loader2 className="h-5 w-5 animate-spin" />
               </div>
@@ -256,7 +268,7 @@ export function CanvasPromptGalleryImportDialog({ open, importing, onOpenChange,
 
         <div className="-mx-4 -mb-4 flex min-h-14 items-center justify-between gap-3 border-t bg-muted/50 px-4 py-3 text-xs">
           <span className="min-w-0 truncate text-muted-foreground">
-            {selectedPrompt ? `将导入：${selectedPrompt.title}` : `找到 ${filteredPrompts.length} 个提示词模板`}
+            {selectedPrompt ? `将导入：${selectedPrompt.title}` : `共 ${total} 个模板 · 已加载 ${items.length} 个`}
           </span>
           <Popover>
             <PopoverTrigger className="inline-flex shrink-0 items-center gap-1 text-muted-foreground transition-colors hover:text-foreground">

@@ -7,6 +7,7 @@ import type { CanvasBackgroundMode } from "../lib/canvas-theme";
 import type { CanvasConnection, CanvasNodeData, ViewportTransform } from "../types";
 import {
   createCanvasProject,
+  getCanvasProject,
   listCanvasProjects,
   patchCanvasProject,
   saveCanvasDocument,
@@ -83,15 +84,75 @@ function toStoreProject(server: ServerCanvasProject): CanvasProject {
 
 /** 将项目整文档提交到服务端（新建走 create+PUT 幂等；已有走 PUT version 自增）。 */
 async function saveProjectToServer(project: CanvasProject): Promise<void> {
-  await saveCanvasDocument(project.id, {
-    title: project.title,
-    nodes: project.nodes,
-    connections: project.connections,
-    viewport: project.viewport,
-    backgroundMode: project.backgroundMode,
-    showImageInfo: project.showImageInfo,
-  });
-  lastSavedDocs.set(project.id, projectDocSnapshot(project));
+  try {
+    const saved = await saveCanvasDocument(project.id, {
+      title: project.title,
+      nodes: project.nodes,
+      connections: project.connections,
+      viewport: project.viewport,
+      backgroundMode: project.backgroundMode,
+      showImageInfo: project.showImageInfo,
+      version: project.version ?? 1,
+    });
+    lastSavedDocs.set(project.id, projectDocSnapshot(project));
+    // 核对报告 🔴：保存成功后必须回写服务端自增后的 version —— 否则下一次保存
+    // 仍携带过期版本，单设备第二次保存即被误判为 VERSION_CONFLICT。
+    syncServerVersion(project.id, saved);
+  } catch (err) {
+    // WIN-42 (T16, A8)：画布版本冲突 → 409（其他设备已修改）。前端提示 + 从服务端
+    // 拉取最新版本并提示刷新，避免静默覆盖。冲突视为「已提示」，不再写入本地保存快照。
+    if (isVersionConflict(err)) {
+      dispatchConflictToast();
+      await refreshProjectFromServer(project.id);
+      return;
+    }
+    throw err;
+  }
+}
+
+/**
+ * 服务端确认后回写本地 version（仅 version 字段，不动内容与 updatedAt；
+ * 本地无该项目或版本未变时不触发状态更新/持久化）。
+ */
+function syncServerVersion(projectId: string, server: ServerCanvasProject | null | undefined): void {
+  const serverVersion = server?.version;
+  if (typeof serverVersion !== "number") return;
+  const current = useCanvasStore.getState().projects.find((p) => p.id === projectId);
+  if (!current || current.version === serverVersion) return;
+  useCanvasStore.setState((state) => ({
+    projects: state.projects.map((p) => (p.id === projectId ? { ...p, version: serverVersion } : p)),
+  }));
+}
+
+/** 409 VERSION_CONFLICT 判定（服务端 HttpErrorException 形状 {error, code}）。 */
+function isVersionConflict(err: unknown): boolean {
+  if (err && typeof err === 'object' && 'code' in err) {
+    return (err as { code?: string }).code === 'VERSION_CONFLICT';
+  }
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.includes('VERSION_CONFLICT') || msg.includes('版本');
+}
+
+/** 冲突后从服务端重拉项目文档，覆盖本地（防止持续用陈旧版本覆盖）。 */
+async function refreshProjectFromServer(projectId: string): Promise<void> {
+  try {
+    const server = await getCanvasProject(projectId);
+    const next = toStoreProject(server);
+    useCanvasStore.setState(state => ({
+      projects: state.projects.map(p => (p.id === projectId ? next : p)),
+    }));
+    lastSavedDocs.set(projectId, projectDocSnapshot(next));
+  } catch {
+    // 重拉失败不阻断（保留本地，等待用户手动刷新）
+  }
+}
+
+/** 全局冲突提示（T16 前端提示；上层 toast 由订阅方监听）。 */
+function dispatchConflictToast(): void {
+  if (typeof window === 'undefined') return;
+  window.dispatchEvent(new CustomEvent('canvas-version-conflict', {
+    detail: { message: '画布已在其他设备被修改，已刷新为服务端最新版本。若继续编辑请谨慎。' },
+  }));
 }
 
 async function persistQueuedCanvasState() {
@@ -216,7 +277,11 @@ export const useCanvasStore = create<CanvasStore>()(
         set((state) => ({ projects: [project, ...state.projects] }));
         if (isLoggedIn()) {
           void createCanvasProject(project.title, project.id)
-            .then(() => { lastSavedDocs.set(project.id, projectDocSnapshot(project)); })
+            .then((server) => {
+              lastSavedDocs.set(project.id, projectDocSnapshot(project));
+              // 核对报告 🔴 同型修复：导入创建成功后回写服务端 version，避免后续差异保存携带过期版本
+              syncServerVersion(project.id, server);
+            })
             .catch(() => { /* 差异保存兜底 */ });
         }
         return project.id;

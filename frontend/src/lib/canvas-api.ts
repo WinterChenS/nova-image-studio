@@ -31,6 +31,7 @@ export interface CanvasProjectSaveInput {
   viewport?: ViewportTransform;
   backgroundMode?: CanvasBackgroundMode;
   showImageInfo?: boolean;
+  version?: number;
 }
 
 export async function listCanvasProjects(includeDeleted = false): Promise<ServerCanvasProject[]> {
@@ -60,7 +61,7 @@ export async function getCanvasProject(id: string): Promise<ServerCanvasProject>
   return (await response.json()) as ServerCanvasProject;
 }
 
-/** 整文档保存（防抖提交；version 自增，A8 阶段1 last-write-wins）。 */
+/** 整文档保存（防抖提交；version 自增，T16 A8：服务端版本冲突返回 409 + 前端提示）。 */
 export async function saveCanvasDocument(id: string, input: CanvasProjectSaveInput): Promise<ServerCanvasProject> {
   const response = await authFetch(`/api/nova/canvas/projects/${encodeURIComponent(id)}`, {
     method: 'PUT',
@@ -89,6 +90,14 @@ export async function softDeleteCanvasProject(id: string): Promise<void> {
 export async function restoreCanvasProject(id: string): Promise<void> {
   const response = await authFetch(`/api/nova/canvas/projects/${encodeURIComponent(id)}/restore`, { method: 'POST' });
   if (!response.ok) throw await readApiError(response);
+}
+
+/** T16：清空回收站（硬删全部软删项目）。返回清空条数。 */
+export async function emptyCanvasTrash(): Promise<number> {
+  const response = await authFetch('/api/nova/canvas/projects/trash', { method: 'DELETE' });
+  if (!response.ok) throw await readApiError(response);
+  const data = (await response.json()) as { removed?: number };
+  return data.removed ?? 0;
 }
 
 /** 画布图片上传（→ assets source_kind='canvas'，返回 assetId 供节点引用）。 */

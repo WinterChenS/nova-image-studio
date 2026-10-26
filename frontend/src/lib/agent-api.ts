@@ -148,6 +148,14 @@ export async function restoreConversation(id: string): Promise<void> {
   if (!response.ok) throw await readApiError(response);
 }
 
+/** T16：清空回收站（硬删全部 status=deleted 会话 + 级联消息/素材）。返回清空条数。 */
+export async function emptyConversationTrash(): Promise<number> {
+  const response = await authFetch('/api/nova/agent/conversations/trash', { method: 'DELETE' });
+  if (!response.ok) throw await readApiError(response);
+  const data = (await response.json()) as { removed?: number };
+  return data.removed ?? 0;
+}
+
 // ===== messages =====
 
 /** 消息分页（默认最近 50 条；before 游标加载更早，FR-1.3 懒加载）。 */
